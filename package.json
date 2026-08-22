@@ -1,0 +1,19 @@
+{
+  "name": "clubtrack-qr-attendance-pg",
+  "version": "1.0.0",
+  "description": "Organization and Club QR Code Attendance System (PostgreSQL)",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "express": "^4.21.0",
+    "express-session": "^1.18.1",
+    "pg": "^8.13.0",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
