@@ -1,58 +1,65 @@
 /**
  * ClubTrack QR Attendance System
- * Complete Organization and Club Management System for High School (PostgreSQL Version)
- * All-in-one app.js with ID Printing, Photo Upload, Delete Member & Separate Portal Links
+ * Organization and Club Management System for High School
+ * Entire backend, database migrations, security, and full frontend SPA template in ONE FILE.
  */
 
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcrypt');
+const pgSession = require('connect-pg-simple')(session);
 const { Pool } = require('pg');
-const QRCode = require('qrcode');
+const bcrypt = require('bcrypt');
 const crypto = require('crypto');
+const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL Connection Pool configuration
+// PostgreSQL Connection Pool Setup
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/clubtrack_db',
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+  connectionString: process.env.DATABASE_URL || process.env.POSTGRES_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Middleware setup
 app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Session Store configuration with PostgreSQL
 app.use(session({
+  store: new pgSession({
+    pool: pool,
+    tableName: 'user_sessions',
+    createTableIfMissing: true
+  }),
   secret: process.env.SESSION_SECRET || 'clubtrack-super-secret-key-2026',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
+  cookie: { maxAge: 24 * 60 * 60 * 1000, secure: process.env.NODE_ENV === 'production' }
 }));
 
-// ==========================================
-// DATABASE INITIALIZATION & MIGRATIONS
-// ==========================================
-async function initDB() {
+// --- DATABASE INITIALIZATION MIGRATIONS ---
+async function initializeDatabase() {
+  const client = await pool.connect();
   try {
-    await pool.query(`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS organization_settings (
         id SERIAL PRIMARY KEY,
-        school_name TEXT DEFAULT 'ABC High School',
-        org_name TEXT DEFAULT 'Supreme Student Council',
-        school_year TEXT DEFAULT '2026–2027',
-        org_description TEXT DEFAULT 'Official student governing body empowering student leadership.',
-        theme_color TEXT DEFAULT '#4f46e5',
-        org_logo TEXT DEFAULT '',
-        id_prefix TEXT DEFAULT 'SSC'
+        school_name VARCHAR(255) DEFAULT 'ABC High School',
+        org_name VARCHAR(255) DEFAULT 'Supreme Student Council',
+        school_year VARCHAR(50) DEFAULT '2026–2027',
+        org_description VARCHAR(500) DEFAULT 'Official student leadership organization.',
+        org_prefix VARCHAR(50) DEFAULT 'SSC',
+        accent_color VARCHAR(50) DEFAULT '#4f46e5',
+        org_logo TEXT DEFAULT ''
       );
 
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('admin', 'scanner', 'member')),
-        name TEXT NOT NULL,
+        username VARCHAR(100) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        role VARCHAR(50) NOT NULL CHECK (role IN ('admin', 'scanner', 'member')),
+        name VARCHAR(255) NOT NULL,
         must_change_password BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -60,31 +67,31 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS members (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        member_id TEXT UNIQUE NOT NULL,
-        first_name TEXT NOT NULL,
-        middle_name TEXT DEFAULT '',
-        last_name TEXT NOT NULL,
-        gender TEXT DEFAULT '',
-        grade_level TEXT NOT NULL,
-        section TEXT NOT NULL,
-        position TEXT DEFAULT 'Member',
-        contact_info TEXT DEFAULT '',
-        email TEXT DEFAULT '',
-        profile_photo TEXT DEFAULT '',
-        temp_pass_plain TEXT DEFAULT '',
-        qr_token TEXT UNIQUE NOT NULL,
-        status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive'))
+        member_id VARCHAR(100) UNIQUE NOT NULL,
+        first_name VARCHAR(100) NOT NULL,
+        middle_name VARCHAR(100),
+        last_name VARCHAR(100) NOT NULL,
+        gender VARCHAR(50),
+        grade_level VARCHAR(50) NOT NULL,
+        section VARCHAR(50) NOT NULL,
+        position VARCHAR(100) DEFAULT 'Member',
+        contact_info VARCHAR(100),
+        email VARCHAR(150),
+        profile_photo TEXT,
+        qr_token VARCHAR(255) UNIQUE NOT NULL,
+        status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS events (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT DEFAULT '',
+        event_name VARCHAR(255) NOT NULL,
+        description TEXT,
         event_date DATE NOT NULL,
-        start_time TEXT NOT NULL,
-        end_time TEXT NOT NULL,
-        late_after TEXT NOT NULL,
-        requirement TEXT DEFAULT 'All Members'
+        start_time TIME NOT NULL,
+        end_time TIME NOT NULL,
+        late_cutoff TIME NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS attendance (
@@ -92,106 +99,135 @@ async function initDB() {
         member_id INTEGER REFERENCES members(id) ON DELETE CASCADE,
         event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
         attendance_date DATE NOT NULL,
-        time_in TEXT DEFAULT NULL,
-        time_out TEXT DEFAULT NULL,
-        status TEXT DEFAULT 'Absent',
-        scan_method TEXT DEFAULT 'QR',
-        notes TEXT DEFAULT ''
+        time_in TIME,
+        time_out TIME,
+        status VARCHAR(50) DEFAULT 'Present' CHECK (status IN ('Present', 'Late', 'Absent')),
+        scan_method VARCHAR(50) DEFAULT 'QR',
+        manual_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS announcements (
         id SERIAL PRIMARY KEY,
-        title TEXT NOT NULL,
+        title VARCHAR(255) NOT NULL,
         message TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        expires_at DATE DEFAULT NULL
+        expiration_date DATE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS scanner_logs (
+        id SERIAL PRIMARY KEY,
+        scanner_user_id INTEGER REFERENCES users(id),
+        event_id INTEGER REFERENCES events(id),
+        scan_type VARCHAR(20) NOT NULL,
+        qr_value TEXT,
+        result_status VARCHAR(50) NOT NULL,
+        message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS audit_logs (
         id SERIAL PRIMARY KEY,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        username TEXT,
-        role TEXT,
-        action TEXT,
-        details TEXT
+        user_id INTEGER REFERENCES users(id),
+        username VARCHAR(100),
+        role VARCHAR(50),
+        action VARCHAR(150) NOT NULL,
+        details TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    const settingsCheck = await pool.query('SELECT COUNT(*) FROM organization_settings');
+    // Ensure default settings row exists
+    const settingsCheck = await client.query('SELECT COUNT(*) FROM organization_settings');
     if (parseInt(settingsCheck.rows[0].count) === 0) {
-      await pool.query(`
-        INSERT INTO organization_settings (school_name, org_name, school_year, org_description, theme_color, id_prefix)
-        VALUES ('ABC High School', 'Supreme Student Council', '2026–2027', 'Official student governing body empowering student leadership.', '#4f46e5', 'SSC')
+      await client.query(`
+        INSERT INTO organization_settings (school_name, org_name, school_year, org_description, org_prefix, accent_color)
+        VALUES ('ABC High School', 'Supreme Student Council', '2026–2027', 'Official student leadership organization.', 'SSC', '#4f46e5');
       `);
     }
 
-    const adminCheck = await pool.query("SELECT COUNT(*) FROM users WHERE role = 'admin'");
-    if (parseInt(adminCheck.rows[0].count) === 0) {
+    // Ensure default Admin user exists
+    const adminCheck = await client.query("SELECT * FROM users WHERE role = 'admin' LIMIT 1");
+    if (adminCheck.rows.length === 0) {
       const hashedAdminPass = await bcrypt.hash('admin123', 10);
-      await pool.query(`
+      await client.query(`
         INSERT INTO users (username, password, role, name, must_change_password)
-        VALUES ('admin', $1, 'admin', 'System Administrator', TRUE)
+        VALUES ('admin', $1, 'admin', 'System Administrator', TRUE);
       `, [hashedAdminPass]);
-      console.log('Default Admin user created (username: admin, password: admin123)');
+      console.log('Default admin account created: username: admin, password: admin123');
     }
-
-    console.log('PostgreSQL database successfully initialized.');
   } catch (err) {
-    console.error('Database initialization error:', err);
+    console.error('Database migration error:', err);
+  } finally {
+    client.release();
   }
 }
-initDB();
 
-async function logAction(req, action, details) {
+// Audit logger helper
+async function logAudit(req, action, details) {
   try {
-    const username = req.session && req.session.user ? req.session.user.username : 'Guest';
+    const userId = req.session && req.session.user ? req.session.user.id : null;
+    const username = req.session && req.session.user ? req.session.user.username : 'guest';
     const role = req.session && req.session.user ? req.session.user.role : 'guest';
     await pool.query(
-      'INSERT INTO audit_logs (username, role, action, details) VALUES ($1, $2, $3, $4)',
-      [username, role, action, details]
+      `INSERT INTO audit_logs (user_id, username, role, action, details) VALUES ($1, $2, $3, $4, $5)`,
+      [userId, username, role, action, details]
     );
-  } catch (err) {
-    console.error('Audit logging failed:', err);
+  } catch (e) {
+    console.error('Audit logging failed:', e);
   }
 }
 
-function isAuthenticated(req, res, next) {
-  if (req.session && req.session.user) return next();
-  res.redirect('/login');
+// --- AUTHENTICATION MIDDLEWARES ---
+function requireAuth(role) {
+  return (req, res, next) => {
+    if (!req.session.user) {
+      if (req.xhr || req.path.startsWith('/api/')) {
+        return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+      }
+      return res.redirect('/login');
+    }
+    if (role && req.session.user.role !== role && req.session.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied for your role.' });
+    }
+    if (req.session.user.must_change_password && req.path !== '/change-password-forced' && !req.path.startsWith('/api/')) {
+      return res.redirect('/change-password-forced');
+    }
+    next();
+  };
 }
 
-function isAdmin(req, res, next) {
-  if (req.session && req.session.user && req.session.user.role === 'admin') return next();
-  res.status(403).send('Access Denied: Administrator privileges required.');
-}
+// --- API ROUTES ---
 
-function isScanner(req, res, next) {
-  if (req.session && req.session.user && (req.session.user.role === 'scanner' || req.session.user.role === 'admin')) return next();
-  res.status(403).send('Access Denied: Scanner privileges required.');
-}
-
-// ==========================================
-// AUTHENTICATION ROUTES
-// ==========================================
-app.get('/login', (req, res) => {
-  res.send(renderLoginPage('admin'));
+// Settings getter/setter
+app.get('/api/settings', async (req, res) => {
+  const result = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+  res.json(result.rows[0] || {});
 });
 
-app.get('/member-login', (req, res) => {
-  res.send(renderLoginPage('member'));
+app.post('/api/settings', requireAuth('admin'), async (req, res) => {
+  const { school_name, org_name, school_year, org_description, org_prefix, accent_color, org_logo } = req.body;
+  await pool.query(`
+    UPDATE organization_settings 
+    SET school_name = $1, org_name = $2, school_year = $3, org_description = $4, org_prefix = $5, accent_color = $6, org_logo = $7
+    WHERE id = (SELECT id FROM organization_settings LIMIT 1)
+  `, [school_name, org_name, school_year, org_description, org_prefix, accent_color, org_logo]);
+  await logAudit(req, 'UPDATE_SETTINGS', 'Updated organization branding and configuration.');
+  res.json({ success: true });
 });
 
-app.post('/login', async (req, res) => {
-  const { username, password, portal_type } = req.body;
+// Login endpoint
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     if (result.rows.length === 0) {
-      return res.send(renderLoginPage(portal_type || 'admin', 'Invalid username or password.'));
+      return res.status(400).json({ error: 'Invalid username or password.' });
     }
     const user = result.rows[0];
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
-      return res.send(renderLoginPage(portal_type || 'admin', 'Invalid username or password.'));
+      return res.status(400).json({ error: 'Invalid username or password.' });
     }
 
     req.session.user = {
@@ -199,1381 +235,1669 @@ app.post('/login', async (req, res) => {
       username: user.username,
       role: user.role,
       name: user.name,
-      mustChangePassword: user.must_change_password
+      must_change_password: user.must_change_password
     };
 
-    await logAction(req, 'LOGIN', `User ${user.username} logged in successfully.`);
+    await logAudit(req, 'USER_LOGIN', `User ${username} logged in successfully as ${user.role}.`);
 
-    if (user.must_change_password) return res.redirect('/force-password-change');
+    let redirectUrl = '/dashboard';
+    if (user.role === 'scanner') redirectUrl = '/scanner';
+    else if (user.role === 'member') redirectUrl = '/member';
 
-    if (user.role === 'admin') res.redirect('/admin');
-    else if (user.role === 'scanner') res.redirect('/scanner');
-    else res.redirect('/member');
+    res.json({ success: true, redirect: redirectUrl, mustChangePassword: user.must_change_password });
   } catch (err) {
-    console.error(err);
-    res.send(renderLoginPage('admin', 'An error occurred during login.'));
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/force-password-change', isAuthenticated, (req, res) => {
-  res.send(renderForcePasswordChangePage());
-});
-
-app.post('/force-password-change', isAuthenticated, async (req, res) => {
-  const { current_password, new_password, confirm_password } = req.body;
-  if (new_password !== confirm_password || new_password.length < 8) {
-    return res.send(renderForcePasswordChangePage('Passwords must match and be at least 8 characters long.'));
-  }
-
-  try {
-    const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.session.user.id]);
-    const user = userRes.rows[0];
-    const match = await bcrypt.compare(current_password, user.password);
-    if (!match) return res.send(renderForcePasswordChangePage('Current temporary password is incorrect.'));
-
-    const hashed = await bcrypt.hash(new_password, 10);
-    await pool.query('UPDATE users SET password = $1, must_change_password = FALSE WHERE id = $2', [hashed, user.id]);
-    await pool.query('UPDATE members SET temp_pass_plain = NULL WHERE user_id = $1', [user.id]);
-    req.session.user.mustChangePassword = false;
-
-    await logAction(req, 'PASSWORD_CHANGE', 'User completed forced temporary password change.');
-    
-    if (user.role === 'admin') res.redirect('/admin');
-    else if (user.role === 'scanner') res.redirect('/scanner');
-    else res.redirect('/member');
-  } catch (err) {
-    console.error(err);
-    res.send(renderForcePasswordChangePage('Database error updating password.'));
-  }
-});
-
+// Logout
 app.get('/logout', (req, res) => {
-  logAction(req, 'LOGOUT', 'User logged out.');
   req.session.destroy(() => {
     res.redirect('/login');
   });
 });
 
-app.get('/', (req, res) => {
-  if (!req.session || !req.session.user) return res.redirect('/login');
-  if (req.session.user.mustChangePassword) return res.redirect('/force-password-change');
-  if (req.session.user.role === 'admin') res.redirect('/admin');
-  else if (req.session.user.role === 'scanner') res.redirect('/scanner');
-  else res.redirect('/member');
+// Forced password change endpoint
+app.post('/api/change-password', requireAuth(), async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!newPassword || newPassword.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+  }
+  try {
+    const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.session.user.id]);
+    const user = userRes.rows[0];
+    const match = await bcrypt.compare(currentPassword, user.password);
+    if (!match) {
+      return res.status(400).json({ error: 'Current password is incorrect.' });
+    }
+    const hashedNew = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password = $1, must_change_password = FALSE WHERE id = $2', [hashedNew, user.id]);
+    req.session.user.must_change_password = false;
+    await logAudit(req, 'PASSWORD_CHANGE', 'User successfully changed their password.');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ==========================================
-// ADMIN PORTAL ROUTES
-// ==========================================
-app.get('/admin', isAuthenticated, isAdmin, async (req, res) => {
-  if (req.session.user.mustChangePassword) return res.redirect('/force-password-change');
-  const tab = req.query.tab || 'dashboard';
-  res.send(await renderAdminPortal(tab, req));
+// --- ADMIN STATS & MEMBERS API ---
+app.get('/api/admin/stats', requireAuth('admin'), async (req, res) => {
+  try {
+    const totalMembers = await pool.query('SELECT COUNT(*) FROM members');
+    const activeMembers = await pool.query("SELECT COUNT(*) FROM members WHERE status = 'active'");
+    const today = new Date().toISOString().split('T')[0];
+    const presentToday = await pool.query('SELECT COUNT(DISTINCT member_id) FROM attendance WHERE attendance_date = $1', [today]);
+    const timeInToday = await pool.query('SELECT COUNT(*) FROM attendance WHERE attendance_date = $1 AND time_in IS NOT NULL', [today]);
+    const timeOutToday = await pool.query('SELECT COUNT(*) FROM attendance WHERE attendance_date = $1 AND time_out IS NOT NULL', [today]);
+    const lateToday = await pool.query("SELECT COUNT(*) FROM attendance WHERE attendance_date = $1 AND status = 'Late'", [today]);
+    const invalidScans = await pool.query("SELECT COUNT(*) FROM scanner_logs WHERE result_status = 'INVALID'");
+
+    res.json({
+      totalMembers: parseInt(totalMembers.rows[0].count),
+      activeMembers: parseInt(activeMembers.rows[0].count),
+      presentToday: parseInt(presentToday.rows[0].count),
+      timeInToday: parseInt(timeInToday.rows[0].count),
+      timeOutToday: parseInt(timeOutToday.rows[0].count),
+      lateToday: parseInt(lateToday.rows[0].count),
+      invalidScans: parseInt(invalidScans.rows[0].count)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post('/admin/settings', isAuthenticated, isAdmin, async (req, res) => {
-  const { school_name, org_name, school_year, org_description, theme_color, org_logo, id_prefix } = req.body;
-  await pool.query(`
-    UPDATE organization_settings 
-    SET school_name = $1, org_name = $2, school_year = $3, org_description = $4, theme_color = $5, org_logo = $6, id_prefix = $7
-  `, [school_name, org_name, school_year, org_description, theme_color, org_logo, id_prefix]);
-  await logAction(req, 'SETTINGS_UPDATE', 'Organization settings updated.');
-  res.redirect('/admin?tab=settings&success=1');
+// Get all members
+app.get('/api/members', requireAuth('admin'), async (req, res) => {
+  const result = await pool.query('SELECT m.*, u.username FROM members m JOIN users u ON m.user_id = u.id ORDER BY m.last_name ASC');
+  res.json(result.rows);
 });
 
-app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
+// Register member
+app.post('/api/members', requireAuth('admin'), async (req, res) => {
   const { first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo } = req.body;
-  
-  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
-  const settings = settingsRes.rows[0];
-  const prefix = settings.id_prefix || 'SSC';
+  try {
+    // Get organization prefix
+    const settings = await pool.query('SELECT org_prefix FROM organization_settings LIMIT 1');
+    const prefix = settings.rows[0] ? settings.rows[0].org_prefix : 'SSC';
+    const year = new Date().getFullYear();
 
-  const countRes = await pool.query('SELECT COUNT(*) FROM members');
-  const nextNum = parseInt(countRes.rows[0].count) + 1;
-  const memberId = `${prefix}-${settings.school_year.split('–')[0]}-${String(nextNum).padStart(4, '0')}`;
+    // Generate unique Member ID
+    const countRes = await pool.query('SELECT COUNT(*) FROM members');
+    const seqNum = parseInt(countRes.rows[0].count) + 1;
+    const member_id = `${prefix}-${year}-${String(seqNum).padStart(4, '0')}`;
 
-  let baseUsername = (first_name + last_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-  let username = baseUsername;
-  let suffix = 1;
-  while (true) {
-    const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
-    if (userCheck.rows.length === 0) break;
-    username = `${baseUsername}${suffix++}`;
+    // Generate unique username
+    let baseUsername = (first_name + last_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    let username = baseUsername;
+    let uCheck = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+    let counter = 1;
+    while (uCheck.rows.length > 0) {
+      counter++;
+      username = `${baseUsername}${counter}`;
+      uCheck = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+    }
+
+    // Generate temporary password (random 8 chars)
+    const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+    // Create user account
+    const userResult = await pool.query(
+      `INSERT INTO users (username, password, role, name, must_change_password) VALUES ($1, $2, 'member', $3, TRUE) RETURNING id`,
+      [username, hashedPassword, `${first_name} ${last_name}`]
+    );
+    const userId = userResult.rows[0].id;
+
+    // Create unique secure token for QR code
+    const qr_token = `CLUBTRACK:MEMBER:${crypto.randomUUID()}`;
+
+    const memberResult = await pool.query(`
+      INSERT INTO members (user_id, member_id, first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo, qr_token)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *
+    `, [userId, member_id, first_name, middle_name || '', last_name, gender, grade_level, section, position || 'Member', contact_info, email, profile_photo, qr_token]);
+
+    await logAudit(req, 'REGISTER_MEMBER', `Registered member ${first_name} ${last_name} (${member_id}).`);
+
+    res.json({
+      success: true,
+      member: memberResult.rows[0],
+      credentials: {
+        username,
+        tempPassword,
+        member_id
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const tempPasswordRaw = crypto.randomBytes(4).toString('hex').toUpperCase();
-  const hashedPassword = await bcrypt.hash(tempPasswordRaw, 10);
-  const fullName = `${first_name} ${middle_name ? middle_name + ' ' : ''}${last_name}`;
-
-  const userResult = await pool.query(`
-    INSERT INTO users (username, password, role, name, must_change_password)
-    VALUES ($1, $2, 'member', $3, TRUE) RETURNING id
-  `, [username, hashedPassword, fullName]);
-  const userId = userResult.rows[0].id;
-
-  const qrToken = `CLUBTRACK:MEMBER:` + crypto.randomUUID();
-
-  await pool.query(`
-    INSERT INTO members (user_id, member_id, first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo, temp_pass_plain, qr_token, status)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'active')
-  `, [userId, memberId, first_name, middle_name || '', last_name, gender, grade_level, section, position, contact_info, email, profile_photo || '', tempPasswordRaw, qrToken]);
-
-  await logAction(req, 'MEMBER_REGISTER', `Registered member ${fullName} (${memberId})`);
-  res.redirect(`/admin?tab=members&new_id=${memberId}&temp_pass=${tempPasswordRaw}&new_user=${username}`);
 });
 
-app.post('/admin/members/delete/:id', isAuthenticated, isAdmin, async (req, res) => {
-  const memberId = req.params.id;
-  const memRes = await pool.query('SELECT user_id, member_id FROM members WHERE id = $1', [memberId]);
-  if (memRes.rows.length > 0) {
+// Delete member
+app.delete('/api/members/:id', requireAuth('admin'), async (req, res) => {
+  try {
+    const memberId = req.params.id;
+    const memRes = await pool.query('SELECT user_id, first_name, last_name FROM members WHERE id = $1', [memberId]);
+    if (memRes.rows.length === 0) return res.status(404).json({ error: 'Member not found.' });
     const userId = memRes.rows[0].user_id;
-    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
-    await logAction(req, 'MEMBER_DELETE', `Deleted member ID ${memRes.rows[0].member_id}`);
+
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]); // Cascades to members & attendance
+    await logAudit(req, 'DELETE_MEMBER', `Deleted member ${memRes.rows[0].first_name} ${memRes.rows[0].last_name}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.redirect('/admin?tab=members');
 });
 
-app.post('/admin/members/toggle-status/:id', isAuthenticated, isAdmin, async (req, res) => {
-  const memberId = req.params.id;
-  const memRes = await pool.query('SELECT status, member_id FROM members WHERE id = $1', [memberId]);
-  if (memRes.rows.length > 0) {
-    const newStatus = memRes.rows[0].status === 'active' ? 'inactive' : 'active';
-    await pool.query('UPDATE members SET status = $1 WHERE id = $2', [newStatus, memberId]);
-    await logAction(req, 'MEMBER_STATUS', `Changed status of member ID ${memRes.rows[0].member_id} to ${newStatus}`);
-  }
-  res.redirect('/admin?tab=members');
-});
+// Reset member password
+app.post('/api/members/:id/reset-password', requireAuth('admin'), async (req, res) => {
+  try {
+    const memberId = req.params.id;
+    const memRes = await pool.query('SELECT user_id, first_name, last_name FROM members WHERE id = $1', [memberId]);
+    if (memRes.rows.length === 0) return res.status(404).json({ error: 'Member not found.' });
+    const userId = memRes.rows[0].user_id;
 
-app.post('/admin/members/reset-password/:id', isAuthenticated, isAdmin, async (req, res) => {
-  const memberId = req.params.id;
-  const memRes = await pool.query('SELECT user_id, member_id FROM members WHERE id = $1', [memberId]);
-  if (memRes.rows.length > 0) {
-    const member = memRes.rows[0];
     const newTempPass = crypto.randomBytes(4).toString('hex').toUpperCase();
     const hashed = await bcrypt.hash(newTempPass, 10);
-    await pool.query('UPDATE users SET password = $1, must_change_password = TRUE WHERE id = $2', [hashed, member.user_id]);
-    await pool.query('UPDATE members SET temp_pass_plain = $1 WHERE id = $2', [newTempPass, memberId]);
-    await logAction(req, 'PASSWORD_RESET', `Reset temporary password for member ID ${member.member_id}`);
-    return res.redirect(`/admin?tab=members&reset_pass=${newTempPass}&reset_member=${member.member_id}`);
+
+    await pool.query('UPDATE users SET password = $1, must_change_password = TRUE WHERE id = $2', [hashed, userId]);
+    await logAudit(req, 'RESET_PASSWORD', `Reset password for member ${memRes.rows[0].first_name} ${memRes.rows[0].last_name}`);
+    res.json({ success: true, tempPassword: newTempPass });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.redirect('/admin?tab=members');
 });
 
-app.post('/admin/events/add', isAuthenticated, isAdmin, async (req, res) => {
-  const { name, description, event_date, start_time, end_time, late_after, requirement } = req.body;
-  await pool.query(`
-    INSERT INTO events (name, description, event_date, start_time, end_time, late_after, requirement)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-  `, [name, description, event_date, start_time, end_time, late_after, requirement]);
-  await logAction(req, 'EVENT_CREATE', `Created attendance event: ${name}`);
-  res.redirect('/admin?tab=events');
+// --- EVENTS API ---
+app.get('/api/events', requireAuth(), async (req, res) => {
+  const result = await pool.query('SELECT * FROM events ORDER BY event_date DESC, start_time DESC');
+  res.json(result.rows);
 });
 
-app.post('/admin/events/delete/:id', isAuthenticated, isAdmin, async (req, res) => {
-  await pool.query('DELETE FROM events WHERE id = $1', [req.params.id]);
-  await logAction(req, 'EVENT_DELETE', `Deleted event ID ${req.params.id}`);
-  res.redirect('/admin?tab=events');
-});
-
-app.post('/admin/announcements/add', isAuthenticated, isAdmin, async (req, res) => {
-  const { title, message, expires_at } = req.body;
-  await pool.query(`
-    INSERT INTO announcements (title, message, expires_at)
-    VALUES ($1, $2, $3)
-  `, [title, message, expires_at || null]);
-  await logAction(req, 'ANNOUNCEMENT_CREATE', `Published announcement: ${title}`);
-  res.redirect('/admin?tab=announcements');
-});
-
-app.post('/admin/announcements/delete/:id', isAuthenticated, isAdmin, async (req, res) => {
-  await pool.query('DELETE FROM announcements WHERE id = $1', [req.params.id]);
-  await logAction(req, 'ANNOUNCEMENT_DELETE', `Deleted announcement ID ${req.params.id}`);
-  res.redirect('/admin?tab=announcements');
-});
-
-app.post('/admin/scanners/add', isAuthenticated, isAdmin, async (req, res) => {
-  const { name, username, password } = req.body;
-  const hashed = await bcrypt.hash(password, 10);
-  await pool.query(`
-    INSERT INTO users (username, password, role, name, must_change_password)
-    VALUES ($1, $2, 'scanner', $3, FALSE)
-  `, [username, hashed, name]);
-  await logAction(req, 'SCANNER_CREATE', `Created scanner account: ${username}`);
-  res.redirect('/admin?tab=scanners');
-});
-
-app.post('/admin/attendance/manual', isAuthenticated, isAdmin, async (req, res) => {
-  const { member_id, event_id, attendance_date, time_in, time_out, status, reason } = req.body;
-  const existing = await pool.query('SELECT id FROM attendance WHERE member_id = $1 AND event_id = $2 AND attendance_date = $3', [member_id, event_id, attendance_date]);
-  if (existing.rows.length > 0) {
-    await pool.query(`
-      UPDATE attendance SET time_in = COALESCE($1, time_in), time_out = COALESCE($2, time_out), status = $3, scan_method = 'MANUAL', notes = $4
-      WHERE id = $5
-    `, [time_in || null, time_out || null, status, reason, existing.rows[0].id]);
-  } else {
-    await pool.query(`
-      INSERT INTO attendance (member_id, event_id, attendance_date, time_in, time_out, status, scan_method, notes)
-      VALUES ($1, $2, $3, $4, $5, $6, 'MANUAL', $7)
-    `, [member_id, event_id, attendance_date, time_in || null, time_out || null, status, reason]);
+app.post('/api/events', requireAuth('admin'), async (req, res) => {
+  const { event_name, description, event_date, start_time, end_time, late_cutoff } = req.body;
+  try {
+    const result = await pool.query(`
+      INSERT INTO events (event_name, description, event_date, start_time, end_time, late_cutoff)
+      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+    `, [event_name, description, event_date, start_time, end_time, late_cutoff]);
+    await logAudit(req, 'CREATE_EVENT', `Created event: ${event_name} on ${event_date}`);
+    res.json({ success: true, event: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  await logAction(req, 'MANUAL_ATTENDANCE', `Manual attendance update for member ID ${member_id}`);
-  res.redirect('/admin?tab=attendance');
 });
 
-// ==========================================
-// MEMBER PORTAL ROUTES
-// ==========================================
-app.get('/member', isAuthenticated, async (req, res) => {
-  if (req.session.user.mustChangePassword) return res.redirect('/force-password-change');
-  if (req.session.user.role !== 'member') return res.redirect('/');
-
-  const memberRes = await pool.query('SELECT m.*, u.username FROM members m JOIN users u ON m.user_id = u.id WHERE m.user_id = $1', [req.session.user.id]);
-  if (memberRes.rows.length === 0) return res.status(404).send('Member profile not found.');
-  const member = memberRes.rows[0];
-
-  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
-  const settings = settingsRes.rows[0];
-
-  const qrDataUrl = await QRCode.toDataURL(member.qr_token, { errorCorrectionLevel: 'H', width: 300 });
-  const announcementsRes = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5');
-  const attendanceRes = await pool.query(`
-    SELECT a.*, e.name as event_name FROM attendance a
-    JOIN events e ON a.event_id = e.id
-    WHERE a.member_id = $1 ORDER BY a.attendance_date DESC
-  `, [member.id]);
-
-  res.send(renderMemberPortal(member, settings, qrDataUrl, announcementsRes.rows, attendanceRes.rows));
-});
-
-// ==========================================
-// SCANNER PORTAL ROUTES
-// ==========================================
-app.get('/scanner', isAuthenticated, isScanner, async (req, res) => {
-  if (req.session.user.mustChangePassword) return res.redirect('/force-password-change');
-  const eventsRes = await pool.query('SELECT * FROM events ORDER BY event_date DESC');
-  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
-  res.send(renderScannerPortal(eventsRes.rows, settingsRes.rows[0], req.session.user));
-});
-
-app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
-  const { qr_token, event_id, scan_type } = req.body;
-  if (!qr_token || !event_id || !scan_type) {
-    return res.json({ success: false, error_type: 'INVALID', message: 'Missing scan parameters.' });
-  }
-
+// --- SCANNER & ATTENDANCE RECORDING ---
+app.post('/api/scan', requireAuth(), async (req, res) => {
+  const { qr_token, event_id, scan_type } = req.body; // scan_type: 'TIME IN' or 'TIME OUT'
+  const scannerUserId = req.session.user.id;
   const today = new Date().toISOString().split('T')[0];
 
   try {
-    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token.trim()]);
-    if (memberRes.rows.length === 0) {
-      await logAction(req, 'INVALID_QR_SCAN', `Unregistered QR scanned: ${qr_token}`);
-      return res.json({ success: false, error_type: 'UNREGISTERED', message: 'QR Code does not belong to a registered member.' });
+    // 1. Validate QR Token format and lookup member
+    const memRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token]);
+    if (memRes.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO scanner_logs (scanner_user_id, event_id, scan_type, qr_value, result_status, message) VALUES ($1, $2, $3, $4, $5, $6)',
+        [scannerUserId, event_id, scan_type, qr_token, 'INVALID', 'QR Code not registered']
+      );
+      return res.status(400).json({ status: 'INVALID', message: 'This QR Code does not belong to a registered member.' });
     }
 
-    const member = memberRes.rows[0];
+    const member = memRes.rows[0];
     if (member.status !== 'active') {
-      return res.json({ success: false, error_type: 'INACTIVE', message: 'Member account is currently inactive.' });
+      return res.status(400).json({ status: 'INACTIVE', message: 'Member account is currently inactive.' });
     }
 
+    // 2. Lookup Event details for Late cutoff
     const eventRes = await pool.query('SELECT * FROM events WHERE id = $1', [event_id]);
     if (eventRes.rows.length === 0) {
-      return res.json({ success: false, error_type: 'INVALID', message: 'Selected event not found.' });
+      return res.status(400).json({ status: 'ERROR', message: 'Selected attendance event not found.' });
     }
     const event = eventRes.rows[0];
 
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const timeHHMM = now.toTimeString().substring(0, 5);
-
+    // 3. Check existing attendance record for today & event
     let attRes = await pool.query('SELECT * FROM attendance WHERE member_id = $1 AND event_id = $2 AND attendance_date = $3', [member.id, event_id, today]);
+    
+    const nowTime = new Date().toTimeString().split(' ')[0]; // HH:MM:SS
 
-    if (scan_type === 'TIME_IN') {
+    if (scan_type === 'TIME IN') {
       if (attRes.rows.length > 0 && attRes.rows[0].time_in) {
         return res.json({
-          success: false,
-          error_type: 'DUPLICATE',
-          message: `${member.first_name} ${member.last_name} already has a Time In record for this event.`,
-          existing_time: attRes.rows[0].time_in,
-          member
+          status: 'DUPLICATE_IN',
+          member,
+          time_in: attRes.rows[0].time_in,
+          message: `${member.first_name} ${member.last_name} already has a Time In record for this event.`
         });
       }
 
-      const status = timeHHMM > event.late_after ? 'Late' : 'Present';
+      // Calculate Present or Late status based on late_cutoff
+      const status = nowTime > event.late_cutoff ? 'Late' : 'Present';
 
       if (attRes.rows.length > 0) {
-        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [timeStr, status, attRes.rows[0].id]);
+        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [nowTime, status, attRes.rows[0].id]);
       } else {
-        await pool.query(`
-          INSERT INTO attendance (member_id, event_id, attendance_date, time_in, status, scan_method)
-          VALUES ($1, $2, $3, $4, $5, 'QR')
-        `, [member.id, event_id, today, timeStr, status]);
+        await pool.query(
+          'INSERT INTO attendance (member_id, event_id, attendance_date, time_in, status, scan_method) VALUES ($1, $2, $3, $4, $5, $6)',
+          [member.id, event_id, today, nowTime, status, 'QR']
+        );
       }
 
-      await logAction(req, 'VALID_SCAN_IN', `Time In recorded for ${member.member_id}`);
-      return res.json({ success: true, scan_type: 'TIME_IN', member, time: timeStr, date: today, status });
-    } 
-    
-    else if (scan_type === 'TIME_OUT') {
+      await pool.query(
+        'INSERT INTO scanner_logs (scanner_user_id, event_id, scan_type, qr_value, result_status, message) VALUES ($1, $2, $3, $4, $5, $6)',
+        [scannerUserId, event_id, scan_type, qr_token, 'SUCCESS', `Time In recorded for ${member.member_id}`]
+      );
+
+      return res.json({ status: 'SUCCESS_IN', member, time_in: nowTime, attendance_status: status });
+
+    } else if (scan_type === 'TIME OUT') {
       if (attRes.rows.length === 0 || !attRes.rows[0].time_in) {
         return res.json({
-          success: false,
-          error_type: 'NO_TIME_IN',
-          message: `${member.first_name} ${member.last_name} has no Time In record for today's event yet.`,
-          member
+          status: 'NO_TIME_IN',
+          member,
+          message: `${member.first_name} ${member.last_name} has no Time In record yet for this event.`
         });
       }
-
       if (attRes.rows[0].time_out) {
         return res.json({
-          success: false,
-          error_type: 'DUPLICATE',
-          message: `${member.first_name} ${member.last_name} already recorded Time Out for this event.`,
-          existing_time: attRes.rows[0].time_out,
-          member
+          status: 'DUPLICATE_OUT',
+          member,
+          time_out: attRes.rows[0].time_out,
+          message: `${member.first_name} ${member.last_name} already timed out for this event.`
         });
       }
 
-      await pool.query('UPDATE attendance SET time_out = $1 WHERE id = $2', [timeStr, attRes.rows[0].id]);
-      await logAction(req, 'VALID_SCAN_OUT', `Time Out recorded for ${member.member_id}`);
-      return res.json({ success: true, scan_type: 'TIME_OUT', member, time: timeStr, date: today });
+      await pool.query('UPDATE attendance SET time_out = $1 WHERE id = $2', [nowTime, attRes.rows[0].id]);
+      await pool.query(
+        'INSERT INTO scanner_logs (scanner_user_id, event_id, scan_type, qr_value, result_status, message) VALUES ($1, $2, $3, $4, $5, $6)',
+        [scannerUserId, event_id, scan_type, qr_token, 'SUCCESS', `Time Out recorded for ${member.member_id}`]
+      );
+
+      return res.json({ status: 'SUCCESS_OUT', member, time_out: nowTime });
     }
 
   } catch (err) {
-    console.error(err);
-    res.json({ success: false, error_type: 'ERROR', message: 'Internal server error processing scan.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ==========================================
-// HTML UI TEMPLATES & GENERATOR FUNCTIONS
-// ==========================================
+// Live Attendance Logs for Admin/Scanner
+app.get('/api/attendance/live', requireAuth(), async (req, res) => {
+  const result = await pool.query(`
+    SELECT a.*, m.first_name, m.last_name, m.member_id, m.grade_level, m.section, e.event_name
+    FROM attendance a
+    JOIN members m ON a.member_id = m.id
+    JOIN events e ON a.event_id = e.id
+    ORDER BY a.created_at DESC LIMIT 50
+  `);
+  res.json(result.rows);
+});
 
-function renderBaseLayout(title, content, themeColor = '#4f46e5') {
+// Member Portal Data endpoint
+app.get('/api/member/profile', requireAuth('member'), async (req, res) => {
+  try {
+    const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.session.user.id]);
+    const memRes = await pool.query('SELECT * FROM members WHERE user_id = $1', [req.session.user.id]);
+    const settings = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+    const announcements = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5');
+
+    const member = memRes.rows[0];
+    const qrDataUrl = await QRCode.toDataURL(member.qr_token);
+
+    // Attendance history for member
+    const attendance = await pool.query(`
+      SELECT a.*, e.event_name FROM attendance a 
+      JOIN events e ON a.event_id = e.id 
+      WHERE a.member_id = $1 ORDER BY a.attendance_date DESC
+    `, [member.id]);
+
+    res.json({
+      user: userRes.rows[0],
+      member,
+      settings: settings.rows[0],
+      qrDataUrl,
+      announcements: announcements.rows,
+      attendance: attendance.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Scanner Management
+app.get('/api/scanners', requireAuth('admin'), async (req, res) => {
+  const result = await pool.query("SELECT id, username, name, created_at FROM users WHERE role = 'scanner'");
+  res.json(result.rows);
+});
+
+app.post('/api/scanners', requireAuth('admin'), async (req, res) => {
+  const { name, username, password } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      "INSERT INTO users (username, password, role, name, must_change_password) VALUES ($1, $2, 'scanner', $3, FALSE) RETURNING id, username, name",
+      [username, hashed, name]
+    );
+    await logAudit(req, 'CREATE_SCANNER', `Created scanner account: ${username}`);
+    res.json({ success: true, scanner: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/scanners/:id', requireAuth('admin'), async (req, res) => {
+  await pool.query("DELETE FROM users WHERE id = $1 AND role = 'scanner'", [req.params.id]);
+  await logAudit(req, 'DELETE_SCANNER', `Deleted scanner account ID ${req.params.id}`);
+  res.json({ success: true });
+});
+
+// Announcements
+app.get('/api/announcements', requireAuth(), async (req, res) => {
+  const result = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC');
+  res.json(result.rows);
+});
+
+app.post('/api/announcements', requireAuth('admin'), async (req, res) => {
+  const { title, message, expiration_date } = req.body;
+  await pool.query('INSERT INTO announcements (title, message, expiration_date) VALUES ($1, $2, $3)', [title, message, expiration_date || null]);
+  await logAudit(req, 'CREATE_ANNOUNCEMENT', `Created announcement: ${title}`);
+  res.json({ success: true });
+});
+
+app.delete('/api/announcements/:id', requireAuth('admin'), async (req, res) => {
+  await pool.query('DELETE FROM announcements WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
+});
+
+// Audit Logs endpoint
+app.get('/api/audit-logs', requireAuth('admin'), async (req, res) => {
+  const result = await pool.query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100');
+  res.json(result.rows);
+});
+
+// --- FRONTEND VIEWS & SINGLE PAGE INTERFACE ---
+
+app.get('/login', (req, res) => {
+  res.send(getLoginPageHtml());
+});
+
+app.get('/change-password-forced', requireAuth(), (req, res) => {
+  res.send(getForcedPasswordPageHtml());
+});
+
+app.get('/scanner', requireAuth(), (req, res) => {
+  if (req.session.user.role === 'member') return res.redirect('/member');
+  res.send(getScannerPortalHtml());
+});
+
+app.get('/member', requireAuth('member'), (req, res) => {
+  res.send(getMemberPortalHtml());
+});
+
+app.get('/dashboard', requireAuth('admin'), (req, res) => {
+  res.send(getAdminDashboardHtml());
+});
+
+app.get('/', (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+  if (req.session.user.role === 'admin') return res.redirect('/dashboard');
+  if (req.session.user.role === 'scanner') return res.redirect('/scanner');
+  return res.redirect('/member');
+});
+
+// --- HTML TEMPLATES GENERATOR FUNCTIONS ---
+
+function getLoginPageHtml() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${title} | ClubTrack QR Attendance</title>
+  <title>Login - ClubTrack QR Attendance System</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <style>
-    :root { --theme-color: ${themeColor}; }
-    .bg-theme { background-color: var(--theme-color); }
-    .text-theme { color: var(--theme-color); }
-    .border-theme { border-color: var(--theme-color); }
-    @media print {
-      body * { visibility: hidden; }
-      #printableIdCard, #printableIdCard * { visibility: visible; }
-      #printableIdCard { position: absolute; left: 0; top: 0; width: 8.5cm; height: 5.4cm; margin: 0; box-shadow: none !important; border: none !important; }
-    }
-  </style>
 </head>
-<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
-  ${content}
+<body class="bg-slate-900 flex items-center justify-center min-h-screen">
+  <div class="bg-slate-800 border border-slate-700 p-8 rounded-2xl shadow-2xl w-full max-w-md">
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-xl text-white text-2xl font-bold mb-4 shadow-lg shadow-indigo-500/30">
+        <i class="fa-solid fa-qrcode"></i>
+      </div>
+      <h1 class="text-2xl font-black text-white tracking-wide">ClubTrack</h1>
+      <p class="text-xs text-indigo-400 font-semibold uppercase tracking-wider mt-1">QR Attendance Management System</p>
+    </div>
+
+    <div id="errorBox" class="hidden mb-4 p-3 bg-rose-500/20 border border-rose-500 text-rose-300 text-sm rounded-lg"></div>
+
+    <form id="loginForm" class="space-y-5">
+      <div>
+        <label class="block text-xs font-semibold uppercase text-slate-400 mb-2">Username</label>
+        <div class="relative">
+          <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400"><i class="fa-solid fa-user"></i></span>
+          <input type="text" id="username" required class="w-full pl-10 pr-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm" placeholder="Enter your username">
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold uppercase text-slate-400 mb-2">Password</label>
+        <div class="relative">
+          <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400"><i class="fa-solid fa-lock"></i></span>
+          <input type="password" id="password" required class="w-full pl-10 pr-12 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm" placeholder="Enter your password">
+          <button type="button" onclick="togglePass()" class="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-white"><i id="eyeIcon" class="fa-solid fa-eye"></i></button>
+        </div>
+      </div>
+
+      <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/30 transition duration-200">Sign In</button>
+    </form>
+
+    <div class="mt-8 text-center text-xs text-slate-500 border-t border-slate-700 pt-4">
+      Default Admin: <span class="text-slate-300 font-mono">admin</span> / <span class="text-slate-300 font-mono">admin123</span>
+    </div>
+  </div>
+
+  <script>
+    function togglePass() {
+      const p = document.getElementById('password');
+      const icon = document.getElementById('eyeIcon');
+      if (p.type === 'password') { p.type = 'text'; icon.className = 'fa-solid fa-eye-slash'; }
+      else { p.type = 'password'; icon.className = 'fa-solid fa-eye'; }
+    }
+
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      const errorBox = document.getElementById('errorBox');
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          window.location.href = data.redirect;
+        } else {
+          errorBox.innerText = data.error || 'Login failed';
+          errorBox.classList.remove('hidden');
+        }
+      } catch (err) {
+        errorBox.innerText = 'Network error occurred.';
+        errorBox.classList.remove('hidden');
+      }
+    });
+  </script>
 </body>
 </html>`;
 }
 
-function renderLoginPage(portalType = 'admin', errorMsg = '') {
-  const isMember = portalType === 'member';
-  return renderBaseLayout(isMember ? 'Member Portal Login' : 'Admin & Scanner Login', `
-    <div class="flex-1 flex items-center justify-center p-4">
-      <div class="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-100">
-        <div class="bg-indigo-600 p-6 text-center text-white bg-theme">
-          <div class="w-16 h-16 bg-white/10 rounded-full flex items-center justify-center mx-auto mb-3 text-2xl">
-            <i class="fa-solid fa-${isMember ? 'id-card' : 'qrcode'}"></i>
-          </div>
-          <h1 class="text-2xl font-bold">ClubTrack QR</h1>
-          <p class="text-indigo-100 text-sm mt-1">${isMember ? 'Member Portal Login' : 'Organization Management System'}</p>
-        </div>
-        <div class="p-8">
-          ${errorMsg ? `<div class="mb-4 p-3 bg-red-50 border-l-4 border-red-500 text-red-700 text-sm rounded">${errorMsg}</div>` : ''}
-          <form action="/login" method="POST" class="space-y-4">
-            <input type="hidden" name="portal_type" value="${portalType}">
-            <div>
-              <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Username</label>
-              <div class="relative">
-                <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400"><i class="fa-solid fa-user"></i></span>
-                <input type="text" name="username" required class="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:border-indigo-500 text-sm" placeholder="Enter username">
-              </div>
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Password</label>
-              <div class="relative">
-                <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400"><i class="fa-solid fa-lock"></i></span>
-                <input type="password" name="password" id="passwordInput" required class="w-full pl-10 pr-10 py-2 border border-slate-200 rounded-lg focus:outline-none focus:border-indigo-500 text-sm" placeholder="Enter password">
-                <button type="button" onclick="togglePass()" class="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"><i class="fa-solid fa-eye" id="eyeIcon"></i></button>
-              </div>
-            </div>
-            <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition duration-200 bg-theme">
-              Sign In to ${isMember ? 'Member Portal' : 'System'}
-            </button>
-          </form>
-          <div class="mt-6 text-center text-xs text-slate-500 space-x-2">
-            ${isMember ? '<a href="/login" class="text-indigo-600 hover:underline font-semibold">Switch to Admin/Scanner Login</a>' : '<a href="/member-login" class="text-indigo-600 hover:underline font-semibold">Switch to Separate Member Portal Login</a>'}
-          </div>
-        </div>
+function getForcedPasswordPageHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security Reminder - Password Change Required</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-900 flex items-center justify-center min-h-screen p-4">
+  <div class="bg-slate-800 border border-slate-700 p-8 rounded-2xl shadow-2xl w-full max-w-lg">
+    <div class="text-center mb-6">
+      <div class="inline-flex items-center justify-center w-16 h-16 bg-amber-500/20 text-amber-400 rounded-2xl text-2xl mb-3 border border-amber-500/40">
+        <i class="fa-solid fa-shield-halved"></i>
+      </div>
+      <h1 class="text-xl font-bold text-white">IMPORTANT SECURITY REMINDER</h1>
+      <p class="text-xs text-amber-400 mt-1 uppercase font-semibold">Temporary Password Change Required</p>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-700 p-4 rounded-xl text-slate-300 text-xs mb-6 space-y-2">
+      <p>Welcome! Your account is currently using a temporary password provided by the Organization Administrator.</p>
+      <p>For your security, you are required to change your password before accessing your Portal. Please create a new private password and do not share it with anyone.</p>
+    </div>
+
+    <div id="errorBox" class="hidden mb-4 p-3 bg-rose-500/20 border border-rose-500 text-rose-300 text-xs rounded-lg"></div>
+
+    <form id="passForm" class="space-y-4">
+      <div>
+        <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Current Temporary Password</label>
+        <input type="password" id="currentPassword" required class="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-indigo-500">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">New Password (Min 8 Characters)</label>
+        <input type="password" id="newPassword" required minlength="8" class="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-indigo-500">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Confirm New Password</label>
+        <input type="password" id="confirmPassword" required minlength="8" class="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-indigo-500">
+      </div>
+      <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition shadow-lg shadow-indigo-600/30">Update Password & Secure Account</button>
+    </form>
+  </div>
+
+  <script>
+    document.getElementById('passForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const currentPassword = document.getElementById('currentPassword').value;
+      const newPassword = document.getElementById('newPassword').value;
+      const confirmPassword = document.getElementById('confirmPassword').value;
+      const errorBox = document.getElementById('errorBox');
+
+      if (newPassword !== confirmPassword) {
+        errorBox.innerText = 'New passwords do not match.';
+        errorBox.classList.remove('hidden');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ currentPassword, newPassword })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          alert('Password successfully changed! Your account is now secured.');
+          window.location.href = '/';
+        } else {
+          errorBox.innerText = data.error || 'Password update failed';
+          errorBox.classList.remove('hidden');
+        }
+      } catch (err) {
+        errorBox.innerText = 'Network error occurred.';
+        errorBox.classList.remove('hidden');
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function getScannerPortalHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scanner Portal - ClubTrack</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://unpkg.com/html5-qrcode"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
+  <!-- Top Navigation -->
+  <header class="bg-slate-900 border-b border-slate-800 px-4 py-3 flex justify-between items-center">
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white"><i class="fa-solid fa-qrcode"></i></div>
+      <div>
+        <h1 class="font-bold text-sm">ClubTrack Scanner</h1>
+        <p class="text-[10px] text-slate-400">Mobile Attendance Terminal</p>
       </div>
     </div>
-    <script>
-      function togglePass() {
-        const input = document.getElementById('passwordInput');
-        const icon = document.getElementById('eyeIcon');
-        if (input.type === 'password') { input.type = 'text'; icon.className = 'fa-solid fa-eye-slash'; }
-        else { input.type = 'password'; icon.className = 'fa-solid fa-eye'; }
-      }
-    </script>
-  `);
-}
+    <div class="flex items-center space-x-3">
+      <button onclick="toggleSound()" id="soundBtn" class="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs font-semibold text-emerald-400"><i class="fa-solid fa-volume-high mr-1"></i> Sound: ON</button>
+      <a href="/logout" class="px-3 py-1.5 bg-rose-600/20 border border-rose-500/40 text-rose-300 rounded-lg text-xs font-semibold"><i class="fa-solid fa-right-from-bracket"></i></a>
+    </div>
+  </header>
 
-function renderForcePasswordChangePage(errorMsg = '') {
-  return renderBaseLayout('Secure Password Change', `
-    <div class="flex-1 flex items-center justify-center p-4">
-      <div class="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-100 p-8">
-        <div class="text-center mb-6">
-          <div class="w-12 h-12 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-3 text-xl">
-            <i class="fa-solid fa-shield-halved"></i>
-          </div>
-          <h2 class="text-xl font-bold text-slate-800">Security Reminder</h2>
-          <p class="text-xs text-slate-500 mt-1">You are logging in with a temporary password. You must change your password before proceeding.</p>
-        </div>
-        ${errorMsg ? `<div class="mb-4 p-3 bg-red-50 border-l-4 border-red-500 text-red-700 text-sm rounded">${errorMsg}</div>` : ''}
-        <form action="/force-password-change" method="POST" class="space-y-4">
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Current Temporary Password</label>
-            <input type="password" name="current_password" required class="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">New Private Password (Min 8 chars)</label>
-            <input type="password" name="new_password" required minlength="8" class="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Confirm New Password</label>
-            <input type="password" name="confirm_password" required minlength="8" class="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm">
-          </div>
-          <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md bg-theme">
-            Update Password & Continue
-          </button>
-        </form>
+  <!-- Main Scanner Content Container -->
+  <main class="flex-1 max-w-lg w-full mx-auto p-4 space-y-4">
+    <!-- Step 1: Select Event -->
+    <div class="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl space-y-3">
+      <label class="block text-xs font-bold uppercase tracking-wider text-indigo-400">1. Select Attendance Event</label>
+      <select id="eventSelect" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500"></select>
+    </div>
+
+    <!-- Step 2: Select Scan Type -->
+    <div class="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl space-y-3">
+      <label class="block text-xs font-bold uppercase tracking-wider text-indigo-400">2. Select Scan Mode</label>
+      <div class="grid grid-cols-2 gap-3">
+        <button onclick="setScanType('TIME IN')" id="btnTimeIn" class="py-4 px-4 rounded-xl border-2 font-black text-sm transition flex flex-col items-center justify-center space-y-1 bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-600/30">
+          <i class="fa-solid fa-arrow-right-to-bracket text-lg"></i>
+          <span>TIME IN</span>
+        </button>
+        <button onclick="setScanType('TIME OUT')" id="btnTimeOut" class="py-4 px-4 rounded-xl border-2 font-black text-sm transition flex flex-col items-center justify-center space-y-1 bg-slate-950 text-slate-400 border-slate-800">
+          <i class="fa-solid fa-arrow-right-from-bracket text-lg"></i>
+          <span>TIME OUT</span>
+        </button>
       </div>
     </div>
-  `);
-}
 
-async function renderAdminPortal(tab, req) {
-  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
-  const settings = settingsRes.rows[0];
-
-  const membersCount = (await pool.query('SELECT COUNT(*) FROM members')).rows[0].count;
-  const activeMembersCount = (await pool.query("SELECT COUNT(*) FROM members WHERE status = 'active'")).rows[0].count;
-  const today = new Date().toISOString().split('T')[0];
-  const presentToday = (await pool.query('SELECT COUNT(*) FROM attendance WHERE attendance_date = $1 AND time_in IS NOT NULL', [today])).rows[0].count;
-  const invalidScansCount = (await pool.query("SELECT COUNT(*) FROM audit_logs WHERE action = 'INVALID_QR_SCAN'")).rows[0].count;
-
-  const membersRaw = (await pool.query('SELECT m.*, u.username FROM members m JOIN users u ON m.user_id = u.id ORDER BY m.last_name ASC')).rows;
-  const members = await Promise.all(membersRaw.map(async m => {
-    const qrDataUrl = await QRCode.toDataURL(m.qr_token, { errorCorrectionLevel: 'H', width: 250 });
-    return { ...m, qrDataUrl };
-  }));
-
-  const events = (await pool.query('SELECT * FROM events ORDER BY event_date DESC')).rows;
-  const announcements = (await pool.query('SELECT * FROM announcements ORDER BY created_at DESC')).rows;
-  const scanners = (await pool.query("SELECT * FROM users WHERE role = 'scanner'")).rows;
-  const logs = (await pool.query('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 50')).rows;
-  const liveAttendance = (await pool.query(`
-    SELECT a.*, m.first_name, m.last_name, m.member_id, m.grade_level, m.section, e.name as event_name 
-    FROM attendance a 
-    JOIN members m ON a.member_id = m.id 
-    JOIN events e ON a.event_id = e.id 
-    ORDER BY a.id DESC LIMIT 20
-  `)).rows;
-
-  const newId = req.query.new_id;
-  const tempPass = req.query.temp_pass;
-  const newUser = req.query.new_user;
-  const resetPass = req.query.reset_pass;
-  const resetMember = req.query.reset_member;
-
-  return renderBaseLayout('Admin Portal', `
-    <div class="flex h-screen overflow-hidden">
-      <!-- Sidebar -->
-      <aside class="w-64 bg-slate-900 text-slate-300 flex flex-col hidden md:flex">
-        <div class="p-5 border-b border-slate-800 flex items-center space-x-3">
-          <div class="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold bg-theme">
-            <i class="fa-solid fa-qrcode"></i>
-          </div>
-          <div>
-            <h2 class="font-bold text-white text-sm">${settings.org_name}</h2>
-            <p class="text-xs text-slate-400">Admin Portal</p>
-          </div>
-        </div>
-        <nav class="flex-1 p-4 space-y-1 overflow-y-auto text-sm">
-          <a href="/admin?tab=dashboard" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'dashboard' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a>
-          <a href="/admin?tab=members" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'members' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-users w-5"></i><span>Members & IDs</span></a>
-          <a href="/admin?tab=attendance" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'attendance' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a>
-          <a href="/admin?tab=events" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'events' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-calendar-days w-5"></i><span>Events</span></a>
-          <a href="/admin?tab=announcements" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'announcements' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a>
-          <a href="/admin?tab=scanners" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'scanners' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-barcode w-5"></i><span>Scanner Accounts</span></a>
-          <a href="/admin?tab=logs" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'logs' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-shield-cat w-5"></i><span>System Logs</span></a>
-          <a href="/admin?tab=settings" class="flex items-center space-x-3 px-3 py-2.5 rounded-lg ${tab === 'settings' ? 'bg-indigo-600 text-white bg-theme' : 'hover:bg-slate-800'}"><i class="fa-solid fa-gears w-5"></i><span>Settings</span></a>
-        </nav>
-        <div class="p-4 border-t border-slate-800">
-          <a href="/logout" class="flex items-center space-x-3 px-3 py-2 rounded-lg text-red-400 hover:bg-slate-800 text-sm"><i class="fa-solid fa-right-from-bracket w-5"></i><span>Sign Out</span></a>
-        </div>
-      </aside>
-
-      <!-- Main Content -->
-      <div class="flex-1 flex flex-col overflow-hidden">
-        <header class="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 shadow-sm">
-          <h1 class="font-bold text-lg text-slate-800 capitalize">${tab.replace('_', ' ')} Management</h1>
-          <div class="flex items-center space-x-4">
-            <a href="/member-login" target="_blank" class="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-lg flex items-center space-x-1"><i class="fa-solid fa-id-card"></i><span>Member Portal Login Link</span></a>
-            <a href="/scanner" target="_blank" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg flex items-center space-x-1"><i class="fa-solid fa-qrcode"></i><span>Scanner Portal</span></a>
-          </div>
-        </header>
-
-        <main class="flex-1 overflow-y-auto p-6 bg-slate-50">
-          ${newId ? `
-            <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-5 text-emerald-900 shadow-sm">
-              <h3 class="font-bold text-emerald-800 text-lg mb-2"><i class="fa-solid fa-circle-check"></i> Member Successfully Registered</h3>
-              <p class="text-sm mb-3">Provide these temporary login credentials securely to the member.</p>
-              <div class="bg-white p-4 rounded-lg border border-emerald-200 grid grid-cols-1 md:grid-cols-3 gap-4 text-sm font-mono">
-                <div><strong>Member ID:</strong> ${newId}</div>
-                <div><strong>Username:</strong> ${newUser}</div>
-                <div><strong>Temp Password:</strong> <span class="bg-amber-100 px-2 py-0.5 rounded text-amber-900">${tempPass}</span></div>
-              </div>
-            </div>
-          ` : ''}
-
-          ${resetPass ? `
-            <div class="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-5 text-amber-900 shadow-sm">
-              <h3 class="font-bold text-amber-800 text-lg mb-2"><i class="fa-solid fa-key"></i> Password Reset Successful</h3>
-              <p class="text-sm mb-2">New temporary password generated for Member ID: <strong>${resetMember}</strong></p>
-              <div class="bg-white p-3 rounded-lg border border-amber-200 font-mono text-base inline-block">
-                New Temp Password: <span class="bg-red-100 px-2 py-0.5 rounded text-red-700">${resetPass}</span>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- TAB: DASHBOARD -->
-          ${tab === 'dashboard' ? `
-            <div class="space-y-6">
-              <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                  <div class="text-xs font-semibold uppercase text-slate-400">Total Members</div>
-                  <div class="text-3xl font-bold text-slate-800 mt-1">${membersCount}</div>
-                </div>
-                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                  <div class="text-xs font-semibold uppercase text-slate-400">Active Members</div>
-                  <div class="text-3xl font-bold text-emerald-600 mt-1">${activeMembersCount}</div>
-                </div>
-                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                  <div class="text-xs font-semibold uppercase text-slate-400">Present Today</div>
-                  <div class="text-3xl font-bold text-indigo-600 mt-1">${presentToday}</div>
-                </div>
-                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                  <div class="text-xs font-semibold uppercase text-slate-400">Invalid Scans Logged</div>
-                  <div class="text-3xl font-bold text-red-600 mt-1">${invalidScansCount}</div>
-                </div>
-              </div>
-
-              <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <div class="px-6 py-4 border-b border-slate-100 font-bold text-slate-800 flex justify-between items-center">
-                  <span>Live Attendance Stream</span>
-                  <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-medium">Real-time</span>
-                </div>
-                <div class="overflow-x-auto">
-                  <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
-                      <tr>
-                        <th class="px-6 py-3">Member</th>
-                        <th class="px-6 py-3">Event</th>
-                        <th class="px-6 py-3">Time In</th>
-                        <th class="px-6 py-3">Time Out</th>
-                        <th class="px-6 py-3">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100">
-                      ${liveAttendance.length === 0 ? `<tr><td colspan="5" class="px-6 py-4 text-center text-slate-400">No attendance records today.</td></tr>` : 
-                        liveAttendance.map(row => `
-                          <tr class="hover:bg-slate-50">
-                            <td class="px-6 py-3 font-medium text-slate-800">${row.first_name} ${row.last_name} <span class="text-xs text-slate-400 block">${row.member_id}</span></td>
-                            <td class="px-6 py-3">${row.event_name}</td>
-                            <td class="px-6 py-3 font-mono text-xs">${row.time_in || '—'}</td>
-                            <td class="px-6 py-3 font-mono text-xs">${row.time_out || '—'}</td>
-                            <td class="px-6 py-3"><span class="px-2.5 py-1 text-xs rounded-full font-medium ${row.status === 'Present' ? 'bg-emerald-100 text-emerald-700' : row.status === 'Late' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${row.status}</span></td>
-                          </tr>
-                        `).join('')}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- TAB: MEMBERS & ID CARDS -->
-          ${tab === 'members' ? `
-            <div class="space-y-6">
-              <div class="flex justify-between items-center">
-                <h2 class="text-xl font-bold text-slate-800">Member Directory & ID Cards</h2>
-                <button onclick="document.getElementById('addMemberModal').classList.remove('hidden')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold shadow bg-theme flex items-center space-x-2">
-                  <i class="fa-solid fa-user-plus"></i><span>Register Member</span>
-                </button>
-              </div>
-
-              <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <table class="w-full text-left text-sm">
-                  <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
-                    <tr>
-                      <th class="px-6 py-3">Member ID</th>
-                      <th class="px-6 py-3">Full Name</th>
-                      <th class="px-6 py-3">Grade & Section</th>
-                      <th class="px-6 py-3">Position</th>
-                      <th class="px-6 py-3">Username</th>
-                      <th class="px-6 py-3">Status</th>
-                      <th class="px-6 py-3 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-slate-100">
-                    ${members.map(m => `
-                      <tr class="hover:bg-slate-50">
-                        <td class="px-6 py-3 font-mono text-xs font-semibold">${m.member_id}</td>
-                        <td class="px-6 py-3 font-medium text-slate-800">${m.first_name} ${m.last_name}</td>
-                        <td class="px-6 py-3">${m.grade_level} - ${m.section}</td>
-                        <td class="px-6 py-3">${m.position}</td>
-                        <td class="px-6 py-3 font-mono text-xs">${m.username}</td>
-                        <td class="px-6 py-3"><span class="px-2.5 py-1 text-xs rounded-full font-medium ${m.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${m.status}</span></td>
-                        <td class="px-6 py-3 text-right space-x-2">
-                          <button onclick="openIdModal('${m.member_id}', '${m.first_name} ${m.last_name}', '${m.grade_level} - ${m.section}', '${m.position}', '${m.username}', '${m.temp_pass_plain || 'Changed / Secured'}', '${m.qrDataUrl}', '${m.profile_photo || ''}')" title="Print/View Standard ID (8.5cm x 5.4cm)" class="text-indigo-600 hover:text-indigo-800"><i class="fa-solid fa-id-card text-base"></i></button>
-                          <form action="/admin/members/reset-password/${m.id}" method="POST" class="inline">
-                            <button type="submit" title="Reset Password" class="text-amber-600 hover:text-amber-800"><i class="fa-solid fa-key"></i></button>
-                          </form>
-                          <form action="/admin/members/toggle-status/${m.id}" method="POST" class="inline">
-                            <button type="submit" title="Toggle Status" class="text-slate-500 hover:text-slate-800"><i class="fa-solid fa-power-off"></i></button>
-                          </form>
-                          <form action="/admin/members/delete/${m.id}" method="POST" class="inline" onsubmit="return confirm('Are you sure you want to delete this member?');">
-                            <button type="submit" title="Delete Member" class="text-red-500 hover:text-red-700"><i class="fa-solid fa-trash"></i></button>
-                          </form>
-                        </td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <!-- Standard ID Card Modal (8.5cm x 5.4cm) -->
-            <div id="idModal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-              <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl text-center">
-                <div class="flex justify-between items-center mb-4">
-                  <h3 class="text-lg font-bold text-slate-800">Official Organization ID Card</h3>
-                  <button onclick="document.getElementById('idModal').classList.add('hidden')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-lg"></i></button>
-                </div>
-                
-                <!-- Printable ID Container (Standard ID Size: 8.5cm x 5.4cm) -->
-                <div id="printableIdCard" style="width: 8.5cm; height: 5.4cm;" class="mx-auto bg-gradient-to-br from-indigo-900 to-slate-900 rounded-xl text-white p-3 flex flex-col justify-between shadow-xl relative overflow-hidden text-left border border-indigo-500/30">
-                  <div class="flex justify-between items-center border-b border-white/10 pb-1">
-                    <div>
-                      <div class="text-[8px] uppercase tracking-wider text-indigo-200 font-bold">${settings.school_name}</div>
-                      <div class="text-[10px] font-ext500 font-bold text-white">${settings.org_name}</div>
-                    </div>
-                    <div class="text-[8px] bg-white/20 px-1.5 py-0.5 rounded font-mono uppercase">${settings.school_year}</div>
-                  </div>
-
-                  <div class="flex items-center space-x-3 my-auto">
-                    <div id="modalPhotoContainer" class="w-14 h-14 rounded-lg bg-slate-800 border-2 border-white/20 overflow-hidden flex items-center justify-center text-xl text-slate-400 flex-shrink-0">
-                      <i class="fa-solid fa-user"></i>
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <h4 id="modalName" class="font-bold text-xs truncate text-white">Full Name</h4>
-                      <p id="modalPosition" class="text-[9px] text-indigo-300 font-medium">Position</p>
-                      <div class="mt-1 space-y-0.5 text-[8px] text-slate-300 font-mono">
-                        <div>ID: <span id="modalMemberId" class="text-white font-bold"></span></div>
-                        <div>Gr/Sec: <span id="modalGradeSec" class="text-white"></span></div>
-                        <div>User: <span id="modalUsername" class="text-white"></span></div>
-                        <div>Temp Pass: <span id="modalTempPass" class="text-amber-300 font-bold"></span></div>
-                      </div>
-                    </div>
-                    <div class="bg-white p-1 rounded bg-white flex-shrink-0">
-                      <img id="modalQrImg" src="" alt="QR Code" style="width: 2.5cm; height: 2.5cm;" class="block">
-                    </div>
-                  </div>
-
-                  <div class="text-[6px] text-center text-indigo-200 uppercase tracking-widest border-t border-white/10 pt-1">
-                    Official Member Identification Card • Non-Transferable
-                  </div>
-                </div>
-
-                <div class="mt-6 flex justify-center space-x-4">
-                  <button onclick="window.print()" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg text-sm shadow bg-theme">
-                    <i class="fa-solid fa-print mr-2"></i> Print ID Card
-                  </button>
-                  <button onclick="document.getElementById('idModal').classList.add('hidden')" class="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold rounded-lg text-sm">
-                    Close
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- Add Member Modal -->
-            <div id="addMemberModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-              <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl">
-                <div class="flex justify-between items-center mb-4">
-                  <h3 class="text-lg font-bold text-slate-800">Register New Organization Member</h3>
-                  <button onclick="document.getElementById('addMemberModal').classList.add('hidden')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-lg"></i></button>
-                </div>
-                <form action="/admin/members/add" method="POST" class="space-y-4">
-                  <div class="grid grid-cols-2 gap-4">
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">First Name</label>
-                      <input type="text" name="first_name" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Last Name</label>
-                      <input type="text" name="last_name" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                  </div>
-                  <div class="grid grid-cols-2 gap-4">
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Grade Level</label>
-                      <input type="text" name="grade_level" placeholder="Grade 10" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Section</label>
-                      <input type="text" name="section" placeholder="Rizal" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                  </div>
-                  <div class="grid grid-cols-2 gap-4">
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Position</label>
-                      <input type="text" name="position" value="Member" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Profile Photo (Image URL or Base64)</label>
-                      <input type="text" name="profile_photo" placeholder="https://..." class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                  </div>
-                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Create Member Account & QR</button>
-                </form>
-              </div>
-            </div>
-
-            <script>
-              function openIdModal(memberId, name, gradeSec, position, username, tempPass, qrUrl, photoUrl) {
-                document.getElementById('modalMemberId').innerText = memberId;
-                document.getElementById('modalName').innerText = name;
-                document.getElementById('modalGradeSec').innerText = gradeSec;
-                document.getElementById('modalPosition').innerText = position;
-                document.getElementById('modalUsername').innerText = username;
-                document.getElementById('modalTempPass').innerText = tempPass;
-                document.getElementById('modalQrImg').src = qrUrl;
-                
-                const photoContainer = document.getElementById('modalPhotoContainer');
-                if (photoUrl && photoUrl.trim() !== '') {
-                  photoContainer.innerHTML = '<img src="' + photoUrl + '" class="w-full h-full object-cover">';
-                } else {
-                  photoContainer.innerHTML = '<i class="fa-solid fa-user"></i>';
-                }
-
-                document.getElementById('idModal').classList.remove('hidden');
-              }
-            </script>
-          ` : ''}
-
-          <!-- TAB: EVENTS -->
-          ${tab === 'events' ? `
-            <div class="space-y-6">
-              <div class="flex justify-between items-center">
-                <h2 class="text-xl font-bold text-slate-800">Attendance Events</h2>
-                <button onclick="document.getElementById('addEventModal').classList.remove('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold shadow bg-theme">Create Event</button>
-              </div>
-              <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                ${events.map(e => `
-                  <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                    <div>
-                      <h3 class="font-bold text-slate-800 text-lg mb-1">${e.name}</h3>
-                      <p class="text-xs text-slate-500 mb-4">${e.description || 'No description provided.'}</p>
-                      <div class="space-y-1 text-xs text-slate-600">
-                        <div><i class="fa-solid fa-calendar w-5 text-indigo-500"></i> ${e.event_date}</div>
-                        <div><i class="fa-solid fa-clock w-5 text-indigo-500"></i> ${e.start_time} - ${e.end_time}</div>
-                        <div><i class="fa-solid fa-triangle-exclamation w-5 text-amber-500"></i> Late after: ${e.late_after}</div>
-                      </div>
-                    </div>
-                    <div class="mt-6 pt-4 border-t border-slate-100 flex justify-end">
-                      <form action="/admin/events/delete/${e.id}" method="POST">
-                        <button type="submit" class="text-red-500 hover:text-red-700 text-xs font-semibold"><i class="fa-solid fa-trash"></i> Delete</button>
-                      </form>
-                    </div>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-
-            <!-- Add Event Modal -->
-            <div id="addEventModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-              <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
-                <h3 class="text-lg font-bold text-slate-800 mb-4">Create Attendance Event</h3>
-                <form action="/admin/events/add" method="POST" class="space-y-4">
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Event Name</label>
-                    <input type="text" name="name" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Description</label>
-                    <textarea name="description" class="w-full px-3 py-2 border rounded-lg text-sm"></textarea>
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Date</label>
-                    <input type="date" name="event_date" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <div class="grid grid-cols-3 gap-2">
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Start</label>
-                      <input type="time" name="start_time" required class="w-full px-2 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">End</label>
-                      <input type="time" name="end_time" required class="w-full px-2 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Late After</label>
-                      <input type="time" name="late_after" required class="w-full px-2 py-2 border rounded-lg text-sm">
-                    </div>
-                  </div>
-                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Save Event</button>
-                </form>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- TAB: ANNOUNCEMENTS -->
-          ${tab === 'announcements' ? `
-            <div class="space-y-6">
-              <div class="flex justify-between items-center">
-                <h2 class="text-xl font-bold text-slate-800">Organization Announcements</h2>
-                <button onclick="document.getElementById('addAnnouncementModal').classList.remove('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold shadow bg-theme">Post Announcement</button>
-              </div>
-              <div class="space-y-4">
-                ${announcements.map(a => `
-                  <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex justify-between items-start">
-                    <div>
-                      <h3 class="font-bold text-slate-800 text-base">${a.title}</h3>
-                      <p class="text-sm text-slate-600 mt-1">${a.message}</p>
-                      <span class="text-xs text-slate-400 mt-3 block">Posted on: ${a.created_at}</span>
-                    </div>
-                    <form action="/admin/announcements/delete/${a.id}" method="POST">
-                      <button type="submit" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash"></i></button>
-                    </form>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-
-            <div id="addAnnouncementModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-              <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
-                <h3 class="text-lg font-bold text-slate-800 mb-4">Post Announcement</h3>
-                <form action="/admin/announcements/add" method="POST" class="space-y-4">
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Title</label>
-                    <input type="text" name="title" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Message</label>
-                    <textarea name="message" rows="4" required class="w-full px-3 py-2 border rounded-lg text-sm"></textarea>
-                  </div>
-                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Publish Announcement</button>
-                </form>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- TAB: SCANNERS -->
-          ${tab === 'scanners' ? `
-            <div class="space-y-6">
-              <div class="flex justify-between items-center">
-                <h2 class="text-xl font-bold text-slate-800">Scanner Accounts</h2>
-                <button onclick="document.getElementById('addScannerModal').classList.remove('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold shadow bg-theme">Create Scanner Account</button>
-              </div>
-              <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <table class="w-full text-left text-sm">
-                  <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
-                    <tr>
-                      <th class="px-6 py-3">Name</th>
-                      <th class="px-6 py-3">Username</th>
-                      <th class="px-6 py-3">Role</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-slate-100">
-                    ${scanners.map(s => `
-                      <tr class="hover:bg-slate-50">
-                        <td class="px-6 py-3 font-medium text-slate-800">${s.name}</td>
-                        <td class="px-6 py-3 font-mono text-xs">${s.username}</td>
-                        <td class="px-6 py-3"><span class="px-2.5 py-1 text-xs bg-indigo-100 text-indigo-700 rounded-full font-medium">Scanner</span></td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div id="addScannerModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-              <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
-                <h3 class="text-lg font-bold text-slate-800 mb-4">Create Scanner Account</h3>
-                <form action="/admin/scanners/add" method="POST" class="space-y-4">
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Full Name / Officer Name</label>
-                    <input type="text" name="name" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Username</label>
-                    <input type="text" name="username" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Password</label>
-                    <input type="password" name="password" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Create Scanner</button>
-                </form>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- TAB: LOGS -->
-          ${tab === 'logs' ? `
-            <div class="space-y-6">
-              <h2 class="text-xl font-bold text-slate-800">System Audit Logs</h2>
-              <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <table class="w-full text-left text-sm">
-                  <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
-                    <tr>
-                      <th class="px-6 py-3">Timestamp</th>
-                      <th class="px-6 py-3">User</th>
-                      <th class="px-6 py-3">Action</th>
-                      <th class="px-6 py-3">Details</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-slate-100 font-mono text-xs">
-                    ${logs.map(l => `
-                      <tr class="hover:bg-slate-50">
-                        <td class="px-6 py-3">${l.timestamp}</td>
-                        <td class="px-6 py-3">${l.username} (${l.role})</td>
-                        <td class="px-6 py-3 text-indigo-600 font-bold">${l.action}</td>
-                        <td class="px-6 py-3 text-slate-600">${l.details}</td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- TAB: SETTINGS -->
-          ${tab === 'settings' ? `
-            <div class="max-w-xl bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-              <h2 class="text-xl font-bold text-slate-800 mb-4">Organization & System Settings</h2>
-              <form action="/admin/settings" method="POST" class="space-y-4">
-                <div>
-                  <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">School Name</label>
-                  <input type="text" name="school_name" value="${settings.school_name}" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                </div>
-                <div>
-                  <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Organization Name</label>
-                  <input type="text" name="org_name" value="${settings.org_name}" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                </div>
-                <div>
-                  <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">School Year</label>
-                  <input type="text" name="school_year" value="${settings.school_year}" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                </div>
-                <div>
-                  <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Member ID Prefix</label>
-                  <input type="text" name="id_prefix" value="${settings.id_prefix}" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                </div>
-                <div>
-                  <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Theme Accent Color</label>
-                  <input type="color" name="theme_color" value="${settings.theme_color || '#4f46e5'}" class="w-full h-10 border rounded-lg px-2 cursor-pointer">
-                </div>
-                <div>
-                  <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Organization Description</label>
-                  <textarea name="org_description" rows="3" class="w-full px-3 py-2 border rounded-lg text-sm">${settings.org_description}</textarea>
-                </div>
-                <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Save Changes</button>
-              </form>
-            </div>
-          ` : ''}
-
-          <!-- TAB: ATTENDANCE MANAGEMENT -->
-          ${tab === 'attendance' ? `
-            <div class="space-y-6">
-              <h2 class="text-xl font-bold text-slate-800">Manual Attendance Override</h2>
-              <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 max-w-xl">
-                <form action="/admin/attendance/manual" method="POST" class="space-y-4">
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Select Member</label>
-                    <select name="member_id" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                      ${members.map(m => `<option value="${m.id}">${m.first_name} ${m.last_name} (${m.member_id})</option>`).join('')}
-                    </select>
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Select Event</label>
-                    <select name="event_id" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                      ${events.map(e => `<option value="${e.id}">${e.name} (${e.event_date})</option>`).join('')}
-                    </select>
-                  </div>
-                  <div class="grid grid-cols-2 gap-4">
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Attendance Date</label>
-                      <input type="date" name="attendance_date" value="${today}" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Status</label>
-                      <select name="status" class="w-full px-3 py-2 border rounded-lg text-sm">
-                        <option value="Present">Present</option>
-                        <option value="Late">Late</option>
-                        <option value="Absent">Absent</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="grid grid-cols-2 gap-4">
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Time In (Optional)</label>
-                      <input type="text" name="time_in" placeholder="08:00 AM" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                    <div>
-                      <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Time Out (Optional)</label>
-                      <input type="text" name="time_out" placeholder="04:00 PM" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    </div>
-                  </div>
-                  <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Reason for Manual Override</label>
-                    <input type="text" name="reason" placeholder="e.g. QR Scanner offline / excused absence" required class="w-full px-3 py-2 border rounded-lg text-sm">
-                  </div>
-                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Submit Manual Record</button>
-                </form>
-              </div>
-            </div>
-          ` : ''}
-
-        </main>
+    <!-- Step 3: Camera Scanner Container -->
+    <div class="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl space-y-3">
+      <div class="flex justify-between items-center">
+        <label class="block text-xs font-bold uppercase tracking-wider text-indigo-400">3. Camera QR Scanner</label>
+        <button onclick="startScanner()" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg shadow"><i class="fa-solid fa-camera mr-1"></i> Start Camera</button>
+      </div>
+      <div id="reader" class="w-full overflow-hidden rounded-xl bg-slate-950 border border-slate-800 min-h-[250px] flex items-center justify-center text-slate-500 text-xs">
+        Camera inactive. Click "Start Camera".
       </div>
     </div>
-  `, settings.theme_color);
-}
 
-function renderMemberPortal(member, settings, qrDataUrl, announcements, attendanceRecords) {
-  return renderBaseLayout('Member Portal', `
-    <div class="min-h-screen bg-slate-100 flex flex-col">
-      <header class="bg-indigo-600 text-white shadow-md bg-theme">
-        <div class="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
-          <div class="flex items-center space-x-3">
-            <div class="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center font-bold">
-              <i class="fa-solid fa-id-card"></i>
-            </div>
-            <div>
-              <h1 class="font-bold text-base">${settings.org_name}</h1>
-              <p class="text-xs text-indigo-100">${settings.school_name}</p>
-            </div>
-          </div>
-          <div class="flex items-center space-x-4">
-            <span class="text-sm font-medium hidden sm:inline">Hello, ${member.first_name}</span>
-            <a href="/logout" class="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-semibold transition"><i class="fa-solid fa-right-from-bracket"></i> Sign Out</a>
-          </div>
-        </div>
-      </header>
-
-      <main class="max-w-5xl mx-auto px-4 py-6 flex-1 w-full grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="space-y-6">
-          <div class="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden text-center p-6 relative">
-            <div class="absolute top-3 right-3">
-              <span class="px-2.5 py-1 text-xs rounded-full font-bold uppercase ${member.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${member.status}</span>
-            </div>
-            <div class="text-xs uppercase font-bold tracking-wider text-slate-400 mb-1">${settings.school_name}</div>
-            <div class="text-base font-bold text-indigo-600 text-theme mb-3">${settings.org_name}</div>
-            
-            <div class="w-24 h-24 bg-slate-100 rounded-full mx-auto mb-4 border-4 border-indigo-50 overflow-hidden flex items-center justify-center text-slate-400 text-3xl">
-              ${member.profile_photo ? `<img src="${member.profile_photo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-user"></i>`}
-            </div>
-            
-            <h2 class="text-xl font-bold text-slate-800">${member.first_name} ${member.middle_name} ${member.last_name}</h2>
-            <p class="text-xs text-slate-500 mb-4 font-medium">${member.position}</p>
-
-            <div class="bg-slate-50 rounded-xl p-3 text-left text-xs space-y-1 mb-4 border border-slate-100">
-              <div class="flex justify-between"><span class="text-slate-400">Member ID:</span> <span class="font-mono font-bold text-slate-700">${member.member_id}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Grade & Section:</span> <span class="font-medium text-slate-700">${member.grade_level} - ${member.section}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Username:</span> <span class="font-mono font-medium text-slate-700">${member.username}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">School Year:</span> <span class="font-medium text-slate-700">${settings.school_year}</span></div>
-            </div>
-
-            <div class="bg-white p-3 border border-slate-200 rounded-xl inline-block shadow-sm">
-              <img src="${qrDataUrl}" alt="Member QR Code" class="w-40 h-40 mx-auto">
-              <p class="text-[10px] text-slate-400 mt-2 font-mono">SCANNER-READY QR</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="md:col-span-2 space-y-6">
-          <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
-            <h3 class="font-bold text-slate-800 text-base mb-4 flex items-center space-x-2">
-              <i class="fa-solid fa-bullhorn text-indigo-600 text-theme"></i><span>Organization Announcements</span>
-            </h3>
-            <div class="space-y-3">
-              ${announcements.length === 0 ? `<p class="text-xs text-slate-400">No announcements posted.</p>` :
-                announcements.map(a => `
-                  <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                    <h4 class="font-bold text-slate-800 text-sm">${a.title}</h4>
-                    <p class="text-xs text-slate-600 mt-1">${a.message}</p>
-                    <span class="text-[10px] text-slate-400 mt-2 block">${a.created_at}</span>
-                  </div>
-                `).join('')}
-            </div>
-          </div>
-
-          <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
-            <h3 class="font-bold text-slate-800 text-base mb-4 flex items-center space-x-2">
-              <i class="fa-solid fa-clipboard-user text-indigo-600 text-theme"></i><span>My Attendance Records</span>
-            </h3>
-            <div class="overflow-x-auto">
-              <table class="w-full text-left text-sm">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
-                  <tr>
-                    <th class="px-4 py-3">Date</th>
-                    <th class="px-4 py-3">Time In</th>
-                    <th class="px-4 py-3">Time Out</th>
-                    <th class="px-4 py-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-slate-100 text-xs">
-                  ${attendanceRecords.length === 0 ? `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400">No attendance recorded yet.</td></tr>` :
-                    attendanceRecords.map(r => `
-                      <tr class="hover:bg-slate-50">
-                        <td class="px-4 py-3 font-medium">${r.attendance_date}</td>
-                        <td class="px-4 py-3 font-mono">${r.time_in || '—'}</td>
-                        <td class="px-4 py-3 font-mono">${r.time_out || '—'}</td>
-                        <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full font-medium ${r.status === 'Present' ? 'bg-emerald-100 text-emerald-700' : r.status === 'Late' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${r.status}</span></td>
-                      </tr>
-                    `).join('')}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </main>
+    <!-- Scan Result Card Popup / Feedback Area -->
+    <div id="scanResultCard" class="hidden p-6 rounded-2xl border text-center space-y-3 shadow-2xl transition duration-300">
+      <div id="resultIcon" class="text-4xl"></div>
+      <h2 id="resultTitle" class="text-xl font-black"></h2>
+      <div id="resultBody" class="text-sm space-y-1"></div>
     </div>
-  `, settings.theme_color);
-}
+  </main>
 
-function renderScannerPortal(events, settings, user) {
-  return renderBaseLayout('QR Scanner Portal', `
-    <div class="min-h-screen bg-slate-900 text-white flex flex-col">
-      <header class="bg-slate-800 border-b border-slate-700 p-4 flex justify-between items-center shadow">
-        <div class="flex items-center space-x-3">
-          <div class="w-9 h-9 bg-indigo-600 rounded-lg flex items-center justify-center font-bold bg-theme">
-            <i class="fa-solid fa-qrcode"></i>
-          </div>
-          <div>
-            <h1 class="font-bold text-sm">ClubTrack QR Scanner</h1>
-            <p class="text-xs text-slate-400">Operator: ${user.name}</p>
-          </div>
-        </div>
-        <div class="flex items-center space-x-3">
-          <button onclick="toggleAudio()" id="audioToggleBtn" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-semibold flex items-center space-x-1.5">
-            <i class="fa-solid fa-volume-high text-emerald-400" id="audioIcon"></i><span id="audioText">Sound: ON</span>
-          </button>
-          <a href="/logout" class="px-3 py-1.5 bg-red-600/20 text-red-400 hover:bg-red-600/30 rounded-lg text-xs font-semibold">Sign Out</a>
-        </div>
-      </header>
+  <script>
+    let currentScanType = 'TIME IN';
+    let soundEnabled = true;
+    let html5QrCode = null;
+    let isProcessing = false;
 
-      <main class="flex-1 max-w-lg w-full mx-auto p-4 flex flex-col space-y-4 justify-center">
-        <div class="bg-slate-800 p-4 rounded-2xl border border-slate-700">
-          <label class="block text-xs font-semibold uppercase text-slate-400 mb-2">1. Select Attendance Event</label>
-          <select id="eventSelect" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
-            ${events.map(e => `<option value="${e.id}">${e.name} (${e.event_date})</option>`).join('')}
-          </select>
-        </div>
+    // Web Audio API Sound Generator
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playBeep(type) {
+      if (!soundEnabled) return;
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
 
-        <div class="grid grid-cols-2 gap-3">
-          <button onclick="setScanType('TIME_IN')" id="btnTimeIn" class="py-4 bg-indigo-600 text-white font-bold rounded-2xl shadow-lg border-2 border-indigo-400 text-base flex flex-col items-center justify-center space-y-1 bg-theme transition">
-            <i class="fa-solid fa-right-to-bracket text-lg"></i>
-            <span>TIME IN</span>
-          </button>
-          <button onclick="setScanType('TIME_OUT')" id="btnTimeOut" class="py-4 bg-slate-800 text-slate-400 font-bold rounded-2xl shadow-lg border-2 border-slate-700 text-base flex flex-col items-center justify-center space-y-1 transition">
-            <i class="fa-solid fa-right-from-bracket text-lg"></i>
-            <span>TIME OUT</span>
-          </button>
-        </div>
+      if (type === 'success') {
+        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.1); // A5
+        gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.3);
+      } else if (type === 'error') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+        osc.frequency.setValueAtTime(100, audioCtx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.4);
+      } else if (type === 'warning') {
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+        osc.frequency.setValueAtTime(250, audioCtx.currentTime + 0.2);
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.35);
+      }
+    }
 
-        <div class="bg-slate-800 rounded-2xl border border-slate-700 p-4 text-center">
-          <div id="reader" class="w-full rounded-xl overflow-hidden mb-4 bg-black min-h-[250px] flex items-center justify-center">
-            <p class="text-xs text-slate-500">Camera preview will appear here when started.</p>
-          </div>
-          <button onclick="startScanner()" id="startCamBtn" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow transition">
-            <i class="fa-solid fa-camera mr-2"></i> Start Camera Scanner
-          </button>
-        </div>
+    function toggleSound() {
+      soundEnabled = !soundEnabled;
+      const btn = document.getElementById('soundBtn');
+      if (soundEnabled) {
+        btn.className = 'px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs font-semibold text-emerald-400';
+        btn.innerHTML = '<i class="fa-solid fa-volume-high mr-1"></i> Sound: ON';
+      } else {
+        btn.className = 'px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs font-semibold text-rose-400';
+        btn.innerHTML = '<i class="fa-solid fa-volume-xmark mr-1"></i> Sound: OFF';
+      }
+    }
 
-        <div id="scanResultModal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-          <div id="resultCard" class="bg-slate-800 border-2 border-emerald-500 rounded-3xl max-w-sm w-full p-6 text-center shadow-2xl">
-            <div id="resultIcon" class="w-16 h-16 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-3 text-3xl">
-              <i class="fa-solid fa-check"></i>
-            </div>
-            <h3 id="resultTitle" class="text-xl font-bold text-white mb-1">QR CODE ACCEPTED</h3>
-            <p id="resultName" class="text-lg font-bold text-emerald-400 mb-1">Juan Dela Cruz</p>
-            <p id="resultDetails" class="text-xs text-slate-400 mb-6 font-mono">Member ID: SSC-2026-0001</p>
-            <button onclick="closeResultModal()" class="w-full py-3 bg-slate-700 hover:bg-slate-600 text-white font-bold rounded-xl">Scan Next</button>
-          </div>
-        </div>
-      </main>
-    </div>
+    function setScanType(type) {
+      currentScanType = type;
+      const btnIn = document.getElementById('btnTimeIn');
+      const btnOut = document.getElementById('btnTimeOut');
+      if (type === 'TIME IN') {
+        btnIn.className = 'py-4 px-4 rounded-xl border-2 font-black text-sm transition flex flex-col items-center justify-center space-y-1 bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-600/30';
+        btnOut.className = 'py-4 px-4 rounded-xl border-2 font-black text-sm transition flex flex-col items-center justify-center space-y-1 bg-slate-950 text-slate-400 border-slate-800';
+      } else {
+        btnOut.className = 'py-4 px-4 rounded-xl border-2 font-black text-sm transition flex flex-col items-center justify-center space-y-1 bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-600/30';
+        btnIn.className = 'py-4 px-4 rounded-xl border-2 font-black text-sm transition flex flex-col items-center justify-center space-y-1 bg-slate-950 text-slate-400 border-slate-800';
+      }
+    }
 
-    <script src="https://unpkg.com/html5-qrcode"></script>
-    <script>
-      let currentScanType = 'TIME_IN';
-      let soundEnabled = true;
-      let html5QrCode = null;
-      let isProcessing = false;
+    async function loadEvents() {
+      const res = await fetch('/api/events');
+      const events = await res.json();
+      const select = document.getElementById('eventSelect');
+      select.innerHTML = '';
+      if (events.length === 0) {
+        select.innerHTML = '<option value="">No events found. Please create one in Admin Portal.</option>';
+        return;
+      }
+      events.forEach(ev => {
+        const opt = document.createElement('option');
+        opt.value = ev.id;
+        opt.textContent = \`\${ev.event_name} (\${ev.event_date})\`;
+        select.appendChild(opt);
+      });
+    }
 
-      function setScanType(type) {
-        currentScanType = type;
-        const btnIn = document.getElementById('btnTimeIn');
-        const btnOut = document.getElementById('btnTimeOut');
-        if (type === 'TIME_IN') {
-          btnIn.className = 'py-4 bg-indigo-600 text-white font-bold rounded-2xl shadow-lg border-2 border-indigo-400 text-base flex flex-col items-center justify-center space-y-1 bg-theme transition';
-          btnOut.className = 'py-4 bg-slate-800 text-slate-400 font-bold rounded-2xl shadow-lg border-2 border-slate-700 text-base flex flex-col items-center justify-center space-y-1 transition';
-        } else {
-          btnOut.className = 'py-4 bg-indigo-600 text-white font-bold rounded-2xl shadow-lg border-2 border-indigo-400 text-base flex flex-col items-center justify-center space-y-1 bg-theme transition';
-          btnIn.className = 'py-4 bg-slate-800 text-slate-400 font-bold rounded-2xl shadow-lg border-2 border-slate-700 text-base flex flex-col items-center justify-center space-y-1 transition';
-        }
+    async function startScanner() {
+      const eventId = document.getElementById('eventSelect').value;
+      if (!eventId) {
+        alert('Please select an attendance event first.');
+        return;
       }
 
-      function toggleAudio() {
-        soundEnabled = !soundEnabled;
-        const icon = document.getElementById('audioIcon');
-        const text = document.getElementById('audioText');
-        if (soundEnabled) {
-          icon.className = 'fa-solid fa-volume-high text-emerald-400';
-          text.innerText = 'Sound: ON';
-        } else {
-          icon.className = 'fa-solid fa-volume-xmark text-red-400';
-          text.innerText = 'Sound: OFF';
-        }
+      if (html5QrCode) {
+        try { await html5QrCode.stop(); } catch(e){}
       }
 
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      function playBeep(type) {
-        if (!soundEnabled) return;
-        if (audioCtx.state === 'suspended') { audioCtx.resume(); }
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-
-        if (type === 'success') {
-          osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
-          gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-          osc.start();
-          osc.stop(audioCtx.currentTime + 0.15);
-        } else if (type === 'duplicate') {
-          osc.frequency.setValueAtTime(440, audioCtx.currentTime);
-          gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-          osc.start();
-          osc.stop(audioCtx.currentTime + 0.3);
-        } else {
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(150, audioCtx.currentTime);
-          gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-          osc.start();
-          osc.stop(audioCtx.currentTime + 0.4);
-        }
-      }
-
-      function startScanner() {
-        if (audioCtx.state === 'suspended') { audioCtx.resume(); }
-        const startBtn = document.getElementById('startCamBtn');
-        startBtn.style.display = 'none';
-
-        html5QrCode = new Html5Qrcode("reader");
-        
-        // Pinahusay na config para mas mabilis at mas madaling marecognize ang QR code
-        const config = { 
-          fps: 15, 
-          qrbox: { width: 280, height: 280 },
-          aspectRatio: 1.0
-        };
-
-        html5QrCode.start(
+      html5QrCode = new Html5Qrcode("reader");
+      const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+      
+      try {
+        await html5QrCode.start(
           { facingMode: "environment" },
           config,
-          async (decodedText) => {
-            if (isProcessing) return;
-            isProcessing = true;
-            console.log("Scanned QR Token:", decodedText);
-            await processScanToken(decodedText.trim());
-            setTimeout(() => { isProcessing = false; }, 2000);
-          },
-          (error) => {}
-        ).catch(err => {
-          alert("Camera initialization error: " + err);
-          startBtn.style.display = 'block';
+          onScanSuccess,
+          onScanFailure
+        );
+      } catch (err) {
+        alert('Camera permission denied or unavailable: ' + err);
+      }
+    }
+
+    async function onScanSuccess(decodedText) {
+      if (isProcessing) return;
+      const eventId = document.getElementById('eventSelect').value;
+      if (!eventId) return;
+
+      isProcessing = true;
+      try {
+        const res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ qr_token: decodedText, event_id: eventId, scan_type: currentScanType })
+        });
+        const data = await res.json();
+        const card = document.getElementById('scanResultCard');
+        const icon = document.getElementById('resultIcon');
+        const title = document.getElementById('resultTitle');
+        const body = document.getElementById('resultBody');
+
+        card.classList.remove('hidden');
+
+        if (data.status === 'SUCCESS_IN' || data.status === 'SUCCESS_OUT') {
+          playBeep('success');
+          card.className = 'p-6 rounded-2xl border bg-emerald-950/60 border-emerald-500 text-center space-y-3 shadow-2xl';
+          icon.innerHTML = '<i class="fa-solid fa-circle-check text-emerald-400"></i>';
+          title.className = 'text-xl font-black text-emerald-300';
+          title.innerText = currentScanType + ' RECORDED';
+          body.innerHTML = \`<p class="text-base font-bold text-white">\${data.member.first_name} \${data.member.last_name}</p>
+                            <p class="text-xs text-slate-300">ID: \${data.member.member_id} | Grade \${data.member.grade_level} - \${data.member.section}</p>
+                            <p class="text-xs font-mono text-emerald-400 mt-2">Time: \${data.time_in || data.time_out}</p>\`;
+        } else if (data.status === 'DUPLICATE_IN' || data.status === 'DUPLICATE_OUT') {
+          playBeep('warning');
+          card.className = 'p-6 rounded-2xl border bg-amber-950/60 border-amber-500 text-center space-y-3 shadow-2xl';
+          icon.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-amber-400"></i>';
+          title.className = 'text-xl font-black text-amber-300';
+          title.innerText = 'ALREADY RECORDED';
+          body.innerHTML = \`<p class="text-base font-bold text-white">\${data.member.first_name} \${data.member.last_name}</p>
+                            <p class="text-xs text-slate-300">\${data.message}</p>\`;
+        } else {
+          playBeep('error');
+          card.className = 'p-6 rounded-2xl border bg-rose-950/60 border-rose-500 text-center space-y-3 shadow-2xl';
+          icon.innerHTML = '<i class="fa-solid fa-circle-xmark text-rose-400"></i>';
+          title.className = 'text-xl font-black text-rose-300';
+          title.innerText = 'QR CODE NOT REGISTERED';
+          body.innerHTML = \`<p class="text-xs text-slate-300">\${data.message || 'This QR Code does not belong to a registered member.'}</p>\`;
+        }
+
+        setTimeout(() => {
+          card.classList.add('hidden');
+          isProcessing = false;
+        }, 3500);
+
+      } catch (err) {
+        isProcessing = false;
+      }
+    }
+
+    function onScanFailure(error) {
+      // Ignore routine scan frames missing qr code
+    }
+
+    loadEvents();
+  </script>
+</body>
+</html>`;
+}
+
+function getMemberPortalHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Member Portal - ClubTrack</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <nav class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex justify-between items-center">
+    <div class="flex items-center space-x-3">
+      <div id="orgLogoContainer" class="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center font-bold text-white shadow"><i class="fa-solid fa-graduation-cap"></i></div>
+      <div>
+        <h1 id="navOrgName" class="font-bold text-sm">ClubTrack Member Portal</h1>
+        <p id="navSchoolName" class="text-xs text-slate-400">High School Student Organization</p>
+      </div>
+    </div>
+    <div class="flex items-center space-x-4">
+      <span id="memberNameDisplay" class="text-xs font-semibold text-slate-300"></span>
+      <a href="/logout" class="px-3 py-1.5 bg-rose-600/20 border border-rose-500/40 text-rose-300 rounded-lg text-xs font-semibold"><i class="fa-solid fa-right-from-bracket mr-1"></i> Logout</a>
+    </div>
+  </nav>
+
+  <main class="max-w-5xl mx-auto p-6 space-y-6">
+    <!-- Profile & Digital ID Card Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Member Info Overview -->
+      <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+        <div class="text-center space-y-2">
+          <div id="memberPhotoBox" class="w-24 h-24 bg-slate-800 border-2 border-indigo-500 rounded-full mx-auto flex items-center justify-center text-3xl font-bold text-indigo-400 overflow-hidden shadow-lg">
+            <i class="fa-solid fa-user"></i>
+          </div>
+          <h2 id="fullNameDisplay" class="text-lg font-black text-white"></h2>
+          <p id="memberIdDisplay" class="text-xs font-mono text-indigo-400 bg-indigo-950/50 py-1 px-3 rounded-full inline-block border border-indigo-800/50"></p>
+        </div>
+        <div class="border-t border-slate-800 pt-4 space-y-2 text-xs text-slate-300">
+          <div class="flex justify-between"><span class="text-slate-500">Grade & Section:</span> <span id="gradeSectionDisplay" class="font-semibold"></span></div>
+          <div class="flex justify-between"><span class="text-slate-500">Position:</span> <span id="positionDisplay" class="font-semibold"></span></div>
+          <div class="flex justify-between"><span class="text-slate-500">Username:</span> <span id="usernameDisplay" class="font-semibold font-mono"></span></div>
+          <div class="flex justify-between"><span class="text-slate-500">Account Status:</span> <span id="statusDisplay" class="font-semibold uppercase text-emerald-400"></span></div>
+        </div>
+      </div>
+
+      <!-- Standard Size Digital ID Card Preview & Actions -->
+      <div class="md:col-span-2 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col justify-between">
+        <div>
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400"><i class="fa-solid id-card mr-1"></i> Digital Organization ID Card (Standard Size)</h3>
+            <span class="text-[10px] text-slate-500">Official High School Badge</span>
+          </div>
+
+          <!-- Standard Printable ID Card Box -->
+          <div id="idCardPrintArea" class="bg-gradient-to-br from-slate-950 to-slate-900 border-2 border-indigo-500/50 rounded-2xl p-6 max-w-sm mx-auto shadow-2xl relative overflow-hidden text-center space-y-3">
+            <div class="absolute top-0 left-0 right-0 h-2 bg-indigo-600"></div>
+            <p id="idSchoolName" class="text-[11px] font-black uppercase text-slate-400 tracking-widest"></p>
+            <p id="idOrgName" class="text-sm font-black text-white"></p>
+            <p class="text-[10px] font-semibold uppercase text-indigo-400 bg-indigo-950 py-0.5 px-2 rounded inline-block">Member Identification Card</p>
+
+            <div id="idCardPhoto" class="w-20 h-20 bg-slate-800 border-2 border-indigo-400 rounded-full mx-auto flex items-center justify-center text-2xl text-indigo-300 overflow-hidden my-2 shadow">
+              <i class="fa-solid fa-user"></i>
+            </div>
+
+            <h4 id="idCardName" class="text-base font-black text-white"></h4>
+            <div class="text-xs space-y-0.5 text-slate-300">
+              <p><span class="text-slate-500">ID:</span> <span id="idCardMemberId" class="font-mono font-bold text-indigo-300"></span></p>
+              <p><span class="text-slate-500">Grade & Section:</span> <span id="idCardGrade"></span></p>
+              <p><span class="text-slate-500">Position:</span> <span id="idCardPosition"></span></p>
+            </div>
+
+            <div class="pt-2 flex justify-center">
+              <img id="idCardQrImg" class="w-24 h-24 bg-white p-1 rounded-xl shadow" src="" alt="QR">
+            </div>
+            <p class="text-[9px] text-slate-500 italic">Property of the school organization.</p>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="mt-6 flex flex-wrap gap-3 justify-center">
+          <button onclick="printIdCard()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow"><i class="fa-solid fa-print mr-1"></i> Print ID Card</button>
+          <button onclick="downloadIdCard()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold rounded-xl shadow"><i class="fa-solid fa-download mr-1"></i> Save ID Image</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Attendance History & Announcements -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400">My Attendance History</h3>
+        <div class="overflow-x-auto max-h-60 overflow-y-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-950 text-slate-400 sticky top-0">
+              <tr>
+                <th class="p-2">Date</th>
+                <th class="p-2">Event</th>
+                <th class="p-2">Time In</th>
+                <th class="p-2">Time Out</th>
+                <th class="p-2">Status</th>
+              </tr>
+            </thead>
+            <tbody id="attendanceTableBody" class="divide-y divide-slate-800 text-slate-300"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400">Organization Announcements</h3>
+        <div id="announcementsList" class="space-y-3 max-h-60 overflow-y-auto text-xs"></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script>
+    async function loadProfile() {
+      const res = await fetch('/api/member/profile');
+      const data = await res.json();
+      const { user, member, settings, qrDataUrl, announcements, attendance } = data;
+
+      document.getElementById('navOrgName').innerText = settings.org_name;
+      document.getElementById('navSchoolName').innerText = settings.school_name;
+      document.getElementById('memberNameDisplay').innerText = user.name;
+
+      document.getElementById('fullNameDisplay').innerText = member.first_name + ' ' + member.last_name;
+      document.getElementById('memberIdDisplay').innerText = member.member_id;
+      document.getElementById('gradeSectionDisplay').innerText = 'Grade ' + member.grade_level + ' - ' + member.section;
+      document.getElementById('positionDisplay').innerText = member.position;
+      document.getElementById('usernameDisplay').innerText = user.username;
+      document.getElementById('statusDisplay').innerText = member.status;
+
+      if (member.profile_photo) {
+        document.getElementById('memberPhotoBox').innerHTML = \`<img src="\${member.profile_photo}" class="w-full h-full object-cover">\`;
+        document.getElementById('idCardPhoto').innerHTML = \`<img src="\${member.profile_photo}" class="w-full h-full object-cover">\`;
+      }
+
+      document.getElementById('idSchoolName').innerText = settings.school_name;
+      document.getElementById('idOrgName').innerText = settings.org_name;
+      document.getElementById('idCardName').innerText = member.first_name + ' ' + member.last_name;
+      document.getElementById('idCardMemberId').innerText = member.member_id;
+      document.getElementById('idCardGrade').innerText = 'Grade ' + member.grade_level + ' - ' + member.section;
+      document.getElementById('idCardPosition').innerText = member.position;
+      document.getElementById('idCardQrImg').src = qrDataUrl;
+
+      // Attendance history
+      const tbody = document.getElementById('attendanceTableBody');
+      tbody.innerHTML = '';
+      if (attendance.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-slate-500">No attendance records found yet.</td></tr>';
+      } else {
+        attendance.forEach(att => {
+          tbody.innerHTML += \`<tr>
+            <td class="p-2">\${att.attendance_date}</td>
+            <td class="p-2 font-semibold">\${att.event_name}</td>
+            <td class="p-2 font-mono text-emerald-400">\${att.time_in || '—'}</td>
+            <td class="p-2 font-mono text-amber-400">\${att.time_out || '—'}</td>
+            <td class="p-2"><span class="px-2 py-0.5 rounded text-[10px] bg-indigo-950 text-indigo-300 border border-indigo-800">\${att.status}</span></td>
+          </tr>\`;
         });
       }
 
-      async function processScanToken(token) {
-        const eventId = document.getElementById('eventSelect').value;
-        try {
-          const response = await fetch('/api/scan', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ qr_token: token, event_id: eventId, scan_type: currentScanType })
-          });
-          const data = await response.json();
-          showResultModal(data);
-        } catch (err) {
-          console.error(err);
-          isProcessing = false;
-        }
+      // Announcements
+      const annList = document.getElementById('announcementsList');
+      annList.innerHTML = '';
+      if (announcements.length === 0) {
+        annList.innerHTML = '<p class="text-slate-500">No announcements posted.</p>';
+      } else {
+        announcements.forEach(ann => {
+          annList.innerHTML += \`<div class="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1">
+            <h4 class="font-bold text-white">\${ann.title}</h4>
+            <p class="text-slate-300">\${ann.message}</p>
+            <span class="text-[10px] text-slate-500">\${new Date(ann.created_at).toLocaleDateString()}</span>
+          </div>\`;
+        });
       }
+    }
 
-      function showResultModal(data) {
-        const modal = document.getElementById('scanResultModal');
-        const card = document.getElementById('resultCard');
-        const icon = document.getElementById('resultIcon');
-        const title = document.getElementById('resultTitle');
-        const name = document.getElementById('resultName');
-        const details = document.getElementById('resultDetails');
+    function printIdCard() {
+      const printContents = document.getElementById('idCardPrintArea').innerHTML;
+      const originalContents = document.body.innerHTML;
+      document.body.innerHTML = \`<div style="display:flex; justify-content:center; align-items:center; height:100vh; background:white;"><div style="border:2px solid #000; padding:20px; border-radius:12px; text-align:center; width:320px;">\${printContents}</div></div>\`;
+      window.print();
+      document.body.innerHTML = originalContents;
+      window.location.reload();
+    }
 
-        modal.classList.remove('hidden');
+    function downloadIdCard() {
+      const card = document.getElementById('idCardPrintArea');
+      html2canvas(card, { scale: 3 }).then(canvas => {
+        const link = document.createElement('a');
+        link.download = 'ClubTrack_IDCard.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+      });
+    }
 
-        if (data.success) {
-          playBeep('success');
-          card.className = 'bg-slate-800 border-2 border-emerald-500 rounded-3xl max-w-sm w-full p-6 text-center shadow-2xl';
-          icon.className = 'w-16 h-16 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-3 text-3xl';
-          icon.innerHTML = '<i class="fa-solid fa-check"></i>';
-          title.innerText = data.scan_type === 'TIME_IN' ? 'TIME IN RECORDED' : 'TIME OUT RECORDED';
-          name.innerText = data.member.first_name + ' ' + data.member.last_name;
-          details.innerText = 'Member ID: ' + data.member.member_id + ' | Time: ' + data.time;
-        } else {
-          if (data.error_type === 'DUPLICATE') playBeep('duplicate');
-          else playBeep('error');
-
-          card.className = 'bg-slate-800 border-2 border-red-500 rounded-3xl max-w-sm w-full p-6 text-center shadow-2xl';
-          icon.className = 'w-16 h-16 bg-red-500/20 text-red-400 rounded-full flex items-center justify-center mx-auto mb-3 text-3xl';
-          icon.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i>';
-          title.innerText = data.error_type === 'DUPLICATE' ? 'ALREADY RECORDED' : 'INVALID QR CODE';
-          name.innerText = data.member ? (data.member.first_name + ' ' + data.member.last_name) : 'Unrecognized QR';
-          details.innerText = data.message;
-        }
-      }
-
-      function closeResultModal() {
-        document.getElementById('scanResultModal').classList.add('hidden');
-      }
-    </script>
-  `, settings.theme_color);
+    loadProfile();
+  </script>
+</body>
+</html>`;
 }
 
-// ==========================================
-// START SERVER
-// ==========================================
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`ClubTrack QR Attendance System running on port ${PORT}`);
+function getAdminDashboardHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard - ClubTrack</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex">
+  <!-- Sidebar -->
+  <aside class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div class="p-6 space-y-6">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold"><i class="fa-solid fa-qrcode"></i></div>
+        <div>
+          <h1 class="font-bold text-sm">ClubTrack</h1>
+          <p class="text-[10px] text-indigo-400 font-semibold uppercase">Admin Portal</p>
+        </div>
+      </div>
+
+      <nav class="space-y-1 text-xs font-semibold">
+        <button onclick="switchTab('dashboardTab')" id="nav-dashboardTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl bg-indigo-600 text-white shadow"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></button>
+        <button onclick="switchTab('membersTab')" id="nav-membersTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-users w-5"></i><span>Manage Members</span></button>
+        <button onclick="switchTab('eventsTab')" id="nav-eventsTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-calendar-days w-5"></i><span>Events Management</span></button>
+        <button onclick="switchTab('attendanceTab')" id="nav-attendanceTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-clipboard-user w-5"></i><span>Live Attendance</span></button>
+        <button onclick="switchTab('scannersTab')" id="nav-scannersTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-mobile-screen w-5"></i><span>Scanner Accounts</span></button>
+        <button onclick="switchTab('announcementsTab')" id="nav-announcementsTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></button>
+        <button onclick="switchTab('settingsTab')" id="nav-settingsTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-gear w-5"></i><span>Organization Settings</span></button>
+        <button onclick="switchTab('logsTab')" id="nav-logsTab" class="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition"><i class="fa-solid fa-shield-halved w-5"></i><span>System Audit Logs</span></button>
+      </nav>
+    </div>
+
+    <div class="p-4 border-t border-slate-800">
+      <a href="/logout" class="w-full flex items-center justify-center space-x-2 py-2.5 bg-rose-600/20 border border-rose-500/40 text-rose-300 rounded-xl text-xs font-semibold"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
+    </div>
+  </aside>
+
+  <!-- Main Content Area -->
+  <main class="flex-1 flex flex-col h-screen overflow-y-auto">
+    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex justify-between items-center sticky top-0 z-10">
+      <h2 id="currentHeaderTitle" class="font-bold text-base">Dashboard Overview</h2>
+      <div class="flex items-center space-x-3">
+        <a href="/scanner" target="_blank" class="px-3 py-1.5 bg-indigo-600/20 border border-indigo-500/40 text-indigo-300 rounded-lg text-xs font-semibold"><i class="fa-solid fa-qrcode mr-1"></i> Open Scanner Terminal</a>
+      </div>
+    </header>
+
+    <div class="p-6 space-y-6">
+      <!-- TAB 1: DASHBOARD -->
+      <div id="dashboardTab" class="tab-content space-y-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow">
+            <p class="text-xs font-bold uppercase text-slate-400">Total Members</p>
+            <h3 id="statTotalMembers" class="text-2xl font-black text-white mt-1">0</h3>
+          </div>
+          <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow">
+            <p class="text-xs font-bold uppercase text-slate-400">Present Today</p>
+            <h3 id="statPresentToday" class="text-2xl font-black text-emerald-400 mt-1">0</h3>
+          </div>
+          <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow">
+            <p class="text-xs font-bold uppercase text-slate-400">Late Today</p>
+            <h3 id="statLateToday" class="text-2xl font-black text-amber-400 mt-1">0</h3>
+          </div>
+          <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow">
+            <p class="text-xs font-bold uppercase text-slate-400">Invalid QR Scans</p>
+            <h3 id="statInvalidScans" class="text-2xl font-black text-rose-400 mt-1">0</h3>
+          </div>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-4">Live Activity Monitor</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-950 text-slate-400">
+                <tr>
+                  <th class="p-3">Time</th>
+                  <th class="p-3">Member Name</th>
+                  <th class="p-3">ID</th>
+                  <th class="p-3">Event</th>
+                  <th class="p-3">Grade & Section</th>
+                  <th class="p-3">Status</th>
+                </tr>
+              </thead>
+              <tbody id="liveAttendanceTable" class="divide-y divide-slate-800 text-slate-300"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: MEMBERS MANAGEMENT -->
+      <div id="membersTab" class="tab-content hidden space-y-6">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-bold uppercase text-indigo-400">Registered Members Directory</h3>
+          <button onclick="openAddMemberModal()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow"><i class="fa-solid fa-user-plus mr-1"></i> Register New Member</button>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow space-y-4">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-950 text-slate-400">
+                <tr>
+                  <th class="p-3">Member ID</th>
+                  <th class="p-3">Full Name</th>
+                  <th class="p-3">Username</th>
+                  <th class="p-3">Grade & Section</th>
+                  <th class="p-3">Position</th>
+                  <th class="p-3">Status</th>
+                  <th class="p-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="membersTableBody" class="divide-y divide-slate-800 text-slate-300"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: EVENTS MANAGEMENT -->
+      <div id="eventsTab" class="tab-content hidden space-y-6">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-bold uppercase text-indigo-400">Attendance Events</h3>
+          <button onclick="openAddEventModal()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow"><i class="fa-solid fa-calendar-plus mr-1"></i> Create Event</button>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-950 text-slate-400">
+                <tr>
+                  <th class="p-3">Event Name</th>
+                  <th class="p-3">Date</th>
+                  <th class="p-3">Start Time</th>
+                  <th class="p-3">End Time</th>
+                  <th class="p-3">Late Cutoff</th>
+                </tr>
+              </thead>
+              <tbody id="eventsTableBody" class="divide-y divide-slate-800 text-slate-300"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 4: LIVE ATTENDANCE -->
+      <div id="attendanceTab" class="tab-content hidden space-y-6">
+        <h3 class="text-sm font-bold uppercase text-indigo-400">Complete Attendance Logs</h3>
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-950 text-slate-400">
+                <tr>
+                  <th class="p-3">Date</th>
+                  <th class="p-3">Member</th>
+                  <th class="p-3">Event</th>
+                  <th class="p-3">Time In</th>
+                  <th class="p-3">Time Out</th>
+                  <th class="p-3">Status</th>
+                </tr>
+              </thead>
+              <tbody id="fullAttendanceTableBody" class="divide-y divide-slate-800 text-slate-300"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 5: SCANNER ACCOUNTS -->
+      <div id="scannersTab" class="tab-content hidden space-y-6">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-bold uppercase text-indigo-400">Authorized Scanner Officers</h3>
+          <button onclick="openAddScannerModal()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow"><i class="fa-solid fa-user-shield mr-1"></i> Add Scanner Account</button>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-950 text-slate-400">
+              <tr>
+                <th class="p-3">Name</th>
+                <th class="p-3">Username</th>
+                <th class="p-3">Created</th>
+                <th class="p-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="scannersTableBody" class="divide-y divide-slate-800 text-slate-300"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 6: ANNOUNCEMENTS -->
+      <div id="announcementsTab" class="tab-content hidden space-y-6">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-bold uppercase text-indigo-400">Announcements</h3>
+          <button onclick="openAddAnnouncementModal()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow"><i class="fa-solid fa-bullhorn mr-1"></i> Post Announcement</button>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow">
+          <div id="adminAnnouncementsList" class="space-y-4 text-xs"></div>
+        </div>
+      </div>
+
+      <!-- TAB 7: ORGANIZATION SETTINGS -->
+      <div id="settingsTab" class="tab-content hidden space-y-6">
+        <h3 class="text-sm font-bold uppercase text-indigo-400">Organization Profile & Branding</h3>
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow max-w-2xl">
+          <form id="settingsForm" class="space-y-4 text-xs">
+            <div>
+              <label class="block font-semibold uppercase text-slate-400 mb-1">School Name</label>
+              <input type="text" id="setSchoolName" required class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white">
+            </div>
+            <div>
+              <label class="block font-semibold uppercase text-slate-400 mb-1">Organization Name</label>
+              <input type="text" id="setOrgName" required class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white">
+            </div>
+            <div>
+              <label class="block font-semibold uppercase text-slate-400 mb-1">School Year</label>
+              <input type="text" id="setSchoolYear" required class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white">
+            </div>
+            <div>
+              <label class="block font-semibold uppercase text-slate-400 mb-1">Member ID Prefix</label>
+              <input type="text" id="setOrgPrefix" required class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white uppercase">
+            </div>
+            <div>
+              <label class="block font-semibold uppercase text-slate-400 mb-1">Organization Description</label>
+              <textarea id="setOrgDesc" rows="3" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></textarea>
+            </div>
+            <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow">Save Settings</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- TAB 8: AUDIT LOGS -->
+      <div id="logsTab" class="tab-content hidden space-y-6">
+        <h3 class="text-sm font-bold uppercase text-indigo-400">System Audit Logs</h3>
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow">
+          <div class="overflow-x-auto max-h-96 overflow-y-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-950 text-slate-400 sticky top-0">
+                <tr>
+                  <th class="p-3">Timestamp</th>
+                  <th class="p-3">Username</th>
+                  <th class="p-3">Role</th>
+                  <th class="p-3">Action</th>
+                  <th class="p-3">Details</th>
+                </tr>
+              </thead>
+              <tbody id="auditLogsTableBody" class="divide-y divide-slate-800 text-slate-300"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- MODALS -->
+  <div id="modalOverlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <!-- Add Member Modal -->
+    <div id="addMemberModal" class="modal-box hidden bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-lg space-y-4 text-xs">
+      <h3 class="text-sm font-bold uppercase text-indigo-400">Register New Organization Member</h3>
+      <form id="addMemberForm" class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div><label class="block text-slate-400 mb-1 font-semibold">First Name</label><input type="text" id="mFirst" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+          <div><label class="block text-slate-400 mb-1 font-semibold">Last Name</label><input type="text" id="mLast" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label class="block text-slate-400 mb-1 font-semibold">Grade Level</label><input type="text" id="mGrade" placeholder="Grade 10" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+          <div><label class="block text-slate-400 mb-1 font-semibold">Section</label><input type="text" id="mSection" placeholder="Rizal" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label class="block text-slate-400 mb-1 font-semibold">Position</label><input type="text" id="mPosition" value="Member" class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+          <div><label class="block text-slate-400 mb-1 font-semibold">Gender</label><select id="mGender" class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"><option>Male</option><option>Female</option></select></div>
+        </div>
+        <div class="flex justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 bg-slate-800 rounded-xl text-slate-300">Cancel</button>
+          <button type="submit" class="px-4 py-2 bg-indigo-600 text-white font-bold rounded-xl">Save & Register</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Credentials Result Modal -->
+    <div id="credentialsModal" class="modal-box hidden bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-md space-y-4 text-xs text-center">
+      <div class="inline-flex w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full items-center justify-center text-xl mb-1"><i class="fa-solid fa-check"></i></div>
+      <h3 class="text-sm font-bold uppercase text-emerald-400">Member Successfully Registered</h3>
+      <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-left space-y-2">
+        <p><span class="text-slate-500">Full Name:</span> <span id="credName" class="text-white font-bold"></span></p>
+        <p><span class="text-slate-500">Member ID:</span> <span id="credMemberId" class="text-indigo-400 font-mono font-bold"></span></p>
+        <p><span class="text-slate-500">Username:</span> <span id="credUsername" class="text-white font-mono font-bold"></span></p>
+        <p><span class="text-slate-500">Temporary Password:</span> <span id="credPassword" class="text-amber-400 font-mono font-bold"></span></p>
+      </div>
+      <p class="text-[10px] text-slate-400">Give these login credentials securely to the member. The temporary password will not be shown again.</p>
+      <button onclick="closeModal()" class="w-full py-2.5 bg-indigo-600 text-white font-bold rounded-xl">Done</button>
+    </div>
+
+    <!-- Add Event Modal -->
+    <div id="addEventModal" class="modal-box hidden bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-md space-y-4 text-xs">
+      <h3 class="text-sm font-bold uppercase text-indigo-400">Create Attendance Event</h3>
+      <form id="addEventForm" class="space-y-3">
+        <div><label class="block text-slate-400 mb-1">Event Name</label><input type="text" id="eName" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        <div><label class="block text-slate-400 mb-1">Event Date</label><input type="date" id="eDate" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        <div class="grid grid-cols-3 gap-2">
+          <div><label class="block text-slate-400 mb-1">Start Time</label><input type="time" id="eStart" required class="w-full p-2 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+          <div><label class="block text-slate-400 mb-1">End Time</label><input type="time" id="eEnd" required class="w-full p-2 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+          <div><label class="block text-slate-400 mb-1">Late Cutoff</label><input type="time" id="eCutoff" required class="w-full p-2 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        </div>
+        <div class="flex justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 bg-slate-800 rounded-xl text-slate-300">Cancel</button>
+          <button type="submit" class="px-4 py-2 bg-indigo-600 text-white font-bold rounded-xl">Create Event</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Add Scanner Modal -->
+    <div id="addScannerModal" class="modal-box hidden bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-md space-y-4 text-xs">
+      <h3 class="text-sm font-bold uppercase text-indigo-400">Create Scanner Officer Account</h3>
+      <form id="addScannerForm" class="space-y-3">
+        <div><label class="block text-slate-400 mb-1">Officer Name</label><input type="text" id="sName" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        <div><label class="block text-slate-400 mb-1">Username</label><input type="text" id="sUsername" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        <div><label class="block text-slate-400 mb-1">Password</label><input type="password" id="sPassword" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        <div class="flex justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 bg-slate-800 rounded-xl text-slate-300">Cancel</button>
+          <button type="submit" class="px-4 py-2 bg-indigo-600 text-white font-bold rounded-xl">Create Scanner</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Add Announcement Modal -->
+    <div id="addAnnouncementModal" class="modal-box hidden bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-md space-y-4 text-xs">
+      <h3 class="text-sm font-bold uppercase text-indigo-400">Post Announcement</h3>
+      <form id="addAnnouncementForm" class="space-y-3">
+        <div><label class="block text-slate-400 mb-1">Title</label><input type="text" id="aTitle" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></div>
+        <div><label class="block text-slate-400 mb-1">Message</label><textarea id="aMsg" rows="3" required class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white"></textarea></div>
+        <div class="flex justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 bg-slate-800 rounded-xl text-slate-300">Cancel</button>
+          <button type="submit" class="px-4 py-2 bg-indigo-600 text-white font-bold rounded-xl">Publish</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.getElementById(tabId).classList.remove('hidden');
+
+      document.querySelectorAll('aside nav button').forEach(btn => {
+        btn.className = 'w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition';
+      });
+      document.getElementById('nav-' + tabId).className = 'w-full flex items-center space-x-3 px-4 py-3 rounded-xl bg-indigo-600 text-white shadow';
+
+      if (tabId === 'dashboardTab') loadDashboard();
+      if (tabId === 'membersTab') loadMembers();
+      if (tabId === 'eventsTab') loadEvents();
+      if (tabId === 'attendanceTab') loadLiveAttendance();
+      if (tabId === 'scannersTab') loadScanners();
+      if (tabId === 'announcementsTab') loadAnnouncements();
+      if (tabId === 'settingsTab') loadSettings();
+      if (tabId === 'logsTab') loadLogs();
+    }
+
+    function openModal(boxId) {
+      document.getElementById('modalOverlay').classList.remove('hidden');
+      document.getElementById('modalOverlay').classList.add('flex');
+      document.querySelectorAll('.modal-box').forEach(b => b.classList.add('hidden'));
+      document.getElementById(boxId).classList.remove('hidden');
+    }
+    function closeModal() {
+      document.getElementById('modalOverlay').classList.add('hidden');
+      document.getElementById('modalOverlay').classList.remove('flex');
+    }
+
+    function openAddMemberModal() { openModal('addMemberModal'); }
+    function openAddEventModal() { openModal('addEventModal'); }
+    function openAddScannerModal() { openModal('addScannerModal'); }
+    function openAddAnnouncementModal() { openModal('addAnnouncementModal'); }
+
+    async function loadDashboard() {
+      const statsRes = await fetch('/api/admin/stats');
+      const stats = await statsRes.json();
+      document.getElementById('statTotalMembers').innerText = stats.totalMembers;
+      document.getElementById('statPresentToday').innerText = stats.presentToday;
+      document.getElementById('statLateToday').innerText = stats.lateToday;
+      document.getElementById('statInvalidScans').innerText = stats.invalidScans;
+
+      const liveRes = await fetch('/api/attendance/live');
+      const logs = await liveRes.json();
+      const tbody = document.getElementById('liveAttendanceTable');
+      tbody.innerHTML = '';
+      logs.slice(0, 10).forEach(l => {
+        tbody.innerHTML += \`<tr>
+          <td class="p-3 font-mono text-slate-400">\${l.created_at ? new Date(l.created_at).toLocaleTimeString() : ''}</td>
+          <td class="p-3 font-bold text-white">\${l.first_name} \${l.last_name}</td>
+          <td class="p-3 font-mono text-indigo-400">\${l.member_id}</td>
+          <td class="p-3">\${l.event_name}</td>
+          <td class="p-3">Grade \${l.grade_level} - \${l.section}</td>
+          <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] bg-indigo-950 text-indigo-300 border border-indigo-800">\${l.status}</span></td>
+        </tr>\`;
+      });
+    }
+
+    async function loadMembers() {
+      const res = await fetch('/api/members');
+      const members = await res.json();
+      const tbody = document.getElementById('membersTableBody');
+      tbody.innerHTML = '';
+      members.forEach(m => {
+        tbody.innerHTML += \`<tr>
+          <td class="p-3 font-mono text-indigo-400 font-bold">\${m.member_id}</td>
+          <td class="p-3 font-bold text-white">\${m.first_name} \${m.last_name}</td>
+          <td class="p-3 font-mono">\${m.username}</td>
+          <td class="p-3">Grade \${m.grade_level} - \${m.section}</td>
+          <td class="p-3">\${m.position}</td>
+          <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800">\${m.status}</span></td>
+          <td class="p-3 text-right space-x-2">
+            <button onclick="resetPassword(\${m.id})" title="Reset Password" class="text-amber-400 hover:text-amber-300"><i class="fa-solid fa-key"></i></button>
+            <button onclick="deleteMember(\${m.id})" title="Delete Member" class="text-rose-400 hover:text-rose-300"><i class="fa-solid fa-trash"></i></button>
+          </td>
+        </tr>\`;
+      });
+    }
+
+    async function loadEvents() {
+      const res = await fetch('/api/events');
+      const events = await res.json();
+      const tbody = document.getElementById('eventsTableBody');
+      tbody.innerHTML = '';
+      events.forEach(e => {
+        tbody.innerHTML += \`<tr>
+          <td class="p-3 font-bold text-white">\${e.event_name}</td>
+          <td class="p-3">\${e.event_date}</td>
+          <td class="p-3 font-mono">\${e.start_time}</td>
+          <td class="p-3 font-mono">\${e.end_time}</td>
+          <td class="p-3 font-mono text-amber-400">\${e.late_cutoff}</td>
+        </tr>\`;
+      });
+    }
+
+    async function loadLiveAttendance() {
+      const res = await fetch('/api/attendance/live');
+      const logs = await res.json();
+      const tbody = document.getElementById('fullAttendanceTableBody');
+      tbody.innerHTML = '';
+      logs.forEach(l => {
+        tbody.innerHTML += \`<tr>
+          <td class="p-3">\${l.attendance_date}</td>
+          <td class="p-3 font-bold text-white">\${l.first_name} \${l.last_name} (\${l.member_id})</td>
+          <td class="p-3">\${l.event_name}</td>
+          <td class="p-3 font-mono text-emerald-400">\${l.time_in || '—'}</td>
+          <td class="p-3 font-mono text-amber-400">\${l.time_out || '—'}</td>
+          <td class="p-3">\${l.status}</td>
+        </tr>\`;
+      });
+    }
+
+    async function loadScanners() {
+      const res = await fetch('/api/scanners');
+      const scanners = await res.json();
+      const tbody = document.getElementById('scannersTableBody');
+      tbody.innerHTML = '';
+      scanners.forEach(s => {
+        tbody.innerHTML += \`<tr>
+          <td class="p-3 font-bold text-white">\${s.name}</td>
+          <td class="p-3 font-mono">\${s.username}</td>
+          <td class="p-3">\${new Date(s.created_at).toLocaleDateString()}</td>
+          <td class="p-3 text-right"><button onclick="deleteScanner(\${s.id})" class="text-rose-400 hover:text-rose-300"><i class="fa-solid fa-trash"></i></button></td>
+        </tr>\`;
+      });
+    }
+
+    async function loadAnnouncements() {
+      const res = await fetch('/api/announcements');
+      const anns = await res.json();
+      const div = document.getElementById('adminAnnouncementsList');
+      div.innerHTML = '';
+      anns.forEach(a => {
+        div.innerHTML += \`<div class="bg-slate-950 p-4 rounded-xl border border-slate-800 flex justify-between items-start">
+          <div class="space-y-1">
+            <h4 class="font-bold text-white text-sm">\${a.title}</h4>
+            <p class="text-slate-300">\${a.message}</p>
+            <span class="text-[10px] text-slate-500">\${new Date(a.created_at).toLocaleDateString()}</span>
+          </div>
+          <button onclick="deleteAnnouncement(\${a.id})" class="text-rose-400 hover:text-rose-300"><i class="fa-solid fa-trash"></i></button>
+        </div>\`;
+      });
+    }
+
+    async function loadSettings() {
+      const res = await fetch('/api/settings');
+      const s = await res.json();
+      document.getElementById('setSchoolName').value = s.school_name || '';
+      document.getElementById('setOrgName').value = s.org_name || '';
+      document.getElementById('setSchoolYear').value = s.school_year || '';
+      document.getElementById('setOrgPrefix').value = s.org_prefix || '';
+      document.getElementById('setOrgDesc').value = s.org_description || '';
+    }
+
+    async function loadLogs() {
+      const res = await fetch('/api/audit-logs');
+      const logs = await res.json();
+      const tbody = document.getElementById('auditLogsTableBody');
+      tbody.innerHTML = '';
+      logs.forEach(l => {
+        tbody.innerHTML += \`<tr>
+          <td class="p-3 font-mono text-slate-400">\ل\lnew Date(l.created_at).toLocaleString()</td>
+          <td class="p-3 font-bold text-white">\${l.username}</td>
+          <td class="p-3 uppercase text-[10px] text-indigo-400">\${l.role}</td>
+          <td class="p-3 font-semibold">\${l.action}</td>
+          <td class="p-3 text-slate-400">\${l.details || ''}</td>
+        </tr>\`;
+      });
+    }
+
+    // Form Submissions
+    document.getElementById('addMemberForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        first_name: document.getElementById('mFirst').value,
+        last_name: document.getElementById('mLast').value,
+        grade_level: document.getElementById('mGrade').value,
+        section: document.getElementById('mSection').value,
+        position: document.getElementById('mPosition').value,
+        gender: document.getElementById('mGender').value
+      };
+      const res = await fetch('/api/members', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        closeModal();
+        document.getElementById('credName').innerText = data.member.first_name + ' ' + data.member.last_name;
+        document.getElementById('credMemberId').innerText = data.member.member_id;
+        document.getElementById('credUsername').innerText = data.credentials.username;
+        document.getElementById('credPassword').innerText = data.credentials.tempPassword;
+        openModal('credentialsModal');
+        loadMembers();
+      } else {
+        alert(data.error);
+      }
+    });
+
+    document.getElementById('addEventForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        event_name: document.getElementById('eName').value,
+        event_date: document.getElementById('eDate').value,
+        start_time: document.getElementById('eStart').value,
+        end_time: document.getElementById('eEnd').value,
+        late_cutoff: document.getElementById('eCutoff').value
+      };
+      const res = await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) { closeModal(); loadEvents(); }
+    });
+
+    document.getElementById('addScannerForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        name: document.getElementById('sName').value,
+        username: document.getElementById('sUsername').value,
+        password: document.getElementById('sPassword').value
+      };
+      const res = await fetch('/api/scanners', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) { closeModal(); loadScanners(); }
+    });
+
+    document.getElementById('addAnnouncementForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        title: document.getElementById('aTitle').value,
+        message: document.getElementById('aMsg').value
+      };
+      const res = await fetch('/api/announcements', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) { closeModal(); loadAnnouncements(); }
+    });
+
+    document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        school_name: document.getElementById('setSchoolName').value,
+        org_name: document.getElementById('setOrgName').value,
+        school_year: document.getElementById('setSchoolYear').value,
+        org_prefix: document.getElementById('setOrgPrefix').value,
+        org_description: document.getElementById('setOrgDesc').value
+      };
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) alert('Organization settings updated successfully!');
+    });
+
+    async function deleteMember(id) {
+      if (confirm('Are you sure you want to delete this member?')) {
+        await fetch('/api/members/' + id, { method: 'DELETE' });
+        loadMembers();
+      }
+    }
+
+    async function resetPassword(id) {
+      const res = await fetch('/api/members/' + id + '/reset-password', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        alert('Password reset successful! New temporary password: ' + data.tempPassword);
+      }
+    }
+
+    async function deleteScanner(id) {
+      if (confirm('Delete scanner account?')) {
+        await fetch('/api/scanners/' + id, { method: 'DELETE' });
+        loadScanners();
+      }
+    }
+
+    async function deleteAnnouncement(id) {
+      await fetch('/api/announcements/' + id, { method: 'DELETE' });
+      loadAnnouncements();
+    }
+
+    // Initial load
+    loadDashboard();
+    setInterval(loadDashboard, 10000); // Auto-refresh live data
+  </script>
+</body>
+</html>`;
+}
+
+// Start Server and Initialize Database
+initializeDatabase().then(() => {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`ClubTrack QR Attendance System running on port ${PORT}`);
+  });
 });
