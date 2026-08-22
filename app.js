@@ -281,7 +281,6 @@ app.post('/admin/settings', isAuthenticated, isAdmin, async (req, res) => {
   res.redirect('/admin?tab=settings&success=1');
 });
 
-// Add Member with Photo & Credentials (FIXED: Simplified QR token for reliable scanning)
 app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   const { first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo } = req.body;
   
@@ -312,8 +311,7 @@ app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   `, [username, hashedPassword, fullName]);
   const userId = userResult.rows[0].id;
 
-  // FIX: Ginawang purong UUID o kaya ay Member ID para mabilis mabasa ng scanner at maiwasan ang parsing issues
-  const qrToken = crypto.randomUUID();
+  const qrToken = `CLUBTRACK:MEMBER:` + crypto.randomUUID();
 
   await pool.query(`
     INSERT INTO members (user_id, member_id, first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo, temp_pass_plain, qr_token, status)
@@ -436,8 +434,7 @@ app.get('/member', isAuthenticated, async (req, res) => {
   const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
   const settings = settingsRes.rows[0];
 
-  // FIX: Ginawang High Error Correction Level ('H') at mas malinaw na rendering para madaling basahin ng scanner
-  const qrDataUrl = await QRCode.toDataURL(member.qr_token, { errorCorrectionLevel: 'H', width: 300, margin: 2 });
+  const qrDataUrl = await QRCode.toDataURL(member.qr_token, { errorCorrectionLevel: 'H', width: 300 });
   const announcementsRes = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5');
   const attendanceRes = await pool.query(`
     SELECT a.*, e.name as event_name FROM attendance a
@@ -465,13 +462,11 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const cleanedToken = qr_token.trim();
 
   try {
-    // FIX: Sinusuportahan na nito ang parehong lumang may prefix at bagong purong UUID token para hindi masira ang mga lumang QR code
-    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1 OR qr_token LIKE $2', [cleanedToken, `%${cleanedToken}%`]);
+    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token.trim()]);
     if (memberRes.rows.length === 0) {
-      await logAction(req, 'INVALID_QR_SCAN', `Unregistered QR scanned: ${cleanedToken}`);
+      await logAction(req, 'INVALID_QR_SCAN', `Unregistered QR scanned: ${qr_token}`);
       return res.json({ success: false, error_type: 'UNREGISTERED', message: 'QR Code does not belong to a registered member.' });
     }
 
@@ -676,10 +671,9 @@ async function renderAdminPortal(tab, req) {
   const presentToday = (await pool.query('SELECT COUNT(*) FROM attendance WHERE attendance_date = $1 AND time_in IS NOT NULL', [today])).rows[0].count;
   const invalidScansCount = (await pool.query("SELECT COUNT(*) FROM audit_logs WHERE action = 'INVALID_QR_SCAN'")).rows[0].count;
 
-  // Pre-generate QR Data URLs for all members with high error correction
   const membersRaw = (await pool.query('SELECT m.*, u.username FROM members m JOIN users u ON m.user_id = u.id ORDER BY m.last_name ASC')).rows;
   const members = await Promise.all(membersRaw.map(async m => {
-    const qrDataUrl = await QRCode.toDataURL(m.qr_token, { errorCorrectionLevel: 'H', width: 250, margin: 2 });
+    const qrDataUrl = await QRCode.toDataURL(m.qr_token, { errorCorrectionLevel: 'H', width: 250 });
     return { ...m, qrDataUrl };
   }));
 
@@ -902,7 +896,7 @@ async function renderAdminPortal(tab, req) {
                       </div>
                     </div>
                     <div class="bg-white p-1 rounded bg-white flex-shrink-0">
-                      <img id="modalQrImg" src="" alt="QR Code" style="width: 2.2cm; height: 2.2cm;" class="block">
+                      <img id="modalQrImg" src="" alt="QR Code" style="width: 2.5cm; height: 2.5cm;" class="block">
                     </div>
                   </div>
 
@@ -1498,14 +1492,23 @@ function renderScannerPortal(events, settings, user) {
         startBtn.style.display = 'none';
 
         html5QrCode = new Html5Qrcode("reader");
+        
+        // Pinahusay na config para mas mabilis at mas madaling marecognize ang QR code
+        const config = { 
+          fps: 15, 
+          qrbox: { width: 280, height: 280 },
+          aspectRatio: 1.0
+        };
+
         html5QrCode.start(
           { facingMode: "environment" },
-          { fps: 10, qrbox: { width: 250, height: 250 } },
+          config,
           async (decodedText) => {
             if (isProcessing) return;
             isProcessing = true;
-            await processScanToken(decodedText);
-            setTimeout(() => { isProcessing = false; }, 2500);
+            console.log("Scanned QR Token:", decodedText);
+            await processScanToken(decodedText.trim());
+            setTimeout(() => { isProcessing = false; }, 2000);
           },
           (error) => {}
         ).catch(err => {
