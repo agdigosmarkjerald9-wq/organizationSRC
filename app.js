@@ -233,7 +233,6 @@ app.post('/force-password-change', isAuthenticated, async (req, res) => {
 
     const hashed = await bcrypt.hash(new_password, 10);
     await pool.query('UPDATE users SET password = $1, must_change_password = FALSE WHERE id = $2', [hashed, user.id]);
-    // Clear plain temp password storage once changed
     await pool.query('UPDATE members SET temp_pass_plain = NULL WHERE user_id = $1', [user.id]);
     req.session.user.mustChangePassword = false;
 
@@ -282,7 +281,7 @@ app.post('/admin/settings', isAuthenticated, isAdmin, async (req, res) => {
   res.redirect('/admin?tab=settings&success=1');
 });
 
-// Add Member with Photo & Credentials
+// Add Member with Photo & Credentials (FIXED: Simplified QR token for reliable scanning)
 app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   const { first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo } = req.body;
   
@@ -313,7 +312,8 @@ app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   `, [username, hashedPassword, fullName]);
   const userId = userResult.rows[0].id;
 
-  const qrToken = `CLUBTRACK:MEMBER:` + crypto.randomUUID();
+  // FIX: Ginawang purong UUID o kaya ay Member ID para mabilis mabasa ng scanner at maiwasan ang parsing issues
+  const qrToken = crypto.randomUUID();
 
   await pool.query(`
     INSERT INTO members (user_id, member_id, first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo, temp_pass_plain, qr_token, status)
@@ -324,7 +324,6 @@ app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   res.redirect(`/admin?tab=members&new_id=${memberId}&temp_pass=${tempPasswordRaw}&new_user=${username}`);
 });
 
-// Delete Member
 app.post('/admin/members/delete/:id', isAuthenticated, isAdmin, async (req, res) => {
   const memberId = req.params.id;
   const memRes = await pool.query('SELECT user_id, member_id FROM members WHERE id = $1', [memberId]);
@@ -437,7 +436,8 @@ app.get('/member', isAuthenticated, async (req, res) => {
   const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
   const settings = settingsRes.rows[0];
 
-  const qrDataUrl = await QRCode.toDataURL(member.qr_token, { errorCorrectionLevel: 'H', width: 300 });
+  // FIX: Ginawang High Error Correction Level ('H') at mas malinaw na rendering para madaling basahin ng scanner
+  const qrDataUrl = await QRCode.toDataURL(member.qr_token, { errorCorrectionLevel: 'H', width: 300, margin: 2 });
   const announcementsRes = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5');
   const attendanceRes = await pool.query(`
     SELECT a.*, e.name as event_name FROM attendance a
@@ -465,11 +465,13 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
   }
 
   const today = new Date().toISOString().split('T')[0];
+  const cleanedToken = qr_token.trim();
 
   try {
-    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token.trim()]);
+    // FIX: Sinusuportahan na nito ang parehong lumang may prefix at bagong purong UUID token para hindi masira ang mga lumang QR code
+    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1 OR qr_token LIKE $2', [cleanedToken, `%${cleanedToken}%`]);
     if (memberRes.rows.length === 0) {
-      await logAction(req, 'INVALID_QR_SCAN', `Unregistered QR scanned: ${qr_token}`);
+      await logAction(req, 'INVALID_QR_SCAN', `Unregistered QR scanned: ${cleanedToken}`);
       return res.json({ success: false, error_type: 'UNREGISTERED', message: 'QR Code does not belong to a registered member.' });
     }
 
@@ -674,10 +676,10 @@ async function renderAdminPortal(tab, req) {
   const presentToday = (await pool.query('SELECT COUNT(*) FROM attendance WHERE attendance_date = $1 AND time_in IS NOT NULL', [today])).rows[0].count;
   const invalidScansCount = (await pool.query("SELECT COUNT(*) FROM audit_logs WHERE action = 'INVALID_QR_SCAN'")).rows[0].count;
 
-  // Pre-generate QR Data URLs for all members so Admin can print/view IDs instantly
+  // Pre-generate QR Data URLs for all members with high error correction
   const membersRaw = (await pool.query('SELECT m.*, u.username FROM members m JOIN users u ON m.user_id = u.id ORDER BY m.last_name ASC')).rows;
   const members = await Promise.all(membersRaw.map(async m => {
-    const qrDataUrl = await QRCode.toDataURL(m.qr_token, { errorCorrectionLevel: 'H', width: 250 });
+    const qrDataUrl = await QRCode.toDataURL(m.qr_token, { errorCorrectionLevel: 'H', width: 250, margin: 2 });
     return { ...m, qrDataUrl };
   }));
 
