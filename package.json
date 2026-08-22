@@ -1,5 +1,5 @@
 {
-  "name": "clubtrack-qr-attendance-pg",
+  "name": "clubtrack-qr-attendance",
   "version": "1.0.0",
   "description": "Organization and Club QR Code Attendance System with PostgreSQL",
   "main": "app.js",
