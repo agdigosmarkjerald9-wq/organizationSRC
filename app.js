@@ -1,3 +1,8 @@
+/**
+ * ClubTrack QR Attendance System
+ * Complete Organization & Club Management System in ONE file (app.js)
+ */
+
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
@@ -8,120 +13,148 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL Connection Pool
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/club_attendance',
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
+// PostgreSQL Database Connection Setup
+const pool = new Pool(
+  process.env.DATABASE_URL
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }
+      }
+    : {
+        user: process.env.PGUSER || 'postgres',
+        host: process.env.PGHOST || 'localhost',
+        database: process.env.PGDATABASE || 'club_attendance',
+        password: process.env.PGPASSWORD || 'postgres',
+        port: process.env.PGPORT || 5432
+      }
+);
 
-app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'clubtrack-super-secret-key-2026',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false } // Set to true if using HTTPS in production behind proxy
-}));
+app.use(express.json());
 
-// Initialize Database Tables & Default Admin
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 1 day session
+  })
+);
+
+// --- DATABASE MIGRATION & INITIALIZATION ---
 async function initDB() {
   const client = await pool.connect();
   try {
     await client.query(`
+      CREATE TABLE IF NOT EXISTS organization_settings (
+        id SERIAL PRIMARY KEY,
+        school_name TEXT DEFAULT 'ABC High School',
+        org_name TEXT DEFAULT 'Supreme Student Council',
+        school_year TEXT DEFAULT '2026–2027',
+        org_desc TEXT DEFAULT 'Official Student Leadership Organization',
+        theme_color TEXT DEFAULT '#4f46e5',
+        member_id_prefix TEXT DEFAULT 'SSC'
+      );
+
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        role VARCHAR(50) NOT NULL, -- admin, member, scanner
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('admin', 'scanner', 'member')),
+        name TEXT NOT NULL,
         must_change_password BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS members (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        member_id VARCHAR(50) UNIQUE NOT NULL,
-        first_name VARCHAR(100) NOT NULL,
-        middle_name VARCHAR(100),
-        last_name VARCHAR(100) NOT NULL,
-        gender VARCHAR(20),
-        grade_level VARCHAR(50) NOT NULL,
-        section VARCHAR(50) NOT NULL,
-        position VARCHAR(100) DEFAULT 'Member',
-        contact_info VARCHAR(100),
-        email VARCHAR(100),
-        qr_token VARCHAR(255) UNIQUE NOT NULL,
-        status VARCHAR(20) DEFAULT 'Active',
+        member_id TEXT UNIQUE NOT NULL,
+        user_id INT REFERENCES users(id) ON DELETE CASCADE,
+        first_name TEXT NOT NULL,
+        middle_name TEXT,
+        last_name TEXT NOT NULL,
+        gender TEXT,
+        grade_level TEXT NOT NULL,
+        section TEXT NOT NULL,
+        position TEXT DEFAULT 'Member',
+        contact TEXT,
+        email TEXT,
+        qr_token TEXT UNIQUE NOT NULL,
+        status TEXT DEFAULT 'Active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS events (
         id SERIAL PRIMARY KEY,
-        event_name VARCHAR(200) NOT NULL,
+        name TEXT NOT NULL,
         description TEXT,
         event_date DATE NOT NULL,
         start_time TIME NOT NULL,
-        end_time TIME NOT NULL,
+        end_time TIME,
         late_cutoff TIME NOT NULL,
-        status VARCHAR(20) DEFAULT 'Active'
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS attendance (
         id SERIAL PRIMARY KEY,
-        member_id INTEGER REFERENCES members(id) ON DELETE CASCADE,
-        event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+        member_id INT REFERENCES members(id) ON DELETE CASCADE,
+        event_id INT REFERENCES events(id) ON DELETE CASCADE,
         attendance_date DATE NOT NULL,
         time_in TIME,
         time_out TIME,
-        status VARCHAR(50) DEFAULT 'Present', -- Present, Late, Completed, Missing Time Out
-        scan_method VARCHAR(20) DEFAULT 'QR',
-        notes TEXT
+        status TEXT DEFAULT 'Present',
+        scan_method TEXT DEFAULT 'QR',
+        manual_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS announcements (
         id SERIAL PRIMARY KEY,
-        title VARCHAR(200) NOT NULL,
+        title TEXT NOT NULL,
         message TEXT NOT NULL,
+        posted_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_date DATE
+      );
+
+      CREATE TABLE IF NOT EXISTS system_logs (
+        id SERIAL PRIMARY KEY,
+        username TEXT,
+        role TEXT,
+        action TEXT NOT NULL,
+        details TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
-      CREATE TABLE IF NOT EXISTS organization_settings (
+      CREATE TABLE IF NOT EXISTS scanner_logs (
         id SERIAL PRIMARY KEY,
-        school_name VARCHAR(200) DEFAULT 'ABC High School',
-        org_name VARCHAR(200) DEFAULT 'Supreme Student Council',
-        school_year VARCHAR(50) DEFAULT '2026-2027',
-        org_prefix VARCHAR(50) DEFAULT 'SSC',
-        description TEXT DEFAULT 'Official High School Organization'
-      );
-
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(100),
-        role VARCHAR(50),
-        action TEXT NOT NULL,
-        details TEXT,
+        scanner_user TEXT,
+        event_id INT,
+        scan_type TEXT,
+        qr_value TEXT,
+        result TEXT,
+        message TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
     // Default Settings
-    const settingsRes = await client.query('SELECT * FROM organization_settings WHERE id = 1');
-    if (settingsRes.rows.length === 0) {
+    const settingsCheck = await client.query('SELECT COUNT(*) FROM organization_settings');
+    if (parseInt(settingsCheck.rows[0].count) === 0) {
       await client.query(`
-        INSERT INTO organization_settings (id, school_name, org_name, school_year, org_prefix, description)
-        VALUES (1, 'ABC High School', 'Supreme Student Council', '2026-2027', 'SSC', 'Official Student Leadership Organization')
+        INSERT INTO organization_settings (school_name, org_name, school_year, org_desc, theme_color, member_id_prefix)
+        VALUES ('ABC High School', 'Supreme Student Council', '2026–2027', 'Official Student Leadership Organization', '#4f46e5', 'SSC');
       `);
     }
 
     // Default Admin Account
-    const adminRes = await client.query("SELECT * FROM users WHERE username = 'admin'");
-    if (adminRes.rows.length === 0) {
+    const adminCheck = await client.query("SELECT COUNT(*) FROM users WHERE role = 'admin'");
+    if (parseInt(adminCheck.rows[0].count) === 0) {
       const hashedPass = await bcrypt.hash('admin123', 10);
-      await client.query(`
-        INSERT INTO users (username, password, role, must_change_password)
-        VALUES ('admin', $1, 'admin', FALSE)
-      `, [hashedPass]);
-      console.log('Default admin account created: admin / admin123');
+      await client.query(
+        'INSERT INTO users (username, password, role, name, must_change_password) VALUES ($1, $2, $3, $4, $5)',
+        ['admin', hashedPass, 'admin', 'System Administrator', true]
+      );
+      console.log('-> Default admin account created: admin / admin123');
     }
   } catch (err) {
     console.error('Database initialization error:', err);
@@ -132,766 +165,1082 @@ async function initDB() {
 
 initDB();
 
-// Audit Logger Helper
-async function logAudit(username, role, action, details) {
+// Helper Logger
+async function logAction(username, role, action, details) {
   try {
     await pool.query(
-      'INSERT INTO audit_logs (username, role, action, details) VALUES ($1, $2, $3, $4)',
+      'INSERT INTO system_logs (username, role, action, details) VALUES ($1, $2, $3, $4)',
       [username || 'System', role || 'System', action, details]
     );
-  } catch (err) {
-    console.error('Audit log error:', err);
+  } catch (e) {
+    console.error('Log error:', e);
   }
 }
 
-// Middleware for Authentication
+// Middleware Guards
 function requireAuth(role) {
   return (req, res, next) => {
     if (!req.session.user) {
-      return res.redirect('/');
+      if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
+      return res.redirect('/login');
     }
     if (role && req.session.user.role !== role && req.session.user.role !== 'admin') {
-      return res.status(403).send('Access Denied');
+      return res.status(403).send('Forbidden Access');
+    }
+    if (req.session.user.mustChangePassword && req.path !== '/change-password' && !req.path.startsWith('/api/')) {
+      return res.redirect('/change-password');
     }
     next();
   };
 }
 
-// ==================== API & WEB ROUTES ====================
+// --- HTML TEMPLATE LAYOUT HELPER ---
+async function renderLayout(title, content, user, activeTab = '') {
+  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+  const s = settingsRes.rows[0] || {
+    school_name: 'ABC High School',
+    org_name: 'ClubTrack',
+    theme_color: '#4f46e5'
+  };
 
-// Root / Login Page
-app.get('/', (req, res) => {
-  if (req.session.user) {
-    if (req.session.user.role === 'admin') return res.redirect('/admin');
-    if (req.session.user.role === 'member') return res.redirect('/member');
-    if (req.session.user.role === 'scanner') return res.redirect('/scanner');
+  let navLinks = '';
+  if (user.role === 'admin') {
+    navLinks = `
+      <a href="/admin" class="${activeTab === 'dashboard' ? 'active' : ''}">📊 Dashboard</a>
+      <a href="/admin/members" class="${activeTab === 'members' ? 'active' : ''}">👥 Members</a>
+      <a href="/admin/attendance" class="${activeTab === 'attendance' ? 'active' : ''}">📋 Attendance</a>
+      <a href="/admin/events" class="${activeTab === 'events' ? 'active' : ''}">📅 Events</a>
+      <a href="/admin/scanners" class="${activeTab === 'scanners' ? 'active' : ''}">📱 Scanners</a>
+      <a href="/admin/announcements" class="${activeTab === 'announcements' ? 'active' : ''}">📢 Announcements</a>
+      <a href="/admin/reports" class="${activeTab === 'reports' ? 'active' : ''}">📈 Reports</a>
+      <a href="/admin/logs" class="${activeTab === 'logs' ? 'active' : ''}">🛡️ System Logs</a>
+      <a href="/admin/settings" class="${activeTab === 'settings' ? 'active' : ''}">⚙️ Settings</a>
+    `;
+  } else if (user.role === 'scanner') {
+    navLinks = `
+      <a href="/scanner" class="active">📷 Live QR Scanner</a>
+    `;
+  } else if (user.role === 'member') {
+    navLinks = `
+      <a href="/member-portal" class="${activeTab === 'portal' ? 'active' : ''}">🏠 My Portal & ID</a>
+      <a href="/member-portal/attendance" class="${activeTab === 'portal-attendance' ? 'active' : ''}">📊 My Attendance</a>
+    `;
   }
-  res.send(renderLoginPage());
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} - ${s.org_name}</title>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+  <style>
+    :root { --primary: ${s.theme_color}; --primary-hover: #3730a3; --bg: #f8fafc; --card: #ffffff; --text: #1e293b; --border: #e2e8f0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    body { background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+    aside { width: 260px; background: #0f172a; color: #fff; display: flex; flex-direction: column; position: fixed; height: 100vh; overflow-y: auto; z-index: 10; }
+    aside .brand { padding: 20px; font-size: 1.1rem; font-weight: bold; border-bottom: 1px solid #1e293b; background: #020617; text-align: center; }
+    aside nav { padding: 15px 10px; display: flex; flex-direction: column; gap: 5px; }
+    aside nav a { color: #94a3b8; text-decoration: none; padding: 10px 15px; border-radius: 6px; font-size: 0.95rem; transition: 0.2s; }
+    aside nav a:hover, aside nav a.active { background: var(--primary); color: #fff; }
+    main { margin-left: 260px; flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    header { background: var(--card); padding: 15px 30px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .user-info { display: flex; align-items: center; gap: 15px; }
+    .content { padding: 30px; flex: 1; max-width: 1400px; width: 100%; margin: 0 auto; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 20px; }
+    .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; border-left: 4px solid var(--primary); }
+    .stat-card h3 { font-size: 0.85rem; color: #64748b; text-transform: uppercase; margin-bottom: 5px; }
+    .stat-card .val { font-size: 1.8rem; font-weight: bold; color: var(--text); }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9rem; }
+    th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: #f1f5f9; color: #475569; font-weight: 600; }
+    .btn { background: var(--primary); color: #white; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; transition: 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .btn-danger { background: #ef4444; }
+    .btn-success { background: #22c55e; }
+    .btn-secondary { background: #64748b; }
+    input, select, textarea { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.95rem; margin-top: 5px; margin-bottom: 15px; }
+    label { font-weight: 500; font-size: 0.9rem; color: #475569; }
+    .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; display: inline-block; }
+    .badge-active, .badge-present, .badge-completed { background: #dcfce7; color: #166534; }
+    .badge-late { background: #fef9c3; color: #854d0e; }
+    .badge-inactive, .badge-absent { background: #fee2e2; color: #991b1b; }
+    
+    /* ID Card Standard Layout */
+    .id-card { width: 340px; background: #fff; border: 2px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin: 20px auto; text-align: center; position: relative; }
+    .id-header { background: var(--primary); color: #fff; padding: 15px; }
+    .id-header h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
+    .id-header h2 { font-size: 1.1rem; margin-top: 2px; }
+    .id-body { padding: 20px; }
+    .id-photo { width: 100px; height: 100px; border-radius: 50%; border: 3px solid var(--primary); object-fit: cover; background: #e2e8f0; margin: 0 auto 10px auto; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: #64748b; }
+    .id-name { font-size: 1.2rem; font-weight: bold; color: var(--text); }
+    .id-meta { font-size: 0.85rem; color: #64748b; margin: 5px 0 15px 0; }
+    .id-qr { width: 130px; height: 130px; margin: 10px auto; }
+    .id-footer { background: #f1f5f9; padding: 8px; font-size: 0.65rem; color: #94a3b8; border-top: 1px solid var(--border); }
+
+    @media print {
+      body * { visibility: hidden; }
+      .printable-card, .printable-card * { visibility: visible; }
+      .printable-card { position: absolute; left: 0; top: 0; width: 100%; margin: 0; border: none; box-shadow: none; }
+      aside, header, .no-print { display: none !important; }
+    }
+    @media(max-width: 768px) {
+      aside { width: 70px; }
+      aside .brand span, aside nav a span { display: none; }
+      main { margin-left: 70px; }
+      .content { padding: 15px; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <div class="brand"><span>🛡️ ${s.org_name}</span></div>
+    <nav>${navLinks}</nav>
+  </aside>
+  <main>
+    <header>
+      <h2>${s.school_name} - ${s.org_name}</h2>
+      <div class="user-info">
+        <span>👤 <b>${user.name}</b> (${user.role.toUpperCase()})</span>
+        <a href="/logout" class="btn btn-danger" style="padding: 5px 10px; font-size: 0.8rem;">Logout</a>
+      </div>
+    </header>
+    <div class="content">
+      ${content}
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+// --- AUTH ROUTES ---
+app.get('/login', async (req, res) => {
+  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+  const s = settingsRes.rows[0] || { school_name: 'ABC High School', org_name: 'ClubTrack', theme_color: '#4f46e5' };
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Login - ${s.org_name}</title>
+  <style>
+    :root { --primary: ${s.theme_color}; }
+    body { background: #0f172a; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Segoe UI', sans-serif; }
+    .login-card { background: #fff; padding: 40px; border-radius: 12px; width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+    h2 { color: #1e293b; margin-bottom: 5px; text-align: center; }
+    p { color: #64748b; font-size: 0.9rem; text-align: center; margin-bottom: 25px; }
+    input { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 1rem; }
+    button { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    .error { background: #fee2e2; color: #991b1b; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 0.85rem; text-align: center; }
+    .links { margin-top: 15px; text-align: center; font-size: 0.85rem; }
+    .links a { color: var(--primary); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <h2>${s.org_name}</h2>
+    <p>${s.school_name}</p>
+    ${req.query.error ? `<div class="error">${req.query.error}</div>` : ''}
+    <form action="/login" method="POST">
+      <label>Username</label>
+      <input type="text" name="username" required autofocus>
+      <label>Password</label>
+      <input type="password" name="password" required>
+      <button type="submit">Sign In</button>
+    </form>
+    <div class="links">
+      <a href="/scanner-login">📱 Open Standalone QR Scanner Portal</a>
+    </div>
+  </div>
+</body>
+</html>`);
 });
 
-app.post('/api/login', async (req, res) => {
+app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (userRes.rows.length === 0) {
-      return res.json({ success: false, message: 'Invalid username or password.' });
-    }
-    const user = userRes.rows.shift();
+    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (result.rows.length === 0) return res.redirect('/login?error=Invalid+Username+or+Password');
+    
+    const user = result.rows[0];
     const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      return res.json({ success: false, message: 'Invalid username or password.' });
-    }
+    if (!match) return res.redirect('/login?error=Invalid+Username+or+Password');
 
-    req.session.user = { id: user.id, username: user.username, role: user.role, mustChange: user.must_change_password };
-    await logAudit(user.username, user.role, 'Login', 'User logged in successfully');
+    req.session.user = {
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      role: user.role,
+      mustChangePassword: user.must_change_password
+    };
 
-    if (user.must_change_password) {
-      return res.json({ success: true, redirect: '/change-password-required' });
-    }
+    await logAction(user.username, user.role, 'LOGIN', `${user.username} logged into the system.`);
 
-    let redirectUrl = '/admin';
-    if (user.role === 'member') redirectUrl = '/member';
-    if (user.role === 'scanner') redirectUrl = '/scanner';
-
-    res.json({ success: true, redirect: redirectUrl });
+    if (user.must_change_password) return res.redirect('/change-password');
+    if (user.role === 'admin') return res.redirect('/admin');
+    if (user.role === 'scanner') return res.redirect('/scanner');
+    return res.redirect('/member-portal');
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    console.error(err);
+    res.redirect('/login?error=Database+Error');
   }
+});
+
+// Standalone Scanner Login Route
+app.get('/scanner-login', async (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Scanner Login</title>
+<style>
+  body { background: #0f172a; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; }
+  .box { background: #fff; padding: 30px; border-radius: 10px; width: 350px; }
+  input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; }
+  button { width: 100%; padding: 10px; background: #22c55e; color: #fff; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; }
+</style></head>
+<body>
+<div class="box">
+  <h3>📱 Scanner Portal Login</h3>
+  <form action="/login" method="POST">
+    <input type="text" name="username" placeholder="Scanner Username" required>
+    <input type="password" name="password" placeholder="Password" required>
+    <button type="submit">Access Scanner Portal</button>
+  </form>
+</div></body></html>`);
+});
+
+// Member Direct Portal Login Link Route
+app.get('/member-login', (req, res) => {
+  res.redirect('/login');
 });
 
 app.get('/logout', (req, res) => {
   if (req.session.user) {
-    logAudit(req.session.user.username, req.session.user.role, 'Logout', 'User logged out');
+    logAction(req.session.user.username, req.session.user.role, 'LOGOUT', 'User logged out.');
   }
-  req.session.destroy(() => {
-    res.redirect('/');
-  });
+  req.session.destroy(() => res.redirect('/login'));
 });
 
-// Required Password Change Page
-app.get('/change-password-required', (req, res) => {
-  if (!req.session.user || !req.session.user.mustChange) return res.redirect('/');
-  res.send(renderChangePasswordPage());
+// Mandatory Password Change
+app.get('/change-password', requireAuth(), async (req, res) => {
+  const content = `
+    <div class="card" style="max-width: 500px; margin: 40px auto;">
+      <h3>🔒 Security Notice: Change Temporary Password</h3>
+      <p style="margin: 15px 0; color: #64748b;">You are logging in with a temporary password. Please create a secure private password to proceed.</p>
+      ${req.query.error ? `<div style="background:#fee2e2; color:#991b1b; padding:10px; border-radius:6px; margin-bottom:15px;">${req.query.error}</div>` : ''}
+      <form action="/change-password" method="POST">
+        <label>New Password (Min 8 characters)</label>
+        <input type="password" name="new_password" minlength="8" required>
+        <label>Confirm New Password</label>
+        <input type="password" name="confirm_password" minlength="8" required>
+        <button type="submit" class="btn" style="width:100%; margin-top:10px;">Update Password & Secure Account</button>
+      </form>
+    </div>
+  `;
+  res.send(await renderLayout('Change Password', content, req.session.user));
 });
 
-app.post('/api/change-password', requireAuth(), async (req, res) => {
-  const { currentPassword, newPassword, confirmPassword } = req.body;
-  if (newPassword !== confirmPassword || newPassword.length < 8) {
-    return res.json({ success: false, message: 'Passwords must match and be at least 8 characters long.' });
+app.post('/change-password', requireAuth(), async (req, res) => {
+  const { new_password, confirm_password } = req.body;
+  if (new_password !== confirm_password || new_password.length < 8) {
+    return res.redirect('/change-password?error=Passwords+must+match+and+be+at+least+8+characters.');
   }
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.session.user.id]);
-    const user = userRes.rows[0];
-    const match = await bcrypt.compare(currentPassword, user.password);
-    if (!match) {
-      return res.json({ success: false, message: 'Current password is incorrect.' });
-    }
-
-    const hashed = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE users SET password = $1, must_change_password = FALSE WHERE id = $2', [hashed, user.id]);
-    req.session.user.mustChange = false;
-
-    await logAudit(user.username, user.role, 'Password Change', 'User successfully changed password');
-    res.json({ success: true, message: 'Password successfully changed!' });
+    const hashed = await bcrypt.hash(new_password, 10);
+    await pool.query('UPDATE users SET password = $1, must_change_password = FALSE WHERE id = $2', [hashed, req.session.user.id]);
+    req.session.user.mustChangePassword = false;
+    await logAction(req.session.user.username, req.session.user.role, 'PASSWORD_CHANGE', 'User updated temporary password successfully.');
+    
+    if (req.session.user.role === 'admin') return res.redirect('/admin');
+    if (req.session.user.role === 'scanner') return res.redirect('/scanner');
+    return res.redirect('/member-portal');
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    res.redirect('/change-password?error=Database+Error');
   }
 });
 
-// ==================== ADMIN PORTAL ====================
+// --- ADMIN PORTAL ROUTES ---
 app.get('/admin', requireAuth('admin'), async (req, res) => {
-  try {
-    const settings = (await pool.query('SELECT * FROM organization_settings WHERE id = 1')).rows[0];
-    const members = (await pool.query('SELECT * FROM members ORDER BY id DESC')).rows;
-    const events = (await pool.query('SELECT * FROM events ORDER BY event_date DESC')).rows;
-    const announcements = (await pool.query('SELECT * FROM announcements ORDER BY id DESC')).rows;
-    const stats = {
-      totalMembers: (await pool.query('SELECT COUNT(*) FROM members')).rows[0].count,
-      activeMembers: (await pool.query("SELECT COUNT(*) FROM members WHERE status = 'Active'")).rows[0].count,
-      presentToday: (await pool.query("SELECT COUNT(DISTINCT member_id) FROM attendance WHERE attendance_date = CURRENT_DATE")).rows[0].count,
-    };
-    res.send(renderAdminDashboard(settings, members, events, announcements, stats));
-  } catch (err) {
-    res.status(500).send(err.message);
-  }
+  const counts = await Promise.all([
+    pool.query('SELECT COUNT(*) FROM members'),
+    pool.query("SELECT COUNT(*) FROM members WHERE status = 'Active'"),
+    pool.query("SELECT COUNT(DISTINCT member_id) FROM attendance WHERE attendance_date = CURRENT_DATE"),
+    pool.query("SELECT COUNT(*) FROM scanner_logs WHERE result = 'Invalid QR' AND DATE(created_at) = CURRENT_DATE")
+  ]);
+
+  const liveAttendance = await pool.query(`
+    -SELECT a.*, m.first_name, m.last_name, m.grade_level, m.section, e.name as event_name
+    FROM attendance a
+    JOIN members m ON a.member_id = m.id
+    JOIN events e ON a.event_id = e.id
+    ORDER BY a.created_at DESC LIMIT 10
+  `).catch(() => ({ rows: [] }));
+
+  const content = `
+    <h2>Dashboard Overview</h2>
+    <div class="grid-4">
+      <div class="stat-card"><h3>Total Members</h3><div class="val">${counts[0].rows[0].count}</div></div>
+      <div class="stat-card"><h3>Active Members</h3><div class="val">${counts[1].rows[0].count}</div></div>
+      <div class="stat-card"><h3>Present Today</h3><div class="val">${counts[2].rows[0].count}</div></div>
+      <div class="stat-card"><h3>Invalid Scans Today</h3><div class="val" style="color:#ef4444">${counts[3].rows[0].count}</div></div>
+    </div>
+    <div class="card">
+      <h3>🔴 Live Attendance Feed (Auto-Refreshes)</h3>
+      <table>
+        <thead><tr><th>Time</th><th>Member</th><th>Grade & Section</th><th>Event</th><th>Scan Type</th><th>Status</th></tr></thead>
+        <tbody id="live-feed">
+          ${liveAttendance.rows.map(r => `
+            <tr>
+              <td>${r.time_in || r.time_out || 'N/A'}</td>
+              <td><b>${r.first_name} ${r.last_name}</b></td>
+              <td>${r.grade_level} - ${r.section}</td>
+              <td>${r.event_name}</td>
+              <td><span class="badge" style="background:#e0f2fe;color:#0369a1">${r.scan_method}</span></td>
+              <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    <script>
+      setInterval(() => {
+        fetch('/api/live-feed').then(res => res.json()).then(data => {
+          const tbody = document.getElementById('live-feed');
+          tbody.innerHTML = data.map(r => \`
+            <tr>
+              <td>\${r.time_in || r.time_out || 'N/A'}</td>
+              <td><b>\${r.first_name} \${r.last_name}</b></td>
+              <td>\${r.grade_level} - \${r.section}</td>
+              <td>\${r.event_name}</td>
+              <td><span class="badge" style="background:#e0f2fe;color:#0369a1">\${r.scan_method}</span></td>
+              <td><span class="badge badge-\${r.status.toLowerCase()}">\${r.status}</span></td>
+            </tr>
+          \`).join('');
+        });
+      }, 5000);
+    </script>
+  `;
+  res.send(await renderLayout('Admin Dashboard', content, req.session.user, 'dashboard'));
 });
 
-// Admin API: Add Member
-app.post('/api/admin/members', requireAuth('admin'), async (req, res) => {
-  const { first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email } = req.body;
+// Live feed JSON api
+app.get('/api/live-feed', requireAuth('admin'), async (req, res) => {
+  const r = await pool.query(`
+    SELECT a.*, m.first_name, m.last_name, m.grade_level, m.section, e.name as event_name
+    FROM attendance a
+    JOIN members m ON a.member_id = m.id
+    JOIN events e ON a.event_id = e.id
+    ORDER BY a.created_at DESC LIMIT 10
+  `);
+  res.json(r.rows);
+});
+
+// MEMBERS MANAGEMENT
+app.get('/admin/members', requireAuth('admin'), async (req, res) => {
+  const search = req.query.search || '';
+  const queryText = search 
+    ? `SELECT * FROM members WHERE first_name ILIKE $1 OR last_name ILIKE $1 OR member_id ILIKE $1 ORDER BY last_name ASC`
+    : `SELECT * FROM members ORDER BY last_name ASC`;
+  const members = await pool.query(queryText, search ? [`%${search}%`] : []);
+  const settings = await pool.query('SELECT member_id_prefix FROM organization_settings LIMIT 1');
+  const prefix = settings.rows[0]?.member_id_prefix || 'SSC';
+
+  const content = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+      <h2>Member Directory & Management</h2>
+      <button class="btn" onclick="document.getElementById('addModal').style.display='block'">+ Register New Member</button>
+    </div>
+    <div class="card">
+      <form method="GET" style="display:flex; gap:10px; margin-bottom:15px;">
+        <input type="text" name="search" placeholder="Search by name or Member ID..." value="${search}" style="margin:0;">
+        <button type="submit" class="btn" style="width:auto;">Search</button>
+      </form>
+      <table>
+        <thead><tr><th>Member ID</th><th>Full Name</th><th>Grade & Section</th><th>Position</th><th>Username</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${members.rows.map(m => `
+            <tr>
+              <td><b>${m.member_id}</b></td>
+              <td>${m.first_name} ${m.middle_name || ''} ${m.last_name}</td>
+              <td>${m.grade_level} - ${m.section}</td>
+              <td>${m.position}</td>
+              <td>${m.user_id ? 'Linked' : 'No User'}</td>
+              <td><span class="badge badge-${m.status.toLowerCase()}">${m.status}</span></td>
+              <td>
+                <a href="/admin/member/${m.id}/id" class="btn" style="padding:4px 8px; font-size:0.75rem;">View ID</a>
+                <form action="/admin/member/${m.id}/delete" method="POST" style="display:inline;" onsubmit="return confirm('Delete this member and associated records?')">
+                  <button type="submit" class="btn btn-danger" style="padding:4px 8px; font-size:0.75rem;">Delete</button>
+                </form>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Add Member Modal -->
+    <div id="addModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:100; overflow-y:auto;">
+      <div style="background:#fff; width:90%; max-width:600px; margin:40px auto; padding:30px; border-radius:10px;">
+        <h3>Register New Member</h3>
+        <form action="/admin/members/add" method="POST">
+          <label>First Name</label><input type="text" name="first_name" required>
+          <label>Middle Name</label><input type="text" name="middle_name">
+          <label>Last Name</label><input type="text" name="last_name" required>
+          <label>Grade Level</label><input type="text" name="grade_level" placeholder="Grade 10" required>
+          <label>Section</label><input type="text" name="section" placeholder="Rizal" required>
+          <label>Position</label><input type="text" name="position" value="Member">
+          <label>Contact Number</label><input type="text" name="contact">
+          <label>Email</label><input type="email" name="email">
+          <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('addModal').style.display='none'">Cancel</button>
+            <button type="submit" class="btn">Register & Generate ID</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+  res.send(await renderLayout('Members Management', content, req.session.user, 'members'));
+});
+
+// ADD MEMBER POST
+app.post('/admin/members/add', requireAuth('admin'), async (req, res) => {
+  const { first_name, middle_name, last_name, grade_level, section, position, contact, email } = req.body;
   try {
-    const settings = (await pool.query('SELECT * FROM organization_settings WHERE id = 1')).rows[0];
-    const prefix = settings.org_prefix || 'SSC';
+    const settings = await pool.query('SELECT member_id_prefix FROM organization_settings LIMIT 1');
+    const prefix = settings.rows[0]?.member_id_prefix || 'SSC';
     const year = new Date().getFullYear();
+    
+    // Generate Unique ID
     const countRes = await pool.query('SELECT COUNT(*) FROM members');
     const seq = parseInt(countRes.rows[0].count) + 1;
     const member_id = `${prefix}-${year}-${String(seq).padStart(4, '0')}`;
 
-    let username = `${first_name.toLowerCase().replace(/[^a-z]/g, '')}${last_name.toLowerCase().replace(/[^a-z]/g, '')}`;
-    const checkUser = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (checkUser.rows.length > 0) username += seq;
+    // Generate unique username
+    let username = (first_name + '.' + last_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+    if (userCheck.rows.length > 0) username += seq;
 
+    // Generate random temporary password
     const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
     const hashed = await bcrypt.hash(tempPassword, 10);
 
-    const userResult = await pool.query(
-      'INSERT INTO users (username, password, role, must_change_password) VALUES ($1, $2, $3, TRUE) RETURNING id',
-      [username, hashed, 'member']
+    const userRes = await pool.query(
+      'INSERT INTO users (username, password, role, name, must_change_password) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+      [username, hashed, 'member', `${first_name} ${last_name}`, true]
     );
-    const userId = userResult.rows[0].id;
+    const userId = userRes.rows[0].id;
 
     const qrToken = `CLUBTRACK:MEMBER:${crypto.randomUUID()}`;
-    const qrCodeDataUrl = await QRCode.toDataURL(qrToken);
-
-    await pool.query(
-      `INSERT INTO members (user_id, member_id, first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, qr_token)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [userId, member_id, first_name, middle_name, last_name, gender, grade_level, section, position || 'Member', contact_info, email, qrToken]
+    const memberRes = await pool.query(
+      'INSERT INTO members (member_id, user_id, first_name, middle_name, last_name, grade_level, section, position, contact, email, qr_token) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
+      [member_id, userId, first_name, middle_name, last_name, grade_level, section, position, contact, email, qrToken]
     );
 
-    await logAudit(req.session.user.username, 'admin', 'Register Member', `Registered member ${member_id} (${first_name} ${last_name})`);
+    await logAction(req.session.user.username, req.session.user.role, 'REGISTER_MEMBER', `Registered member ${member_id} - ${first_name} ${last_name}`);
 
-    res.json({
-      success: true,
-      credentials: { member_id, username, tempPassword, qrCodeDataUrl, full_name: `${first_name} ${last_name}`, grade_section: `${grade_level} - ${section}`, position: position || 'Member' }
-    });
+    // Show credential modal confirmation page
+    const content = `
+      <div class="card" style="max-width:600px; margin:20px auto; text-align:center;">
+        <h2 style="color:#22c55e;">🎉 Member Successfully Registered</h2>
+        <p style="margin:10px 0;">Give these credentials securely to the member. The temporary password must be changed upon first login.</p>
+        <div style="background:#f8fafc; padding:20px; border-radius:8px; text-align:left; margin:20px 0;">
+          <p><b>Full Name:</b> ${first_name} ${last_name}</p>
+          <p><b>Member ID:</b> ${member_id}</p>
+          <p><b>Username:</b> ${username}</p>
+          <p><b>Temporary Password:</b> <code style="background:#e2e8f0; padding:4px 8px; border-radius:4px; font-size:1.1rem; color:#b91c1c;">${tempPassword}</code></p>
+        </div>
+        <div style="display:flex; justify-content:center; gap:15px;">
+          <a href="/admin/member/${memberRes.rows[0].id}/id" class="btn">View & Print Digital ID Card</a>
+          <a href="/admin/members" class="btn btn-secondary">Back to Members</a>
+        </div>
+      </div>
+    `;
+    res.send(await renderLayout('Registration Success', content, req.session.user, 'members'));
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    console.error(err);
+    res.redirect('/admin/members?error=Failed+to+register+member');
   }
 });
 
-// Admin API: Delete Member
-app.post('/api/admin/members/delete', requireAuth('admin'), async (req, res) => {
-  const { id } = req.body;
+// DELETE MEMBER
+app.post('/admin/member/:id/delete', requireAuth('admin'), async (req, res) => {
   try {
-    const memRes = await pool.query('SELECT * FROM members WHERE id = $1', [id]);
-    if (memRes.rows.length === 0) return res.json({ success: false, message: 'Member not found.' });
-    const member = memRes.rows[0];
-
-    await pool.query('DELETE FROM users WHERE id = $1', [member.user_id]);
-    await logAudit(req.session.user.username, 'admin', 'Delete Member', `Deleted member ${member.member_id}`);
-    res.json({ success: true, message: 'Member deleted successfully.' });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
+    const mem = await pool.query('SELECT user_id, member_id FROM members WHERE id = $1', [req.params.id]);
+    if (mem.rows.length > 0) {
+      await pool.query('DELETE FROM users WHERE id = $1', [mem.rows[0].user_id]);
+      await logAction(req.session.user.username, req.session.user.role, 'DELETE_MEMBER', `Deleted member ${mem.rows[0].member_id}`);
+    }
+    res.redirect('/admin/members');
+  } catch (e) {
+    res.redirect('/admin/members?error=Delete+failed');
   }
 });
 
-// Admin API: Create Event
-app.post('/api/admin/events', requireAuth('admin'), async (req, res) => {
-  const { event_name, description, event_date, start_time, end_time, late_cutoff } = req.body;
-  try {
-    await pool.query(
-      'INSERT INTO events (event_name, description, event_date, start_time, end_time, late_cutoff) VALUES ($1, $2, $3, $4, $5, $6)',
-      [event_name, description, event_date, start_time, end_time, late_cutoff]
-    );
-    await logAudit(req.session.user.username, 'admin', 'Create Event', `Created event: ${event_name}`);
-    res.json({ success: true, message: 'Event created successfully.' });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
+// VIEW MEMBER DIGITAL ID CARD (Standardized Size with Print / Save buttons)
+app.get('/admin/member/:id/id', requireAuth(), async (req, res) => {
+  const mRes = await pool.query('SELECT * FROM members WHERE id = $1', [req.params.id]);
+  if (mRes.rows.length === 0) return res.status(404).send('Member not found');
+  const m = mRes.rows[0];
+
+  const sRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+  const s = sRes.rows[0];
+
+  const content = `
+    <div style="text-align:center;" class="no-print">
+      <button class="btn" onclick="window.print()">🖨️ Print ID Card</button>
+      <a href="/admin/members" class="btn btn-secondary">Back</a>
+    </div>
+    <div class="printable-card">
+      <div class="id-card">
+        <div class="id-header">
+          <h4>${s.school_name}</h4>
+          <h2>${s.org_name}</h2>
+        </div>
+        <div class="id-body">
+          <div class="id-photo">👤</div>
+          <div class="id-name">${m.first_name} ${m.last_name}</div>
+          <div class="id-meta">${m.position} | ${m.grade_level} - ${m.section}</div>
+          <p style="font-size:0.8rem; color:#64748b; margin-bottom:10px;">ID: <b>${m.member_id}</b></p>
+          <div id="qrcode" class="id-qr"></div>
+        </div>
+        <div class="id-footer">
+          Official Digital Organization Identification Card
+        </div>
+      </div>
+    </div>
+    <script>
+      QRCode.toCanvas(document.getElementById('qrcode'), '${m.qr_token}', { width: 130 }, function (error) {
+        if (error) console.error(error);
+      });
+    </script>
+  `;
+  res.send(await renderLayout('Member ID Card', content, req.session.user, 'members'));
 });
 
-// Admin API: Update Settings
-app.post('/api/admin/settings', requireAuth('admin'), async (req, res) => {
-  const { school_name, org_name, school_year, org_prefix, description } = req.body;
-  try {
-    await pool.query(
-      'UPDATE organization_settings SET school_name = $1, org_name = $2, school_year = $3, org_prefix = $4, description = $5 WHERE id = 1',
-      [school_name, org_name, school_year, org_prefix, description]
-    );
-    await logAudit(req.session.user.username, 'admin', 'Update Settings', 'Updated organization settings');
-    res.json({ success: true, message: 'Settings updated successfully.' });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
+// EVENTS MANAGEMENT
+app.get('/admin/events', requireAuth('admin'), async (req, res) => {
+  const events = await pool.query('SELECT * FROM events ORDER BY event_date DESC');
+  const content = `
+    <h2>Events Management</h2>
+    <div class="card">
+      <h3>Create Attendance Event</h3>
+      <form action="/admin/events/add" method="POST">
+        <label>Event Name</label><input type="text" name="name" required placeholder="Monthly Assembly">
+        <label>Description</label><textarea name="description"></textarea>
+        <label>Event Date</label><input type="date" name="event_date" required>
+        <div style="display:flex; gap:15px;">
+          <div style="flex:1;"><label>Start Time</label><input type="time" name="start_time" required></div>
+          <div style="flex:1;"><label>Late Cutoff Time</label><input type="time" name="late_cutoff" required></div>
+        </div>
+        <button type="submit" class="btn" style="margin-top:10px;">Create Event</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Scheduled Events</h3>
+      <table>
+        <thead><tr><th>Event Name</th><th>Date</th><th>Start Time</th><th>Late Cutoff</th><th>Action</th></tr></thead>
+        <tbody>
+          ${events.rows.map(e => `
+            <tr>
+              <td><b>${e.name}</b><br><small>${e.description || ''}</small></td>
+              <td>${e.event_date}</td>
+              <td>${e.start_time}</td>
+              <td>${e.late_cutoff}</td>
+              <td>
+                <form action="/admin/events/${e.id}/delete" method="POST" onsubmit="return confirm('Delete event?')">
+                  <button type="submit" class="btn btn-danger" style="padding:4px 8px; font-size:0.75rem;">Delete</button>
+                </form>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  res.send(await renderLayout('Events', content, req.session.user, 'events'));
 });
 
-
-// ==================== MEMBER PORTAL (Dedicated Link: /member) ====================
-app.get('/member', requireAuth('member'), async (req, res) => {
-  try {
-    const memberRes = await pool.query('SELECT * FROM members WHERE user_id = $1', [req.session.user.id]);
-    if (memberRes.rows.length === 0) return res.send('Member profile not found.');
-    const member = memberRes.rows[0];
-    const settings = (await pool.query('SELECT * FROM organization_settings WHERE id = 1')).rows[0];
-    const qrCodeDataUrl = await QRCode.toDataURL(member.qr_token);
-    const attendance = (await pool.query('SELECT a.*, e.event_name FROM attendance a JOIN events e ON a.event_id = e.id WHERE a.member_id = $1 ORDER BY a.id DESC', [member.id])).rows;
-    const announcements = (await pool.query('SELECT * FROM announcements ORDER BY id DESC LIMIT 5')).rows;
-
-    res.send(renderMemberPortal(member, settings, qrCodeDataUrl, attendance, announcements));
-  } catch (err) {
-    res.status(500).send(err.message);
-  }
+app.post('/admin/events/add', requireAuth('admin'), async (req, res) => {
+  const { name, description, event_date, start_time, late_cutoff } = req.body;
+  await pool.query('INSERT INTO events (name, description, event_date, start_time, late_cutoff) VALUES ($1, $2, $3, $4, $5)', [name, description, event_date, start_time, late_cutoff]);
+  await logAction(req.session.user.username, req.session.user.role, 'CREATE_EVENT', `Created event: ${name}`);
+  res.redirect('/admin/events');
 });
 
+app.post('/admin/events/:id/delete', requireAuth('admin'), async (req, res) => {
+  await pool.query('DELETE FROM events WHERE id = $1', [req.params.id]);
+  res.redirect('/admin/events');
+});
 
-// ==================== SCANNER PORTAL (Dedicated Link: /scanner) ====================
+// ATTENDANCE MANAGEMENT & REPORTS
+app.get('/admin/attendance', requireAuth('admin'), async (req, res) => {
+  const records = await pool.query(`
+    SELECT a.*, m.first_name, m.last_name, m.member_id, e.name as event_name
+    FROM attendance a
+    JOIN members m ON a.member_id = m.id
+    JOIN events e ON a.event_id = e.id
+    ORDER BY a.created_at DESC LIMIT 50
+  `);
+  const content = `
+    <h2>Attendance Records</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Date</th><th>Member ID</th><th>Member Name</th><th>Event</th><th>Time In</th><th>Time Out</th><th>Status</th><th>Method</th></tr></thead>
+        <tbody>
+          ${records.rows.map(r => `
+            <tr>
+              <td>${r.attendance_date}</td>
+              <td>${r.member_id}</td>
+              <td><b>${r.first_name} ${r.last_name}</b></td>
+              <td>${r.event_name}</td>
+              <td>${r.time_in || '-'}</td>
+              <td>${r.time_out || '-'}</td>
+              <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
+              <td>${r.scan_method}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  res.send(await renderLayout('Attendance', content, req.session.user, 'attendance'));
+});
+
+app.get('/admin/reports', requireAuth('admin'), async (req, res) => {
+  const events = await pool.query('SELECT * FROM events ORDER BY event_date DESC');
+  const content = `
+    <h2>Reports & CSV Exports</h2>
+    <div class="card">
+      <h3>Generate Event Report</h3>
+      <form action="/admin/reports/export" method="GET">
+        <label>Select Event</label>
+        <select name="event_id">
+          ${events.rows.map(e => `<option value="${e.id}">${e.name} (${e.event_date})</option>`).join('')}
+        </select>
+        <button type="submit" class="btn" style="margin-top:10px;">Download CSV Report</button>
+      </form>
+    </div>
+  `;
+  res.send(await renderLayout('Reports', content, req.session.user, 'reports'));
+});
+
+app.get('/admin/reports/export', requireAuth('admin'), async (req, res) => {
+  const { event_id } = req.query;
+  const records = await pool.query(`
+    SELECT m.member_id, m.first_name, m.last_name, m.grade_level, m.section, e.name as event_name, a.attendance_date, a.time_in, a.time_out, a.status
+    FROM attendance a
+    JOIN members m ON a.member_id = m.id
+    JOIN events e ON a.event_id = e.id
+    WHERE a.event_id = $1
+  `, [event_id]);
+
+  let csv = 'Member ID,First Name,Last Name,Grade,Section,Event,Date,Time In,Time Out,Status\n';
+  records.rows.forEach(r => {
+    csv += `"${r.member_id}","${r.first_name}","${r.last_name}","${r.grade_level}","${r.section}","${r.event_name}","${r.attendance_date}","${r.time_in || ''}","${r.time_out || ''}","${r.status}"\n`;
+  });
+
+  res.header('Content-Type', 'text/csv');
+  res.attachment(`attendance_report_${event_id}.csv`);
+  res.send(csv);
+});
+
+// SCANNERS & LOGS MANAGEMENT
+app.get('/admin/scanners', requireAuth('admin'), async (req, res) => {
+  const scanners = await pool.query("SELECT * FROM users WHERE role = 'scanner'");
+  const content = `
+    <h2>Scanner Accounts Management</h2>
+    <div class="card">
+      <h3>Create Scanner Account</h3>
+      <form action="/admin/scanners/add" method="POST">
+        <label>Full Name</label><input type="text" name="name" required placeholder="Officer Name">
+        <label>Username</label><input type="text" name="username" required placeholder="scanner_user">
+        <label>Password</label><input type="password" name="password" required>
+        <button type="submit" class="btn" style="margin-top:10px;">Create Scanner Account</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Authorized Scanner Accounts</h3>
+      <table>
+        <thead><tr><th>Name</th><th>Username</th><th>Created</th></tr></thead>
+        <tbody>
+          ${scanners.rows.map(s => `<tr><td><b>${s.name}</b></td><td>${s.username}</td><td>${s.created_at}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  res.send(await renderLayout('Scanners', content, req.session.user, 'scanners'));
+});
+
+app.post('/admin/scanners/add', requireAuth('admin'), async (req, res) => {
+  const { name, username, password } = req.body;
+  const hashed = await bcrypt.hash(password, 10);
+  await pool.query('INSERT INTO users (username, password, role, name) VALUES ($1, $2, $3, $4)', [username, hashed, 'scanner', name]);
+  res.redirect('/admin/scanners');
+});
+
+app.get('/admin/logs', requireAuth('admin'), async (req, res) => {
+  const logs = await pool.query('SELECT * FROM system_logs ORDER BY created_at DESC LIMIT 100');
+  const content = `
+    <h2>System Audit & Security Logs</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Timestamp</th><th>User</th><th>Role</th><th>Action</th><th>Details</th></tr></thead>
+        <tbody>
+          ${logs.rows.rows || logs.rows.map(l => `
+            <tr>
+              <td><small>${l.created_at}</small></td>
+              <td><b>${l.username}</b></td>
+              <td><span class="badge" style="background:#e2e8f0;">${l.role}</span></td>
+              <td><b>${l.action}</b></td>
+              <td>${l.details}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  res.send(await renderLayout('System Logs', content, req.session.user, 'logs'));
+});
+
+app.get('/admin/announcements', requireAuth('admin'), async (req, res) => {
+  const anns = await pool.query('SELECT * FROM announcements ORDER BY posted_date DESC');
+  const content = `
+    <h2>Announcements Management</h2>
+    <div class="card">
+      <h3>Post Announcement</h3>
+      <form action="/admin/announcements/add" method="POST">
+        <label>Title</label><input type="text" name="title" required>
+        <label>Message</label><textarea name="message" rows="4" required></textarea>
+        <button type="submit" class="btn" style="margin-top:10px;">Post Announcement</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Active Announcements</h3>
+      ${anns.rows.map(a => `<div style="border-bottom:1px solid #e2e8f0; padding:10px 0;"><h4>${a.title}</h4><p>${a.message}</p><small>${a.posted_date}</small></div>`).join('')}
+    </div>
+  `;
+  res.send(await renderLayout('Announcements', content, req.session.user, 'announcements'));
+});
+
+app.post('/admin/announcements/add', requireAuth('admin'), async (req, res) => {
+  const { title, message } = req.body;
+  await pool.query('INSERT INTO announcements (title, message) VALUES ($1, $2)', [title, message]);
+  res.redirect('/admin/announcements');
+});
+
+app.get('/admin/settings', requireAuth('admin'), async (req, res) => {
+  const sRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+  const s = sRes.rows[0];
+  const content = `
+    <h2>Organization & System Settings</h2>
+    <div class="card" style="max-width:600px;">
+      <form action="/admin/settings/update" method="POST">
+        <label>School Name</label><input type="text" name="school_name" value="${s.school_name}" required>
+        <label>Organization Name</label><input type="text" name="org_name" value="${s.org_name}" required>
+        <label>School Year</label><input type="text" name="school_year" value="${s.school_year}" required>
+        <label>Organization Description</label><textarea name="org_desc">${s.org_desc || ''}</textarea>
+        <label>Theme / Accent Color</label><input type="color" name="theme_color" value="${s.theme_color}" style="height:40px; padding:2px;">
+        <label>Member ID Prefix</label><input type="text" name="member_id_prefix" value="${s.member_id_prefix}" required>
+        <button type="submit" class="btn" style="margin-top:15px;">Save Settings</button>
+      </form>
+    </div>
+  `;
+  res.send(await renderLayout('Settings', content, req.session.user, 'settings'));
+});
+
+app.post('/admin/settings/update', requireAuth('admin'), async (req, res) => {
+  const { school_name, org_name, school_year, org_desc, theme_color, member_id_prefix } = req.body;
+  await pool.query('UPDATE organization_settings SET school_name=$1, org_name=$2, school_year=$3, org_desc=$4, theme_color=$5, member_id_prefix=$6', [school_name, org_name, school_year, org_desc, theme_color, member_id_prefix]);
+  res.redirect('/admin/settings');
+});
+
+// --- DEDICATED SCANNER PORTAL & LINK (`/scanner`) ---
 app.get('/scanner', requireAuth(), async (req, res) => {
   if (req.session.user.role !== 'admin' && req.session.user.role !== 'scanner') {
-    return res.status(403).send('Access Denied. Authorized scanner personnel only.');
+    return res.status(403).send('Unauthorized Scanner Access');
   }
-  try {
-    const events = (await pool.query("SELECT * FROM events WHERE status = 'Active' ORDER BY event_date DESC")).rows;
-    const settings = (await pool.query('SELECT * FROM organization_settings WHERE id = 1')).rows[0];
-    res.send(renderScannerPortal(events, settings));
-  } catch (err) {
-    res.status(500).send(err.message);
-  }
-});
-
-// Scanner API: Process QR Scan
-app.post('/api/scanner/scan', requireAuth(), async (req, res) => {
-  if (req.session.user.role !== 'admin' && req.session.user.role !== 'scanner') {
-    return res.status(403).json({ success: false, message: 'Unauthorized scanner access.' });
-  }
-
-  const { qr_token, event_id, scan_type } = req.body; // scan_type: 'Time In' or 'Time Out'
-  try {
-    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token]);
-    if (memberRes.rows.length === 0) {
-      await logAudit(req.session.user.username, req.session.user.role, 'Invalid QR Scan', `Scanned unknown token`);
-      return res.json({ success: false, status: 'INVALID', message: 'QR Code not recognized or registered.' });
-    }
-
-    const member = memberRes.rows[0];
-    if (member.status !== 'Active') {
-      return res.json({ success: false, status: 'INACTIVE', message: 'Member account is inactive.' });
-    }
-
-    const eventRes = await pool.query('SELECT * FROM events WHERE id = $1', [event_id]);
-    if (eventRes.rows.length === 0) {
-      return res.json({ success: false, status: 'NO_EVENT', message: 'Please select a valid attendance event.' });
-    }
-    const event = eventRes.rows[0];
-    const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toTimeString().split(' ')[0];
-
-    // Check existing attendance for today/event
-    let attRes = await pool.query('SELECT * FROM attendance WHERE member_id = $1 AND event_id = $2 AND attendance_date = $3', [member.id, event_id, today]);
+  const events = await pool.query('SELECT * FROM events WHERE event_date = CURRENT_DATE OR event_date >= CURRENT_DATE ORDER BY event_date ASC');
+  
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QR Scanner Portal - ClubTrack</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body { background: #0f172a; color: #fff; font-family: sans-serif; padding: 20px; text-align: center; }
+    .scanner-container { max-width: 500px; margin: 0 auto; background: #1e293b; padding: 20px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    select, button { width: 100%; padding: 14px; margin: 10px 0; border-radius: 8px; font-size: 1rem; border: none; }
+    select { background: #334155; color: #fff; }
+    .mode-buttons { display: flex; gap: 10px; margin: 15px 0; }
+    .mode-btn { flex: 1; padding: 15px; font-weight: bold; cursor: pointer; border-radius: 8px; background: #334155; color: #fff; border: 2px solid transparent; }
+    .mode-btn.active-in { background: #166534; border-color: #22c55e; }
+    .mode-btn.active-out { background: #991b1b; border-color: #ef4444; }
+    #reader { width: 100%; border-radius: 8px; overflow: hidden; margin-top: 15px; background: #000; }
+    .result-box { margin-top: 20px; padding: 15px; border-radius: 8px; font-size: 1.1rem; font-weight: bold; display: none; }
+    .success-box { background: #166534; color: #dcfce7; }
+    .error-box { background: #991b1b; color: #fee2e2; }
+    .audio-toggle { margin-bottom: 10px; font-size: 0.9rem; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="scanner-container">
+    <h2>📱 QR Code Attendance Scanner</h2>
+    <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:15px;">Logged in as: ${req.session.user.name}</p>
     
-    if (scan_type === 'Time In') {
-      if (attRes.rows.length > 0 && attRes.rows[0].time_in) {
-        return res.json({
-          success: false,
-          status: 'DUPLICATE',
-          message: `${member.first_name} ${member.last_name} already has a Time In record for this event.`,
-          member: member,
-          time: attRes.rows[0].time_in
-        });
-      }
+    <div class="audio-toggle">
+      <label><input type="checkbox" id="soundToggle" checked> 🔊 Enable Sound Feedback</label>
+    </div>
 
-      let status = 'Present';
-      if (nowTime > event.late_cutoff) status = 'Late';
+    <label style="text-align:left; display:block; color:#cbd5e1;">Select Attendance Event</label>
+    <select id="eventSelect">
+      ${events.rows.map(e => `<option value="${e.id}">${e.name} (${e.event_date})</option>`).join('')}
+    </select>
 
-      if (attRes.rows.length > 0) {
-        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [nowTime, status, attRes.rows[0].id]);
-      } else {
-        await pool.query(
-          'INSERT INTO attendance (member_id, event_id, attendance_date, time_in, status) VALUES ($1, $2, $3, $4, $5)',
-          [member.id, event_id, today, nowTime, status]
-        );
-      }
+    <label style="text-align:left; display:block; color:#cbd5e1; margin-top:10px;">Select Scan Mode</label>
+    <div class="mode-buttons">
+      <button type="button" class="mode-btn active-in" id="btnIn" onclick="setMode('TIME_IN')">TIME IN</button>
+      <button type="button" class="mode-btn" id="btnOut" onclick="setMode('TIME_OUT')">TIME OUT</button>
+    </div>
 
-      await logAudit(req.session.user.username, req.session.user.role, 'Time In', `Recorded Time In for ${member.member_id}`);
-      return res.json({ success: true, status: 'SUCCESS_IN', member, time: nowTime, event_name: event.event_name });
-    } else {
-      // Time Out
-      if (attRes.rows.length === 0 || !attRes.rows[0].time_in) {
-        return res.json({ success: false, status: 'NO_TIME_IN', message: 'Cannot Time Out without an existing Time In record.' });
-      }
-      if (attRes.rows[0].time_out) {
-        return res.json({ success: false, status: 'DUPLICATE', message: 'Member already recorded Time Out for this event.', member, time: attRes.rows[0].time_out });
-      }
+    <button onclick="startScanner()" style="background:#4f46e5; color:#fff; font-weight:bold; cursor:pointer;">▶ Start Camera</button>
+    
+    <div id="reader"></div>
+    <div id="resultBox" class="result-box"></div>
+    
+    <div style="margin-top:20px;">
+      <a href="/admin" style="color:#94a3b8; text-decoration:none; font-size:0.85rem;">Back to Dashboard</a>
+    </div>
+  </div>
 
-      await pool.query('UPDATE attendance SET time_out = $1, status = $2 WHERE id = $3', [nowTime, 'Completed', attRes.rows[0].id]);
-      await logAudit(req.session.user.username, req.session.user.role, 'Time Out', `Recorded Time Out for ${member.member_id}`);
-      return res.json({ success: true, status: 'SUCCESS_OUT', member, time: nowTime, event_name: event.event_name });
+  <script>
+    let currentMode = 'TIME_IN';
+    let html5QrCode = null;
+    let isProcessing = false;
+
+    function setMode(mode) {
+      currentMode = mode;
+      document.getElementById('btnIn').className = mode === 'TIME_IN' ? 'mode-btn active-in' : 'mode-btn';
+      document.getElementById('btnOut').className = mode === 'TIME_OUT' ? 'mode-btn active-out' : 'mode-btn';
     }
-  } catch (err) {
-    res.json({ success: false, status: 'ERROR', message: err.message });
-  }
-});
 
-
-// ==================== HTML TEMPLATES (Single File Architecture) ====================
-
-function renderLoginPage() {
-  return `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ClubTrack QR Attendance System - Login</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body class="bg-gradient-to-br from-blue-900 to-indigo-800 min-h-screen flex items-center justify-center p-4">
-    <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl p-8">
-      <div class="text-center mb-6">
-        <h1 class="text-2xl font-black text-blue-900">ClubTrack QR System</h1>
-        <p class="text-sm text-gray-500">Organization & Club Attendance Management</p>
-      </div>
-      <form id="loginForm" class="space-y-4">
-        <div>
-          <label class="block text-sm font-semibold text-gray-700">Username</label>
-          <input type="text" id="username" required class="w-full mt-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-        </div>
-        <div>
-          <label class="block text-sm font-semibold text-gray-700">Password</label>
-          <input type="password" id="password" required class="w-full mt-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-        </div>
-        <div id="errorMsg" class="text-red-500 text-sm hidden"></div>
-        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition duration-200">Login</button>
-      </form>
-    </div>
-    <script>
-      document.getElementById('loginForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const res = await fetch('/api/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            username: document.getElementById('username').value,
-            password: document.getElementById('password').value
-          })
-        });
-        const data = await res.json();
-        if(data.success) {
-          window.location.href = data.redirect;
-        } else {
-          const err = document.getElementById('errorMsg');
-          err.innerText = data.message;
-          err.classList.remove('hidden');
-        }
-      });
-    </script>
-  </body>
-  </html>`;
-}
-
-function renderChangePasswordPage() {
-  return `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8"><title>Change Temporary Password</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
-    <div class="bg-white max-w-md w-full p-8 rounded-xl shadow-lg space-y-4">
-      <h2 class="text-xl font-bold text-red-600">Security Requirement</h2>
-      <p class="text-sm text-gray-600">You are using a temporary password. Please create a new secure password.</p>
-      <form id="passForm" class="space-y-3">
-        <input type="password" id="currentPassword" placeholder="Current Temporary Password" required class="w-full p-2 border rounded">
-        <input type="password" id="newPassword" placeholder="New Password (min 8 chars)" required class="w-full p-2 border rounded">
-        <input type="password" id="confirmPassword" placeholder="Confirm New Password" required class="w-full p-2 border rounded">
-        <div id="msg" class="text-sm"></div>
-        <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded font-bold">Update Password</button>
-      </form>
-    </div>
-    <script>
-      document.getElementById('passForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const res = await fetch('/api/change-password', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            currentPassword: document.getElementById('currentPassword').value,
-            newPassword: document.getElementById('newPassword').value,
-            confirmPassword: document.getElementById('confirmPassword').value
-          })
-        });
-        const data = await res.json();
-        if(data.success) {
-          alert(data.message);
-          window.location.href = '/member';
-        } else {
-          document.getElementById('msg').innerText = data.message;
-          document.getElementById('msg').className = 'text-red-500 text-sm';
-        }
-      });
-    </script>
-  </body></html>`;
-}
-
-function renderAdminDashboard(settings, members, events, announcements, stats) {
-  return `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8"><title>Admin Portal - ${settings.org_name}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
-  </head>
-  <body class="bg-gray-50 flex h-screen overflow-hidden">
-    <!-- Sidebar -->
-    <aside class="w-64 bg-blue-900 text-white flex flex-col justify-between hidden md:flex">
-      <div>
-        <div class="p-6 font-black text-lg border-b border-blue-800">${settings.org_name}</div>
-        <nav class="p-4 space-y-2">
-          <a href="/admin" class="block py-2.5 px-4 rounded bg-blue-800 font-semibold">Dashboard</a>
-          <a href="/scanner" target="_blank" class="block py-2.5 px-4 rounded hover:bg-blue-800">Open Scanner Portal ↗</a>
-          <a href="/member" target="_blank" class="block py-2.5 px-4 rounded hover:bg-blue-800">Member Portal ↗</a>
-          <a href="/logout" class="block py-2.5 px-4 rounded text-red-300 hover:bg-blue-800">Logout</a>
-        </nav>
-      </div>
-    </aside>
-
-    <!-- Main Content -->
-    <main class="flex-1 flex flex-col overflow-y-auto">
-      <header class="bg-white shadow px-6 py-4 flex justify-between items-center">
-        <h1 class="text-xl font-bold text-gray-800">Administrator Dashboard</h1>
-        <div class="text-sm font-medium text-gray-600">${settings.school_name} (${settings.school_year})</div>
-      </header>
-      <div class="p-6 space-y-6">
-        <!-- Stats -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div class="bg-white p-4 rounded-xl shadow border">
-            <div class="text-gray-500 text-sm">Total Members</div>
-            <div class="text-2xl font-bold text-blue-600">${stats.totalMembers}</div>
-          </div>
-          <div class="bg-white p-4 rounded-xl shadow border">
-            <div class="text-gray-500 text-sm">Active Members</div>
-            <div class="text-2xl font-bold text-green-600">${stats.activeMembers}</div>
-          </div>
-          <div class="bg-white p-4 rounded-xl shadow border">
-            <div class="text-gray-500 text-sm">Present Today</div>
-            <div class="text-2xl font-bold text-indigo-600">${stats.presentToday}</div>
-          </div>
-        </div>
-
-        <!-- Register Member Form Section -->
-        <div class="bg-white p-6 rounded-xl shadow border">
-          <h2 class="text-lg font-bold mb-4 text-gray-800">Register New Member</h2>
-          <form id="memberForm" class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <input type="text" id="first_name" placeholder="First Name" required class="p-2 border rounded">
-            <input type="text" id="middle_name" placeholder="Middle Name" class="p-2 border rounded">
-            <input type="text" id="last_name" placeholder="Last Name" required class="p-2 border rounded">
-            <select id="gender" class="p-2 border rounded"><option>Male</option><option>Female</option></select>
-            <input type="text" id="grade_level" placeholder="Grade Level (e.g. Grade 10)" required class="p-2 border rounded">
-            <input type="text" id="section" placeholder="Section (e.g. Rizal)" required class="p-2 border rounded">
-            <input type="text" id="position" placeholder="Position (e.g. Member)" class="p-2 border rounded">
-            <input type="text" id="contact_info" placeholder="Contact Info" class="p-2 border rounded">
-            <input type="email" id="email" placeholder="Email Address" class="p-2 border rounded">
-            <button type="submit" class="md:col-span-3 bg-blue-600 text-white py-2 rounded font-bold hover:bg-blue-700">Register Member & Generate Credentials</button>
-          </form>
-          <div id="credentialResult" class="mt-4 hidden p-4 bg-green-50 border border-green-200 rounded-lg"></div>
-        </div>
-
-        <!-- Members List -->
-        <div class="bg-white p-6 rounded-xl shadow border overflow-x-auto">
-          <h2 class="text-lg font-bold mb-4 text-gray-800">Registered Members</h2>
-          <table class="w-full text-left border-collapse">
-            <thead>
-              <tr class="border-b bg-gray-100 text-sm">
-                <th class="p-3">Member ID</th>
-                <th class="p-3">Full Name</th>
-                <th class="p-3">Grade & Section</th>
-                <th class="p-3">Position</th>
-                <th class="p-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y text-sm">
-              ${members.map(m => `
-                <tr>
-                  <td class="p-3 font-semibold">${m.member_id}</td>
-                  <td class="p-3">${m.first_name} ${m.last_name}</td>
-                  <td class="p-3">${m.grade_level} - ${m.section}</td>
-                  <td class="p-3">${m.position}</td>
-                  <td class="p-3 space-x-2">
-                    <button onclick="deleteMember(${m.id})" class="text-red-600 hover:underline font-medium">Delete</button>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </main>
-
-    <script>
-      document.getElementById('memberForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const body = {
-          first_name: document.getElementById('first_name').value,
-          middle_name: document.getElementById('middle_name').value,
-          last_name: document.getElementById('last_name').value,
-          gender: document.getElementById('gender').value,
-          grade_level: document.getElementById('grade_level').value,
-          section: document.getElementById('section').value,
-          position: document.getElementById('position').value,
-          contact_info: document.getElementById('contact_info').value,
-          email: document.getElementById('email').value
-        };
-        const res = await fetch('/api/admin/members', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-        const data = await res.json();
-        if(data.success) {
-          const c = data.credentials;
-          document.getElementById('credentialResult').innerHTML = \`
-            <h3 class="font-bold text-green-800 text-lg">Member Successfully Registered!</h3>
-            <p><strong>ID:</strong> \${c.member_id}</p>
-            <p><strong>Username:</strong> \${c.username}</p>
-            <p><strong>Temporary Password:</strong> \${c.tempPassword}</p>
-            <div class="mt-2"><img src="\${c.qrCodeDataUrl}" class="w-32 h-32"/></div>
-            <button onclick="location.reload()" class="mt-3 bg-green-600 text-white px-4 py-1.5 rounded text-sm font-bold">Done / Refresh</button>
-          \`;
-          document.getElementById('credentialResult').classList.remove('hidden');
-        } else {
-          alert(data.message);
-        }
-      });
-
-      async function deleteMember(id) {
-        if(!confirm('Are you sure you want to delete this member?')) return;
-        const res = await fetch('/api/admin/members/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id })
-        });
-        const data = await res.json();
-        if(data.success) location.reload();
-        else alert(data.message);
+    // Web Audio API feedback sounds
+    function playSound(type) {
+      if (!document.getElementById('soundToggle').checked) return;
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      
+      if (type === 'success') {
+        osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+        gain.gain.setValueAtTime(0.1, ctx.currentTime);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.15);
+      } else {
+        osc.frequency.setValueAtTime(150, ctx.currentTime);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.4);
       }
-    </script>
-  </body></html>`;
-}
+    }
 
-function renderMemberPortal(member, settings, qrCodeDataUrl, attendance, announcements) {
-  return `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8"><title>Member Portal - ${settings.org_name}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-      @media print {
-        body * { visibility: hidden; }
-        #printableIdCard, #printableIdCard * { visibility: visible; }
-        #printableIdCard { position: absolute; left: 0; top: 0; width: 100%; }
-      }
-    </style>
-  </head>
-  <body class="bg-gray-100 min-h-screen p-6">
-    <div class="max-w-4xl mx-auto space-y-6">
-      <div class="bg-white p-6 rounded-xl shadow flex justify-between items-center">
-        <div>
-          <h1 class="text-xl font-bold text-blue-900">Welcome, ${member.first_name} ${member.last_name}</h1>
-          <p class="text-sm text-gray-500">${settings.school_name} | ${settings.org_name}</p>
-        </div>
-        <a href="/logout" class="bg-red-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-red-600">Logout</a>
-      </div>
-
-      <!-- Digital ID Card (Standardized Sizing) -->
-      <div class="bg-white p-6 rounded-xl shadow flex flex-col items-center">
-        <h2 class="text-lg font-bold mb-4 text-gray-800">Your Digital Organization ID Card</h2>
-        
-        <div id="printableIdCard" class="w-[350px] bg-white border-2 border-blue-900 rounded-2xl shadow-lg p-5 text-center relative overflow-hidden">
-          <div class="bg-blue-900 text-white py-2 rounded-t-lg -mx-5 -mt-5 mb-4">
-            <h3 class="text-xs font-bold uppercase tracking-wider">${settings.school_name}</h3>
-            <h4 class="text-sm font-extrabold">${settings.org_name}</h4>
-          </div>
-          <div class="w-24 h-24 mx-auto bg-gray-200 rounded-full flex items-center justify-center text-2xl font-bold text-gray-600 mb-3 border-4 border-blue-900">
-            ${member.first_name[0]}${member.last_name[0]}
-          </div>
-          <h3 class="text-lg font-black text-gray-900">${member.first_name} ${member.last_name}</h3>
-          <p class="text-xs text-blue-700 font-bold mb-2">${member.position}</p>
+    function startScanner() {
+      if (html5QrCode) return;
+      html5QrCode = new Html5Qrcode("reader");
+      html5QrCode.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: 250 },
+        async (decodedText) => {
+          if (isProcessing) return;
+          isProcessing = true;
           
-          <div class="bg-gray-50 p-2 rounded text-xs text-left space-y-1 mb-3 border">
-            <div><strong>Member ID:</strong> ${member.member_id}</div>
-            <div><strong>Grade/Section:</strong> ${member.grade_level} - ${member.section}</div>
-            <div><strong>Username:</strong> ${member.user_id ? member.username : ''}</div>
-          </div>
-
-          <div class="flex justify-center mb-2">
-            <img src="${qrCodeDataUrl}" class="w-28 h-28 border p-1 bg-white rounded">
-          </div>
-          <p class="text-[9px] text-gray-400">Official Membership Identification Card</p>
-        </div>
-
-        <div class="mt-4 flex space-x-3">
-          <button onclick="window.print()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-4 py-2 rounded shadow">Print ID Card</button>
-          <a href="${qrCodeDataUrl}" download="${member.member_id}-QR.png" class="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-2 rounded shadow inline-block">Download QR</a>
-        </div>
-      </div>
-
-      <!-- Attendance History -->
-      <div class="bg-white p-6 rounded-xl shadow">
-        <h2 class="text-lg font-bold mb-4 text-gray-800">My Attendance Records</h2>
-        <table class="w-full text-left border-collapse text-sm">
-          <thead>
-            <tr class="border-b bg-gray-50">
-              <th class="p-3">Event</th>
-              <th class="p-3">Date</th>
-              <th class="p-3">Time In</th>
-              <th class="p-3">Time Out</th>
-              <th class="p-3">Status</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y">
-            ${attendance.map(a => `
-              <tr>
-                <td class="p-3 font-semibold">${a.event_name}</td>
-                <td class="p-3">${a.attendance_date}</td>
-                <td class="p-3">${a.time_in || '---'}</td>
-                <td class="p-3">${a.time_out || '---'}</td>
-                <td class="p-3"><span class="px-2 py-1 rounded text-xs font-bold ${a.status==='Present'?'bg-green-100 text-green-800':a.status==='Late'?'bg-yellow-100 text-yellow-800':'bg-blue-100 text-blue-800'}">${a.status}</span></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </body></html>`;
-}
-
-function renderScannerPortal(events, settings) {
-  return `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QR Scanner Portal - ${settings.org_name}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
-  </head>
-  <body class="bg-gray-900 text-white min-h-screen flex flex-col items-center p-4">
-    <div class="w-full max-w-md bg-gray-800 rounded-2xl shadow-xl p-6 space-y-4">
-      <div class="flex justify-between items-center border-b border-gray-700 pb-3">
-        <h1 class="text-lg font-bold">QR Attendance Scanner</h1>
-        <a href="/admin" class="text-xs text-blue-400 underline">Dashboard</a>
-      </div>
-
-      <div>
-        <label class="block text-xs uppercase font-bold text-gray-400 mb-1">Select Event</label>
-        <select id="eventId" class="w-full bg-gray-700 border border-gray-600 rounded p-2.5 text-white">
-          ${events.map(e => `<option value="${e.id}">${e.event_name} (${e.event_date})</option>`).join('')}
-        </select>
-      </div>
-
-      <div>
-        <label class="block text-xs uppercase font-bold text-gray-400 mb-1">Select Scan Type</label>
-        <div class="grid grid-cols-2 gap-3">
-          <button type="button" id="btnTimeIn" onclick="setScanType('Time In')" class="py-3 rounded-lg font-bold bg-green-600 text-white shadow-lg border-2 border-green-400">TIME IN</button>
-          <button type="button" id="btnTimeOut" onclick="setScanType('Time Out')" class="py-3 rounded-lg font-bold bg-gray-700 text-gray-300 border border-gray-600">TIME OUT</button>
-        </div>
-      </div>
-
-      <div class="pt-2">
-        <button onclick="startScanner()" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold shadow-lg">START CAMERA</button>
-      </div>
-
-      <div id="reader" class="w-full overflow-hidden rounded-lg mt-4 bg-black"></div>
-
-      <div id="scanResult" class="hidden p-4 rounded-xl text-center font-bold"></div>
-    </div>
-
-    <audio id="successSound" src="https://www.soundjay.com/buttons/sounds/button-3.mp3" preload="auto"></audio>
-    <audio id="errorSound" src="https://www.soundjay.com/buttons/sounds/button-10.mp3" preload="auto"></audio>
-
-    <script>
-      let currentScanType = 'Time In';
-      let html5QrCode = null;
-
-      function setScanType(type) {
-        currentScanType = type;
-        const bIn = document.getElementById('btnTimeIn');
-        const bOut = document.getElementById('btnTimeOut');
-        if(type === 'Time In') {
-          bIn.className = 'py-3 rounded-lg font-bold bg-green-600 text-white shadow-lg border-2 border-green-400';
-          bOut.className = 'py-3 rounded-lg font-bold bg-gray-700 text-gray-300 border border-gray-600';
-        } else {
-          bOut.className = 'py-3 rounded-lg font-bold bg-blue-600 text-white shadow-lg border-2 border-blue-400';
-          bIn.className = 'py-3 rounded-lg font-bold bg-gray-700 text-gray-300 border border-gray-600';
-        }
-      }
-
-      function playSound(type) {
-        try {
-          if(type === 'success') document.getElementById('successSound').play();
-          else document.getElementById('errorSound').play();
-        } catch(e) {}
-      }
-
-      function startScanner() {
-        if(html5QrCode) {
-          html5QrCode.stop().catch(() => {});
-        }
-        html5QrCode = new Html5Qrcode("reader");
-        html5QrCode.start(
-          { facingMode: "environment" },
-          { fps: 10, qrbox: 250 },
-          async (decodedText) => {
-            const eventId = document.getElementById('eventId').value;
-            const res = await fetch('/api/scanner/scan', {
+          const eventId = document.getElementById('eventSelect').value;
+          try {
+            const res = await fetch('/api/scan', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ qr_token: decodedText, event_id: eventId, scan_type: currentScanType })
+              body: JSON.stringify({ qr_token: decodedText, event_id: eventId, scan_type: currentMode })
             });
             const data = await res.json();
-            const resBox = document.getElementById('scanResult');
-            resBox.classList.remove('hidden');
-
-            if(data.success) {
+            const box = document.getElementById('resultBox');
+            box.style.display = 'block';
+            
+            if (data.success) {
               playSound('success');
-              resBox.className = 'p-4 rounded-xl text-center bg-green-800 text-green-100 font-bold';
-              resBox.innerHTML = \`✓ \${currentScanType.toUpperCase()} RECORDED<br><span class="text-sm font-normal">\${data.member.first_name} \${data.member.last_name} (\${data.member.member_id})</span><br><span class="text-xs">\${data.time}</span>\`;
+              box.className = 'result-box success-box';
+              box.innerHTML = \`✓ \${data.message}<br><small>\${data.member.first_name} \${data.member.last_name} (\${data.member.member_id})</small>\`;
             } else {
               playSound('error');
-              resBox.className = 'p-4 rounded-xl text-center bg-red-800 text-red-100 font-bold';
-              resBox.innerHTML = \`⚠ \${data.message}\`;
+              box.className = 'result-box error-box';
+              box.innerHTML = \`⚠ \${data.error}\`;
             }
+          } catch(e) {
+            console.error(e);
+          }
+          setTimeout(() => { isProcessing = false; }, 3000);
+        }
+      ).catch(err => {
+        alert('Camera error or permission denied: ' + err);
+      });
+    }
+  </script>
+</body>
+</html>`);
+});
 
-            setTimeout(() => { resBox.classList.add('hidden'); }, 4000);
-          },
-          (errorMessage) => {}
-        ).catch(err => {
-          alert('Unable to start camera: ' + err);
-        });
+// Scan Processing API endpoint
+app.post('/api/scan', requireAuth(), async (req, res) => {
+  const { qr_token, event_id, scan_type } = req.body;
+  try {
+    const memRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token]);
+    if (memRes.rows.length === 0) {
+      await pool.query('INSERT INTO scanner_logs (scanner_user, event_id, scan_type, qr_value, result, message) VALUES ($1, $2, $3, $4, $5, $6)',
+        [req.session.user.username, event_id, scan_type, qr_token, 'Invalid QR', 'QR Code not registered']);
+      return res.json({ success: false, error: 'INVALID QR CODE: Not Registered' });
+    }
+
+    const member = memRes.rows[0];
+    if (member.status !== 'Active') {
+      return res.json({ success: false, error: 'MEMBER INACTIVE: Access Denied' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const existingAtt = await pool.query('SELECT * FROM attendance WHERE member_id = $1 AND event_id = $2 AND attendance_date = $3', [member.id, event_id, today]);
+
+    const currentTime = new Date().toTimeString().split(' ')[0];
+
+    if (scan_type === 'TIME_IN') {
+      if (existingAtt.rows.length > 0 && existingAtt.rows[0].time_in) {
+        return res.json({ success: false, error: `Already Timed In at ${existingAtt.rows[0].time_in}` });
       }
-    </script>
-  </body></html>`;
-}
 
-// Start Server
+      // Check event cutoff for Late status
+      const evRes = await pool.query('SELECT late_cutoff FROM events WHERE id = $1', [event_id]);
+      const cutoff = evRes.rows[0]?.late_cutoff || '08:00:00';
+      const status = currentTime > cutoff ? 'Late' : 'Present';
+
+      if (existingAtt.rows.length > 0) {
+        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [currentTime, status, existingAtt.rows[0].id]);
+      } else {
+        await pool.query('INSERT INTO attendance (member_id, event_id, attendance_date, time_in, status, scan_method) VALUES ($1, $2, $3, $4, $5, $6)',
+          [member.id, event_id, today, currentTime, status, 'QR']);
+      }
+      return res.json({ success: true, message: 'TIME IN RECORDED', member });
+    } else {
+      if (existingAtt.rows.length === 0 || !existingAtt.rows[0].time_in) {
+        return res.json({ success: false, error: 'No Time In record found for today.' });
+      }
+      if (existingAtt.rows[0].time_out) {
+        return res.json({ success: false, error: `Already Timed Out at ${existingAtt.rows[0].time_out}` });
+      }
+
+      await pool.query('UPDATE attendance SET time_out = $1 WHERE id = $2', [currentTime, existingAtt.rows[0].id]);
+      return res.json({ success: true, message: 'TIME OUT RECORDED', member });
+    }
+  } catch (err) {
+    console.error(err);
+    res.json({ success: false, error: 'Server Processing Error' });
+  }
+});
+
+// --- DEDICATED MEMBER PORTAL & LINK (`/member-portal`) ---
+app.get('/member-portal', requireAuth('member'), async (req, res) => {
+  const memRes = await pool.query('SELECT m.* FROM members m JOIN users u ON m.user_id = u.id WHERE u.id = $1', [req.session.user.id]);
+  if (memRes.rows.length === 0) return res.status(404).send('Member profile not found.');
+  const m = memRes.rows[0];
+
+  const sRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
+  const s = sRes.rows[0];
+
+  const anns = await pool.query('SELECT * FROM announcements ORDER BY posted_date DESC LIMIT 3');
+
+  const content = `
+    <h2>Welcome, ${m.first_name} (${m.member_id})</h2>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+      <div class="card">
+        <h3>👤 My Member Profile</h3>
+        <p><b>Full Name:</b> ${m.first_name} ${m.middle_name || ''} ${m.last_name}</p>
+        <p><b>Member ID:</b> ${m.member_id}</p>
+        <p><b>Grade & Section:</b> ${m.grade_level} - ${m.section}</p>
+        <p><b>Position:</b> ${m.position}</p>
+        <p><b>Organization:</b> ${s.org_name}</p>
+        <p><b>Status:</b> <span class="badge badge-${m.status.toLowerCase()}">${m.status}</span></p>
+      </div>
+      
+      <div class="card" style="text-align:center;">
+        <h3>🆔 Digital QR ID Card</h3>
+        <div class="id-card" style="margin:10px auto; transform:scale(0.9);">
+          <div class="id-header">
+            <h4>${s.school_name}</h4>
+            <h2>${s.org_name}</h2>
+          </div>
+          <div class="id-body">
+            <div class="id-photo">👤</div>
+            <div class="id-name">${m.first_name} ${m.last_name}</div>
+            <div class="id-meta">${m.position} | ${m.grade_level} - ${m.section}</div>
+            <p style="font-size:0.8rem; color:#64748b; margin-bottom:10px;">ID: <b>${m.member_id}</b></p>
+            <div id="qrcode" class="id-qr"></div>
+          </div>
+          <div class="id-footer">Official Student ID</div>
+        </div>
+        <button class="btn" onclick="window.print()">🖨️ Print ID Card</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <h3>📢 Organization Announcements</h3>
+      ${anns.rows.map(a => `<div style="border-bottom:1px solid #e2e8f0; padding:10px 0;"><h4>${a.title}</h4><p>${a.message}</p><small>${a.posted_date}</small></div>`).join('')}
+    </div>
+
+    <script>
+      QRCode.toCanvas(document.getElementById('qrcode'), '${m.qr_token}', { width: 130 }, function (error) {
+        if (error) console.error(error);
+      });
+    </script>
+  `;
+  res.send(await renderLayout('Member Portal', content, req.session.user, 'portal'));
+});
+
+app.get('/member-portal/attendance', requireAuth('member'), async (req, res) => {
+  const memRes = await pool.query('SELECT id FROM members WHERE user_id = $1', [req.session.user.id]);
+  if (memRes.rows.length === 0) return res.status(404).send('Member not found');
+  const memberId = memRes.rows[0].id;
+
+  const att = await pool.query(`
+    SELECT a.*, e.name as event_name FROM attendance a JOIN events e ON a.event_id = e.id WHERE a.member_id = $1 ORDER BY a.attendance_date DESC
+  `, [memberId]);
+
+  const content = `
+    <h2>My Attendance History</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Date</th><th>Event</th><th>Time In</th><th>Time Out</th><th>Status</th></tr></thead>
+        <tbody>
+          ${att.rows.map(r => `
+            <tr>
+              <td>${r.attendance_date}</td>
+              <td><b>${r.event_name}</b></td>
+              <td>${r.time_in || '-'}</td>
+              <td>${r.time_out || '-'}</td>
+              <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  res.send(await renderLayout('My Attendance', content, req.session.user, 'portal-attendance'));
+});
+
+// Root route redirect
+app.get('/', (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+  if (req.session.user.role === 'admin') return res.redirect('/admin');
+  if (req.session.user.role === 'scanner') return res.redirect('/scanner');
+  return res.redirect('/member-portal');
+});
+
+// Start Server listening on 0.0.0.0
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`ClubTrack QR Attendance System running on port ${PORT}`);
+  console.log(`Server running and listening on port ${PORT}`);
 });
