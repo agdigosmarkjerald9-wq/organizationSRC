@@ -1,7 +1,7 @@
 /**
  * ClubTrack QR Attendance System
  * Complete Organization and Club Management System for High School (PostgreSQL Version)
- * All-in-one app.js
+ * All-in-one app.js with ID Card Printing (8.5cm x 5.4cm), Member Deletion, Photo Upload, & Separate Portal Links
  */
 
 const express = require('express');
@@ -14,12 +14,12 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL Connection Pool configuration
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/clubtrack_db',
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
+// Increase payload limit for base64 profile photo uploads
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.json({ limit: '10mb' }));
 
@@ -31,7 +31,7 @@ app.use(session({
 }));
 
 // ==========================================
-// DATABASE INITIALIZATION & MIGRATIONS
+// DATABASE INITIALIZATION
 // ==========================================
 async function initDB() {
   try {
@@ -155,23 +155,17 @@ async function logAction(req, action, details) {
 }
 
 function isAuthenticated(req, res, next) {
-  if (req.session && req.session.user) {
-    return next();
-  }
+  if (req.session && req.session.user) return next();
   res.redirect('/login');
 }
 
 function isAdmin(req, res, next) {
-  if (req.session && req.session.user && req.session.user.role === 'admin') {
-    return next();
-  }
+  if (req.session && req.session.user && req.session.user.role === 'admin') return next();
   res.status(403).send('Access Denied: Administrator privileges required.');
 }
 
 function isScanner(req, res, next) {
-  if (req.session && req.session.user && (req.session.user.role === 'scanner' || req.session.user.role === 'admin')) {
-    return next();
-  }
+  if (req.session && req.session.user && (req.session.user.role === 'scanner' || req.session.user.role === 'admin')) return next();
   res.status(403).send('Access Denied: Scanner privileges required.');
 }
 
@@ -186,14 +180,10 @@ app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (result.rows.length === 0) {
-      return res.send(renderLoginPage('Invalid username or password.'));
-    }
+    if (result.rows.length === 0) return res.send(renderLoginPage('Invalid username or password.'));
     const user = result.rows[0];
     const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      return res.send(renderLoginPage('Invalid username or password.'));
-    }
+    if (!match) return res.send(renderLoginPage('Invalid username or password.'));
 
     req.session.user = {
       id: user.id,
@@ -205,10 +195,7 @@ app.post('/login', async (req, res) => {
 
     await logAction(req, 'LOGIN', `User ${user.username} logged in successfully.`);
 
-    if (user.must_change_password) {
-      return res.redirect('/force-password-change');
-    }
-
+    if (user.must_change_password) return res.redirect('/force-password-change');
     if (user.role === 'admin') res.redirect('/admin');
     else if (user.role === 'scanner') res.redirect('/scanner');
     else res.redirect('/member');
@@ -232,9 +219,7 @@ app.post('/force-password-change', isAuthenticated, async (req, res) => {
     const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.session.user.id]);
     const user = userRes.rows[0];
     const match = await bcrypt.compare(current_password, user.password);
-    if (!match) {
-      return res.send(renderForcePasswordChangePage('Current temporary password is incorrect.'));
-    }
+    if (!match) return res.send(renderForcePasswordChangePage('Current temporary password is incorrect.'));
 
     const hashed = await bcrypt.hash(new_password, 10);
     await pool.query('UPDATE users SET password = $1, must_change_password = FALSE WHERE id = $2', [hashed, user.id]);
@@ -253,9 +238,7 @@ app.post('/force-password-change', isAuthenticated, async (req, res) => {
 
 app.get('/logout', (req, res) => {
   logAction(req, 'LOGOUT', 'User logged out.');
-  req.session.destroy(() => {
-    res.redirect('/login');
-  });
+  req.session.destroy(() => { res.redirect('/login'); });
 });
 
 app.get('/', (req, res) => {
@@ -285,7 +268,7 @@ app.post('/admin/settings', isAuthenticated, isAdmin, async (req, res) => {
   res.redirect('/admin?tab=settings&success=1');
 });
 
-// Add Member with profile photo support
+// Add Member with Photo & Credential Display
 app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   const { first_name, middle_name, last_name, gender, grade_level, section, position, contact_info, email, profile_photo } = req.body;
   
@@ -324,17 +307,17 @@ app.post('/admin/members/add', isAuthenticated, isAdmin, async (req, res) => {
   `, [userId, memberId, first_name, middle_name || '', last_name, gender, grade_level, section, position, contact_info, email, profile_photo || '', qrToken]);
 
   await logAction(req, 'MEMBER_REGISTER', `Registered member ${fullName} (${memberId})`);
-  res.redirect(`/admin?tab=members&new_id=${memberId}&temp_pass=${tempPasswordRaw}&new_user=${username}`);
+  res.redirect(`/admin?tab=members&new_id=${memberId}&temp_pass=${tempPasswordRaw}&new_user=${username}&created_name=${encodeURIComponent(fullName)}&created_section=${encodeURIComponent(grade_level + ' - ' + section)}&created_position=${encodeURIComponent(position)}`);
 });
 
-// Delete Member Route
+// Delete Member
 app.post('/admin/members/delete/:id', isAuthenticated, isAdmin, async (req, res) => {
   const memberId = req.params.id;
-  const memRes = await pool.query('SELECT user_id, member_id, first_name, last_name FROM members WHERE id = $1', [memberId]);
+  const memRes = await pool.query('SELECT user_id, member_id FROM members WHERE id = $1', [memberId]);
   if (memRes.rows.length > 0) {
-    const mem = memRes.rows[0];
-    await pool.query('DELETE FROM users WHERE id = $1', [mem.user_id]);
-    await logAction(req, 'MEMBER_DELETE', `Deleted member ${mem.first_name} ${mem.last_name} (${mem.member_id})`);
+    const { user_id, member_id } = memRes.rows[0];
+    await pool.query('DELETE FROM users WHERE id = $1', [user_id]);
+    await logAction(req, 'MEMBER_DELETE', `Deleted member ID ${member_id}`);
   }
   res.redirect('/admin?tab=members');
 });
@@ -364,95 +347,6 @@ app.post('/admin/members/reset-password/:id', isAuthenticated, isAdmin, async (r
   res.redirect('/admin?tab=members');
 });
 
-// Printable ID Card Route (Standard 8.5cm x 5.40cm)
-app.get('/admin/members/id-card/:id', isAuthenticated, isAdmin, async (req, res) => {
-  const memberId = req.params.id;
-  const memRes = await pool.query(`
-    SELECT m.*, u.username FROM members m
-    JOIN users u ON m.user_id = u.id
-    WHERE m.id = $1
-  `, [memberId]);
-  if (memRes.rows.length === 0) return res.status(404).send('Member not found');
-  const member = memRes.rows[0];
-
-  const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
-  const settings = settingsRes.rows[0];
-
-  const qrDataUrl = await QRCode.toDataURL(member.qr_token);
-  const portalUrl = `${req.protocol}://${req.get('host')}/login`;
-
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>ID Card - ${member.first_name} ${member.last_name}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    @media print {
-      body { background: white !important; margin: 0; padding: 0; }
-      .no-print { display: none !important; }
-      .id-card-container { box-shadow: none !important; margin: 0 auto; }
-    }
-    /* Standard ID Card Size: 8.5cm x 5.40cm */
-    .id-card {
-      width: 8.5cm;
-      height: 5.40cm;
-      background: white;
-      border: 1px solid #cbd5e1;
-      border-radius: 12px;
-      overflow: hidden;
-      position: relative;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.1);
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      padding: 10px;
-      font-family: sans-serif;
-    }
-  </style>
-</head>
-<body class="bg-slate-100 min-h-screen flex flex-col items-center justify-center p-4">
-  <div class="no-print mb-6 flex space-x-3">
-    <button onclick="window.print()" class="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-xl shadow hover:bg-indigo-700 transition">Print ID Card</button>
-    <a href="/admin?tab=members" class="px-5 py-2.5 bg-slate-600 text-white font-bold rounded-xl shadow hover:bg-slate-700 transition">Back to Directory</a>
-  </div>
-
-  <div class="id-card">
-    <!-- Header -->
-    <div class="text-center border-b border-slate-200 pb-1">
-      <div class="text-[9px] font-bold text-slate-500 uppercase tracking-tight">${settings.school_name}</div>
-      <div class="text-[11px] font-ext500 font-bold text-indigo-600">${settings.org_name}</div>
-    </div>
-
-    <!-- Body Content -->
-    <div class="flex items-center space-x-3 my-auto">
-      <div class="w-16 h-16 bg-slate-100 rounded-lg overflow-hidden border border-slate-300 flex-shrink-0 flex items-center justify-center text-slate-400">
-        ${member.profile_photo ? `<img src="${member.profile_photo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-user text-xl"></i>`}
-      </div>
-      <div class="flex-1 min-w-0">
-        <h3 class="font-bold text-slate-900 text-xs truncate">${member.first_name} ${member.last_name}</h3>
-        <p class="text-[9px] font-semibold text-indigo-600 truncate">${member.position}</p>
-        <div class="text-[9px] text-slate-600 mt-0.5 space-y-0.5">
-          <div><strong class="text-slate-400">ID:</strong> ${member.member_id}</div>
-          <div><strong class="text-slate-400">Sec:</strong> ${member.grade_level} - ${member.section}</div>
-          <div><strong class="text-slate-400">Temp Pass:</strong> <span class="bg-amber-100 px-1 rounded font-mono text-amber-800">${member.temp_pass || 'Secure'}</span></div>
-        </div>
-      </div>
-      <div class="flex-shrink-0 text-center">
-        <img src="${qrDataUrl}" class="w-14 h-14 mx-auto">
-      </div>
-    </div>
-
-    <!-- Footer -->
-    <div class="border-t border-slate-200 pt-1 flex justify-between items-center text-[7px] text-slate-400">
-      <span>Portal: ${portalUrl}</span>
-      <span>SY: ${settings.school_year}</span>
-    </div>
-  </div>
-</body>
-</html>`);
-});
-
 app.post('/admin/events/add', isAuthenticated, isAdmin, async (req, res) => {
   const { name, description, event_date, start_time, end_time, late_after, requirement } = req.body;
   await pool.query(`
@@ -464,9 +358,8 @@ app.post('/admin/events/add', isAuthenticated, isAdmin, async (req, res) => {
 });
 
 app.post('/admin/events/delete/:id', isAuthenticated, isAdmin, async (req, res) => {
-  const eventId = req.params.id;
-  await pool.query('DELETE FROM events WHERE id = $1', [eventId]);
-  await logAction(req, 'EVENT_DELETE', `Deleted event ID ${eventId}`);
+  await pool.query('DELETE FROM events WHERE id = $1', [req.params.id]);
+  await logAction(req, 'EVENT_DELETE', `Deleted event ID ${req.params.id}`);
   res.redirect('/admin?tab=events');
 });
 
@@ -511,7 +404,6 @@ app.post('/admin/attendance/manual', isAuthenticated, isAdmin, async (req, res) 
       VALUES ($1, $2, $3, $4, $5, $6, 'MANUAL', $7)
     `, [member_id, event_id, attendance_date, time_in || null, time_out || null, status, reason]);
   }
-
   await logAction(req, 'MANUAL_ATTENDANCE', `Manual attendance update for member ID ${member_id}. Reason: ${reason}`);
   res.redirect('/admin?tab=attendance');
 });
@@ -530,16 +422,16 @@ app.get('/member', isAuthenticated, async (req, res) => {
   const settingsRes = await pool.query('SELECT * FROM organization_settings LIMIT 1');
   const settings = settingsRes.rows[0];
 
-  const qrDataUrl = await QRCode.toDataURL(member.qr_token);
+  // High-contrast, high-error-correction QR code for flawless mobile camera scanning
+  const qrDataUrl = await QRCode.toDataURL(member.qr_token, { errorCorrectionLevel: 'H', width: 300, margin: 1 });
   const announcementsRes = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5');
-  
   const attendanceRes = await pool.query(`
     SELECT a.*, e.name as event_name FROM attendance a
     JOIN events e ON a.event_id = e.id
     WHERE a.member_id = $1 ORDER BY a.attendance_date DESC
   `, [member.id]);
 
-  res.send(renderMemberPortal(member, settings, qrDataUrl, announcementsRes.rows, attendanceRes.rows, req));
+  res.send(renderMemberPortal(member, settings, qrDataUrl, announcementsRes.rows, attendanceRes.rows));
 });
 
 // ==========================================
@@ -559,7 +451,6 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
   }
 
   const today = new Date().toISOString().split('T')[0];
-
   try {
     const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token]);
     if (memberRes.rows.length === 0) {
@@ -573,9 +464,7 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
     }
 
     const eventRes = await pool.query('SELECT * FROM events WHERE id = $1', [event_id]);
-    if (eventRes.rows.length === 0) {
-      return res.json({ success: false, error_type: 'INVALID', message: 'Selected event not found.' });
-    }
+    if (eventRes.rows.length === 0) return res.json({ success: false, error_type: 'INVALID', message: 'Selected event not found.' });
     const event = eventRes.rows[0];
 
     const now = new Date();
@@ -586,17 +475,9 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
 
     if (scan_type === 'TIME_IN') {
       if (attRes.rows.length > 0 && attRes.rows[0].time_in) {
-        return res.json({
-          success: false,
-          error_type: 'DUPLICATE',
-          message: `${member.first_name} ${member.last_name} already has a Time In record for this event.`,
-          existing_time: attRes.rows[0].time_in,
-          member
-        });
+        return res.json({ success: false, error_type: 'DUPLICATE', message: `${member.first_name} ${member.last_name} already has a Time In record.`, member });
       }
-
       const status = timeHHMM > event.late_after ? 'Late' : 'Present';
-
       if (attRes.rows.length > 0) {
         await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [timeStr, status, attRes.rows[0].id]);
       } else {
@@ -605,36 +486,19 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
           VALUES ($1, $2, $3, $4, $5, 'QR')
         `, [member.id, event_id, today, timeStr, status]);
       }
-
-      await logAction(req, 'VALID_SCAN_IN', `Time In recorded for ${member.member_id} at event ${event.name}`);
+      await logAction(req, 'VALID_SCAN_IN', `Time In recorded for ${member.member_id}`);
       return res.json({ success: true, scan_type: 'TIME_IN', member, time: timeStr, date: today, status });
-    } 
-    
-    else if (scan_type === 'TIME_OUT') {
+    } else if (scan_type === 'TIME_OUT') {
       if (attRes.rows.length === 0 || !attRes.rows[0].time_in) {
-        return res.json({
-          success: false,
-          error_type: 'NO_TIME_IN',
-          message: `${member.first_name} ${member.last_name} has no Time In record for today's event yet.`,
-          member
-        });
+        return res.json({ success: false, error_type: 'NO_TIME_IN', message: `${member.first_name} ${member.last_name} has no Time In record today.`, member });
       }
-
       if (attRes.rows[0].time_out) {
-        return res.json({
-          success: false,
-          error_type: 'DUPLICATE',
-          message: `${member.first_name} ${member.last_name} already recorded Time Out for this event.`,
-          existing_time: attRes.rows[0].time_out,
-          member
-        });
+        return res.json({ success: false, error_type: 'DUPLICATE', message: `${member.first_name} ${member.last_name} already recorded Time Out.`, member });
       }
-
       await pool.query('UPDATE attendance SET time_out = $1 WHERE id = $2', [timeStr, attRes.rows[0].id]);
-      await logAction(req, 'VALID_SCAN_OUT', `Time Out recorded for ${member.member_id} at event ${event.name}`);
+      await logAction(req, 'VALID_SCAN_OUT', `Time Out recorded for ${member.member_id}`);
       return res.json({ success: true, scan_type: 'TIME_OUT', member, time: timeStr, date: today });
     }
-
   } catch (err) {
     console.error(err);
     res.json({ success: false, error_type: 'ERROR', message: 'Internal server error processing scan.' });
@@ -642,9 +506,8 @@ app.post('/api/scan', isAuthenticated, isScanner, async (req, res) => {
 });
 
 // ==========================================
-// HTML UI TEMPLATES
+// HTML TEMPLATES & UI
 // ==========================================
-
 function renderBaseLayout(title, content, themeColor = '#4f46e5') {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -700,8 +563,9 @@ function renderLoginPage(errorMsg = '') {
               Sign In
             </button>
           </form>
-          <div class="mt-6 text-center text-xs text-slate-400">
-            Default Admin: <span class="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-600">admin</span> / <span class="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-600">admin123</span>
+          <div class="mt-6 pt-4 border-t border-slate-100 flex justify-between items-center text-xs text-slate-500">
+            <div>Default Admin: <span class="font-mono text-slate-700">admin / admin123</span></div>
+            <a href="/scanner" class="text-indigo-600 font-semibold hover:underline">Open Scanner Portal &rarr;</a>
           </div>
         </div>
       </div>
@@ -777,8 +641,20 @@ async function renderAdminPortal(tab, req) {
   const newId = req.query.new_id;
   const tempPass = req.query.temp_pass;
   const newUser = req.query.new_user;
+  const createdName = req.query.created_name;
+  const createdSection = req.query.created_section;
+  const createdPosition = req.query.created_position;
   const resetPass = req.query.reset_pass;
   const resetMember = req.query.reset_member;
+
+  // Generate QR for the newly created member if needed for credential modal card
+  let newQrDataUrl = '';
+  if (newId) {
+    const memQuery = await pool.query('SELECT qr_token, profile_photo FROM members WHERE member_id = $1', [newId]);
+    if (memQuery.rows.length > 0) {
+      newQrDataUrl = await QRCode.toDataURL(memQuery.rows.query_token || memQuery.rows[0].qr_token, { errorCorrectionLevel: 'H', width: 250, margin: 1 });
+    }
+  }
 
   return renderBaseLayout('Admin Portal', `
     <div class="flex h-screen overflow-hidden">
@@ -812,23 +688,54 @@ async function renderAdminPortal(tab, req) {
       <div class="flex-1 flex flex-col overflow-hidden">
         <header class="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 shadow-sm">
           <h1 class="font-bold text-lg text-slate-800 capitalize">${tab.replace('_', ' ')} Management</h1>
-          <div class="flex items-center space-x-4">
-            <a href="/scanner" target="_blank" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg flex items-center space-x-1"><i class="fa-solid fa-qrcode"></i><span>Open Scanner Portal</span></a>
-            <span class="text-xs text-slate-500 font-medium">Administrator</span>
+          <div class="flex items-center space-x-4 text-xs font-semibold">
+            <a href="/login" target="_blank" class="text-indigo-600 hover:underline"><i class="fa-solid fa-arrow-up-right-from-square"></i> Member Portal Login Link</a>
+            <a href="/scanner" target="_blank" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg flex items-center space-x-1"><i class="fa-solid fa-qrcode"></i><span>Scanner Portal</span></a>
           </div>
         </header>
 
         <main class="flex-1 overflow-y-auto p-6 bg-slate-50">
           ${newId ? `
-            <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-5 text-emerald-900 shadow-sm">
-              <h3 class="font-bold text-emerald-800 text-lg mb-2"><i class="fa-solid fa-circle-check"></i> Member Successfully Registered</h3>
-              <p class="text-sm mb-3">Provide these temporary login credentials securely to the member.</p>
-              <div class="bg-white p-4 rounded-lg border border-emerald-200 grid grid-cols-1 md:grid-cols-3 gap-4 text-sm font-mono mb-4">
-                <div><strong>Member ID:</strong> ${newId}</div>
-                <div><strong>Username:</strong> ${newUser}</div>
-                <div><strong>Temp Password:</strong> <span class="bg-amber-100 px-2 py-0.5 rounded text-amber-900">${tempPass}</span></div>
+            <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-6 text-emerald-900 shadow-sm">
+              <div class="flex justify-between items-start mb-4">
+                <div>
+                  <h3 class="font-bold text-emerald-800 text-lg"><i class="fa-solid fa-circle-check"></i> Member Successfully Registered & ID Card Generated</h3>
+                  <p class="text-xs text-emerald-700 mt-1">Standard CR80 ID dimensions (8.5cm x 5.4cm) ready for printing or direct credential distribution.</p>
+                </div>
+                <button onclick="window.print()" class="px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-lg shadow hover:bg-emerald-700"><i class="fa-solid fa-print"></i> Print ID & Credentials</button>
               </div>
-              <p class="text-xs text-emerald-700">Member Portal Login Link: <a href="/login" target="_blank" class="underline font-bold">${req.protocol}://${req.get('host')}/login</a></p>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                <div class="bg-white p-4 rounded-xl border border-emerald-200 space-y-2 text-sm font-mono">
+                  <div><strong>Member ID:</strong> ${newId}</div>
+                  <div><strong>Username:</strong> ${newUser}</div>
+                  <div><strong>Temp Password:</strong> <span class="bg-amber-100 px-2 py-0.5 rounded text-amber-900 font-bold">${tempPass}</span></div>
+                  <div class="text-xs text-slate-500 mt-2 font-sans">Member Login Link: <a href="/login" target="_blank" class="text-indigo-600 underline font-mono">/login</a></div>
+                </div>
+
+                <!-- Printable ID Card (8.5cm x 5.4cm Standard Standard ID Size Container) -->
+                <div id="printableIdCard" class="w-[340px] h-[216px] bg-white rounded-xl shadow-lg border-2 border-indigo-600 overflow-hidden flex flex-col justify-between p-3 mx-auto relative select-none" style="width:340px; height:216px;">
+                  <div class="flex justify-between items-center border-b pb-1">
+                    <div class="text-[9px] font-bold uppercase text-slate-500">${settings.school_name}</div>
+                    <div class="text-[9px] font-ext500 font-bold text-indigo-600">${settings.org_name}</div>
+                  </div>
+                  <div class="flex items-center space-x-3 my-auto">
+                    <div class="w-14 h-16 bg-slate-100 border border-slate-300 rounded overflow-hidden flex items-center justify-center text-slate-400">
+                      <i class="fa-solid fa-user text-xl"></i>
+                    </div>
+                    <div class="flex-1">
+                      <h4 class="font-bold text-xs text-slate-800 leading-tight">${decodeURIComponent(createdName)}</h4>
+                      <p class="text-[10px] text-slate-500 font-medium">${decodeURIComponent(createdPosition)}</p>
+                      <p class="text-[10px] text-indigo-600 font-mono font-bold mt-0.5">${newId}</p>
+                      <p class="text-[9px] text-slate-600">${decodeURIComponent(createdSection)}</p>
+                    </div>
+                    <div>
+                      <img src="${newQrDataUrl}" class="w-14 h-14 border p-0.5 bg-white rounded" alt="QR">
+                    </div>
+                  </div>
+                  <div class="text-[7px] text-center text-slate-400 border-t pt-1">Official Organization Identification Card &bull; ${settings.school_year}</div>
+                </div>
+              </div>
             </div>
           ` : ''}
 
@@ -912,7 +819,6 @@ async function renderAdminPortal(tab, req) {
                 <table class="w-full text-left text-sm">
                   <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                     <tr>
-                      <th class="px-6 py-3">Photo</th>
                       <th class="px-6 py-3">Member ID</th>
                       <th class="px-6 py-3">Full Name</th>
                       <th class="px-6 py-3">Grade & Section</th>
@@ -924,18 +830,12 @@ async function renderAdminPortal(tab, req) {
                   <tbody class="divide-y divide-slate-100">
                     ${members.map(m => `
                       <tr class="hover:bg-slate-50">
-                        <td class="px-6 py-3">
-                          <div class="w-9 h-9 rounded-full bg-slate-200 overflow-hidden flex items-center justify-center text-slate-500">
-                            ${m.profile_photo ? `<img src="${m.profile_photo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-user"></i>`}
-                          </div>
-                        </td>
                         <td class="px-6 py-3 font-mono text-xs font-semibold">${m.member_id}</td>
                         <td class="px-6 py-3 font-medium text-slate-800">${m.first_name} ${m.last_name}</td>
                         <td class="px-6 py-3">${m.grade_level} - ${m.section}</td>
                         <td class="px-6 py-3">${m.position}</td>
                         <td class="px-6 py-3"><span class="px-2.5 py-1 text-xs rounded-full font-medium ${m.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${m.status}</span></td>
                         <td class="px-6 py-3 text-right space-x-3">
-                          <a href="/admin/members/id-card/${m.id}" target="_blank" title="Print ID Card" class="text-indigo-600 hover:text-indigo-800"><i class="fa-solid fa-id-card"></i></a>
                           <form action="/admin/members/reset-password/${m.id}" method="POST" class="inline">
                             <button type="submit" title="Reset Password" class="text-amber-600 hover:text-amber-800"><i class="fa-solid fa-key"></i></button>
                           </form>
@@ -953,7 +853,7 @@ async function renderAdminPortal(tab, req) {
               </div>
             </div>
 
-            <!-- Add Member Modal -->
+            <!-- Add Member Modal with Photo Upload -->
             <div id="addMemberModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
               <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
@@ -992,24 +892,22 @@ async function renderAdminPortal(tab, req) {
                     </div>
                   </div>
                   <div>
-                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Profile Photo (Image URL or Upload)</label>
-                    <input type="file" id="photoFile" accept="image/*" onchange="convertImageToBase64(this)" class="w-full text-xs text-slate-500 mb-1">
-                    <input type="hidden" name="profile_photo" id="profilePhotoBase64">
+                    <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Profile Photo (Optional)</label>
+                    <input type="file" id="photoFile" accept="image/*" onchange="encodeImageFileAsURL(this)" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <input type="hidden" name="profile_photo" id="profile_photo_base64">
                   </div>
-                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Create Member Account</button>
+                  <button type="submit" class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg bg-theme shadow">Create Member & Generate ID</button>
                 </form>
               </div>
             </div>
             <script>
-              function convertImageToBase64(input) {
-                const file = input.files[0];
-                if (file) {
-                  const reader = new FileReader();
-                  reader.onload = function(e) {
-                    document.getElementById('profilePhotoBase64').value = e.target.result;
-                  };
-                  reader.readAsDataURL(file);
+              function encodeImageFileAsURL(element) {
+                const file = element.files[0];
+                const reader = new FileReader();
+                reader.onloadend = function() {
+                  document.getElementById('profile_photo_base64').value = reader.result;
                 }
+                if (file) reader.readAsDataURL(file);
               }
             </script>
           ` : ''}
@@ -1043,7 +941,6 @@ async function renderAdminPortal(tab, req) {
               </div>
             </div>
 
-            <!-- Add Event Modal -->
             <div id="addEventModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
               <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
                 <h3 class="text-lg font-bold text-slate-800 mb-4">Create Attendance Event</h3>
@@ -1103,7 +1000,6 @@ async function renderAdminPortal(tab, req) {
               </div>
             </div>
 
-            <!-- Add Announcement Modal -->
             <div id="addAnnouncementModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
               <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
                 <h3 class="text-lg font-bold text-slate-800 mb-4">Post Announcement</h3>
@@ -1151,7 +1047,6 @@ async function renderAdminPortal(tab, req) {
               </div>
             </div>
 
-            <!-- Add Scanner Modal -->
             <div id="addScannerModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
               <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
                 <h3 class="text-lg font-bold text-slate-800 mb-4">Create Scanner Account</h3>
@@ -1237,7 +1132,7 @@ async function renderAdminPortal(tab, req) {
             </div>
           ` : ''}
 
-          <!-- TAB: ATTENDANCE MANAGEMENT -->
+          <!-- TAB: ATTENDANCE -->
           ${tab === 'attendance' ? `
             <div class="space-y-6">
               <h2 class="text-xl font-bold text-slate-800">Manual Attendance Override</h2>
@@ -1295,8 +1190,7 @@ async function renderAdminPortal(tab, req) {
   `, settings.theme_color);
 }
 
-function renderMemberPortal(member, settings, qrDataUrl, announcements, attendanceRecords, req) {
-  const portalLoginUrl = `${req.protocol}://${req.get('host')}/login`;
+function renderMemberPortal(member, settings, qrDataUrl, announcements, attendanceRecords) {
   return renderBaseLayout('Member Portal', `
     <div class="min-h-screen bg-slate-100 flex flex-col">
       <header class="bg-indigo-600 text-white shadow-md bg-theme">
@@ -1318,29 +1212,32 @@ function renderMemberPortal(member, settings, qrDataUrl, announcements, attendan
       </header>
 
       <main class="max-w-5xl mx-auto px-4 py-6 flex-1 w-full grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="space-y-6">
-          <div class="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden text-center p-6 relative">
-            <div class="absolute top-3 right-3">
-              <span class="px-2.5 py-1 text-xs rounded-full font-bold uppercase ${member.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${member.status}</span>
+        <!-- Standard ID Card (8.5cm x 5.4cm) -->
+        <div class="space-y-4">
+          <div class="flex justify-between items-center px-1">
+            <h3 class="font-bold text-sm text-slate-700">Digital ID Card</h3>
+            <button onclick="window.print()" class="text-xs text-indigo-600 hover:underline font-semibold"><i class="fa-solid fa-print"></i> Print ID Card</button>
+          </div>
+          <div class="w-[340px] h-[216px] bg-white rounded-xl shadow-lg border-2 border-indigo-600 overflow-hidden flex flex-col justify-between p-3 mx-auto relative select-none">
+            <div class="flex justify-between items-center border-b pb-1">
+              <div class="text-[9px] font-bold uppercase text-slate-500">${settings.school_name}</div>
+              <div class="text-[9px] font-bold text-indigo-600">${settings.org_name}</div>
             </div>
-            <div class="text-xs uppercase font-bold tracking-wider text-slate-400 mb-1">${settings.school_name}</div>
-            <div class="text-base font-bold text-indigo-600 text-theme mb-3">${settings.org_name}</div>
-            <div class="w-24 h-24 bg-slate-100 rounded-full mx-auto mb-4 border-4 border-indigo-50 overflow-hidden flex items-center justify-center text-slate-400 text-3xl">
-              ${member.profile_photo ? `<img src="${member.profile_photo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-user"></i>`}
+            <div class="flex items-center space-x-3 my-auto">
+              <div class="w-14 h-16 bg-slate-100 border border-slate-300 rounded overflow-hidden flex items-center justify-center text-slate-400">
+                ${member.profile_photo ? `<img src="${member.profile_photo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-user text-xl"></i>`}
+              </div>
+              <div class="flex-1">
+                <h4 class="font-bold text-xs text-slate-800 leading-tight">${member.first_name} ${member.middle_name} ${member.last_name}</h4>
+                <p class="text-[10px] text-slate-500 font-medium">${member.position}</p>
+                <p class="text-[10px] text-indigo-600 font-mono font-bold mt-0.5">${member.member_id}</p>
+                <p class="text-[9px] text-slate-600">${member.grade_level} - ${member.section}</p>
+              </div>
+              <div>
+                <img src="${qrDataUrl}" class="w-14 h-14 border p-0.5 bg-white rounded" alt="QR">
+              </div>
             </div>
-            <h2 class="text-xl font-bold text-slate-800">${member.first_name} ${member.middle_name} ${member.last_name}</h2>
-            <p class="text-xs text-slate-500 mb-4 font-medium">${member.position}</p>
-
-            <div class="bg-slate-50 rounded-xl p-3 text-left text-xs space-y-1 mb-4 border border-slate-100">
-              <div class="flex justify-between"><span class="text-slate-400">Member ID:</span> <span class="font-mono font-bold text-slate-700">${member.member_id}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Grade & Section:</span> <span class="font-medium text-slate-700">${member.grade_level} - ${member.section}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Portal Login Link:</span> <a href="${portalLoginUrl}" target="_blank" class="font-mono text-indigo-600 underline truncate max-w-[140px]">${portalLoginUrl}</a></div>
-            </div>
-
-            <div class="bg-white p-3 border border-slate-200 rounded-xl inline-block shadow-sm">
-              <img src="${qrDataUrl}" alt="Member QR Code" class="w-40 h-40 mx-auto">
-              <p class="text-[10px] text-slate-400 mt-2 font-mono">SECURE QR TOKEN</p>
-            </div>
+            <div class="text-[7px] text-center text-slate-400 border-t pt-1">Official Organization Identification Card &bull; ${settings.school_year}</div>
           </div>
         </div>
 
@@ -1412,6 +1309,7 @@ function renderScannerPortal(events, settings, user) {
           <button onclick="toggleAudio()" id="audioToggleBtn" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-semibold flex items-center space-x-1.5">
             <i class="fa-solid fa-volume-high text-emerald-400" id="audioIcon"></i><span id="audioText">Sound: ON</span>
           </button>
+          <a href="/login" class="px-3 py-1.5 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 rounded-lg text-xs font-semibold">Login Link</a>
           <a href="/logout" class="px-3 py-1.5 bg-red-600/20 text-red-400 hover:bg-red-600/30 rounded-lg text-xs font-semibold">Sign Out</a>
         </div>
       </header>
