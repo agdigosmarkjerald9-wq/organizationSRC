@@ -1,6 +1,6 @@
 /*************************************************************
  * SCHOOL CLUB QR CODE ATTENDANCE SYSTEM - ALL-IN-ONE APP.JS
- *************************************************************/
+ *********************************----------------************/
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
@@ -10,14 +10,36 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Ensure data directory exists
-if (!fs.existsSync('./data')) {
-    fs.mkdirSync('./data');
-}
+// Ensure directories exist
+if (!fs.existsSync('./data')) fs.mkdirSync('./data');
+if (!fs.existsSync('./public/uploads')) fs.mkdirSync('./public/uploads', { recursive: true });
+
+// Configure Multer for Member Photos
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, './public/uploads/'),
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, 'member-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
+    fileFilter: (req, file, cb) => {
+        const filetypes = /jpeg|jpg|png/;
+        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = filetypes.test(file.mimetype);
+        if (mimetype && extname) {
+            return cb(null, true);
+        }
+        cb(new Error('Only .png, .jpg and .jpeg format allowed!'));
+    }
+});
 
 // Initialize SQLite Database
 const dbFile = './data/attendance.db';
@@ -39,6 +61,7 @@ function initDatabase() {
             position TEXT,
             email TEXT,
             contact TEXT,
+            photo TEXT DEFAULT 'default.png',
             username TEXT UNIQUE,
             password TEXT,
             temporary_password TEXT,
@@ -88,8 +111,8 @@ function initDatabase() {
         // Insert default club configuration if missing
         db.get(`SELECT COUNT(*) as count FROM clubs`, (err, row) => {
             if (row && row.count === 0) {
-                db.run(`INSERT INTO clubs (club_name, school_name, school_year, adviser, expected_time_in, expected_time_out, late_threshold) 
-                        VALUES ('Supreme Student Council', 'National High School', '2026-2027', 'Dr. Maria Santos', '08:00', '17:00', '08:15')`);
+                db.run(`INSERT INTO clubs (club_name, school_name, school_year, adviser) 
+                        VALUES ('Supreme Student Council', 'National High School', '2026-2027', 'Dr. Maria Santos')`);
             }
         });
 
@@ -107,6 +130,7 @@ function initDatabase() {
 // Middleware setup
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use('/public', express.static(path.join(__dirname, 'public')));
 app.use(session({
     secret: crypto.randomBytes(32).toString('hex'),
     resave: false,
@@ -141,8 +165,7 @@ app.get('/', (req, res) => {
         <!DOCTYPE html>
         <html lang="en">
         <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>School Club Attendance System</title>
             <style>
                 :root { --primary: #4f46e5; --bg: #f8fafc; --text: #1e293b; }
@@ -184,28 +207,25 @@ app.get('/admin/login', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html lang="en">
-        <head>
-            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Login</title>
-            <style>
-                body { font-family: system-ui, sans-serif; background: #f1f5f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-                .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); width: 100%; max-width: 400px; }
-                h2 { margin-top: 0; color: #1e293b; }
-                label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 14px; }
-                input { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; }
-                button { width: 100%; padding: 12px; background: #4f46e5; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; }
-                button:hover { background: #4338ca; }
-                .error { background: #fee2e2; color: #991b1b; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 14px; }
-            </style>
+        <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Login</title>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #f1f5f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+            .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); width: 100%; max-width: 400px; }
+            h2 { margin-top: 0; color: #1e293b; }
+            label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 14px; }
+            input { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; }
+            button { width: 100%; padding: 12px; background: #4f46e5; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; }
+            button:hover { background: #4338ca; }
+            .error { background: #fee2e2; color: #991b1b; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 14px; }
+        </style>
         </head>
         <body>
             <div class="card">
                 <h2>Admin Login</h2>
                 ${req.query.error ? `<div class="error">${req.query.error}</div>` : ''}
                 <form action="/admin/login" method="POST">
-                    <label>Username</label>
-                    <input type="text" name="username" required autocomplete="username">
-                    <label>Password</label>
-                    <input type="password" name="password" required autocomplete="current-password">
+                    <label>Username</label><input type="text" name="username" required autocomplete="username">
+                    <label>Password</label><input type="password" name="password" required autocomplete="current-password">
                     <button type="submit">Login</button>
                 </form>
             </div>
@@ -231,38 +251,7 @@ app.get('/admin/logout', (req, res) => {
     req.session.destroy(() => res.redirect('/admin/login'));
 });
 
-// Force Password Change for Admin if default or requested
-app.get('/admin/change-password', requireAdmin, (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head><meta charset="UTF-8"><title>Change Password</title>
-        <style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.box{background:white;padding:30px;border-radius:10px;box-shadow:0 4px 10px rgba(0,0,0,0.05);width:350px}input{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}button{width:100%;padding:10px;background:#4f46e5;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer}</style>
-        </head>
-        <body>
-        <div class="box">
-            <h3>Change Password</h3>
-            <form method="POST" action="/admin/change-password">
-                <label>New Password</label><input type="password" name="new_password" required>
-                <button type="submit">Update Password</button>
-            </form>
-        </div>
-        </body></html>
-    `);
-});
-
-app.post('/admin/change-password', requireAdmin, async (req, res) => {
-    const { new_password } = req.body;
-    if (!new_password || new_password.length < 6) return res.send('Password must be at least 6 characters.');
-    const hashed = await bcrypt.hash(new_password, 10);
-    db.run(`UPDATE users SET password = ? WHERE id = ?`, [hashed, req.session.user.id], (err) => {
-        if (err) return res.send('Error updating password.');
-        logActivity(req.session.user.username, 'Changed administrator password');
-        res.redirect('/admin');
-    });
-});
-
-// Main Admin Dashboard and Management Interface
+// Admin Dashboard and Management
 app.get('/admin', requireAdmin, (req, res) => {
     db.get(`SELECT * FROM clubs LIMIT 1`, (err, club) => {
         db.all(`SELECT * FROM users WHERE position != 'Administrator' ORDER BY id DESC`, (err, members) => {
@@ -270,7 +259,6 @@ app.get('/admin', requireAdmin, (req, res) => {
                 db.all(`SELECT * FROM activity_logs ORDER BY id DESC LIMIT 50`, (err, logs) => {
                     db.all(`SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC LIMIT 100`, (err, attendance) => {
                         
-                        // Calculate stats
                         const today = new Date().toISOString().split('T')[0];
                         db.all(`SELECT DISTINCT member_id FROM attendance WHERE date = ? AND scan_type = 'TIME IN'`, [today], (err, presentRows) => {
                             const presentCount = presentRows ? presentRows.length : 0;
@@ -304,10 +292,10 @@ function renderAdminHTML(data) {
             .nav-links a { color: white; text-decoration: none; margin-left: 20px; font-weight: 500; font-size: 14px; }
             .container { padding: 30px; max-width: 1400px; margin: 0 auto; width: 100%; box-sizing: border-box; }
             .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-            .stat-card { background: var(--card); padding: 20px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); border: 1px solid var(--border); }
+            .stat-card { background: var(--card); padding: 20px; border-radius: 12px; border: 1px solid var(--border); }
             .stat-card h3 { margin: 0 0 10px; font-size: 14px; color: #64748b; }
             .stat-card .val { font-size: 28px; font-weight: bold; color: var(--primary); }
-            .section { background: var(--card); border-radius: 12px; padding: 25px; margin-bottom: 30px; border: 1px solid var(--border); box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+            .section { background: var(--card); border-radius: 12px; padding: 25px; margin-bottom: 30px; border: 1px solid var(--border); }
             h2 { margin-top: 0; font-size: 18px; border-bottom: 2px solid var(--border); padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
             table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
@@ -322,6 +310,7 @@ function renderAdminHTML(data) {
             .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
             .badge-active { background: #d1fae5; color: #065f46; }
             .badge-disabled { background: #fee2e2; color: #991b1b; }
+            .avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 8px; }
         </style>
     </head>
     <body>
@@ -330,7 +319,6 @@ function renderAdminHTML(data) {
             <div class="nav-links">
                 <a href="/scanner" target="_blank">Open Scanner</a>
                 <a href="/admin/backup" class="btn-success" style="padding:6px 12px; border-radius:4px;">Backup DB</a>
-                <a href="/admin/change-password">Change Password</a>
                 <a href="/admin/logout">Logout</a>
             </div>
         </header>
@@ -344,10 +332,10 @@ function renderAdminHTML(data) {
             </div>
 
             <div class="grid-2">
-                <!-- Add Member Form -->
+                <!-- Add Member Form with Photo Upload -->
                 <div class="section">
                     <h2>Add New Member</h2>
-                    <form action="/admin/member/add" method="POST">
+                    <form action="/admin/member/add" method="POST" enctype="multipart/form-data">
                         <label>Full Name</label>
                         <input type="text" name="name" required placeholder="Juan Dela Cruz">
                         
@@ -365,6 +353,9 @@ function renderAdminHTML(data) {
                             <option value="Other">Other</option>
                         </select>
 
+                        <label>Member Photo (JPG/PNG)</label>
+                        <input type="file" name="photo" accept="image/*">
+
                         <label>Email (Optional)</label>
                         <input type="email" name="email" placeholder="juan@example.com">
 
@@ -375,24 +366,33 @@ function renderAdminHTML(data) {
                     </form>
                 </div>
 
-                <!-- Club Settings -->
-                <div class="section">
-                    <h2>Club Configuration</h2>
-                    <form action="/admin/settings/update" method="POST">
-                        <label>School Name</label>
-                        <input type="text" name="school_name" value="${club ? club.school_name : ''}" required>
+                <!-- Club Settings & Announcements Creator -->
+                <div>
+                    <div class="section">
+                        <h2>Post Announcement</h2>
+                        <form action="/admin/announcement/add" method="POST">
+                            <label>Title</label>
+                            <input type="text" name="title" required placeholder="Meeting Reminder">
+                            <label>Message</label>
+                            <textarea name="message" rows="3" required placeholder="General meeting this Friday at 3 PM..."></textarea>
+                            <button type="submit" class="btn btn-success">Publish Announcement</button>
+                        </form>
+                    </div>
 
-                        <label>Club Name</label>
-                        <input type="text" name="club_name" value="${club ? club.club_name : ''}" required>
-
-                        <label>School Year</label>
-                        <input type="text" name="school_year" value="${club ? club.school_year : ''}" required>
-
-                        <label>Adviser Name</label>
-                        <input type="text" name="adviser" value="${club ? club.adviser : ''}" required>
-
-                        <button type="submit" class="btn">Save Settings</button>
-                    </form>
+                    <div class="section">
+                        <h2>Club Configuration</h2>
+                        <form action="/admin/settings/update" method="POST">
+                            <label>School Name</label>
+                            <input type="text" name="school_name" value="${club ? club.school_name : ''}" required>
+                            <label>Club Name</label>
+                            <input type="text" name="club_name" value="${club ? club.club_name : ''}" required>
+                            <label>School Year</label>
+                            <input type="text" name="school_year" value="${club ? club.school_year : ''}" required>
+                            <label>Adviser Name</label>
+                            <input type="text" name="adviser" value="${club ? club.adviser : ''}" required>
+                            <button type="submit" class="btn">Save Settings</button>
+                        </form>
+                    </div>
                 </div>
             </div>
 
@@ -405,6 +405,7 @@ function renderAdminHTML(data) {
                     <table>
                         <thead>
                             <tr>
+                                <th>Photo</th>
                                 <th>Member ID</th>
                                 <th>Name</th>
                                 <th>Position</th>
@@ -417,6 +418,7 @@ function renderAdminHTML(data) {
                         <tbody>
                             ${members.map(m => `
                                 <tr>
+                                    <td><img src="/public/uploads/${m.photo || 'default.png'}" class="avatar" onerror="this.src='/public/uploads/default.png'"></td>
                                     <td><strong>${m.member_id}</strong></td>
                                     <td>${m.name}</td>
                                     <td>${m.position}</td>
@@ -425,7 +427,7 @@ function renderAdminHTML(data) {
                                     <td><span class="badge ${m.status === 'Active' ? 'badge-active' : 'badge-disabled'}">${m.status}</span></td>
                                     <td>
                                         <a href="/admin/member/id/${m.id}" target="_blank" class="btn" style="padding:4px 8px; font-size:11px;">ID Card</a>
-                                        <a href="/admin/member/qr/${m.id}" target="_blank" class="btn btn-success" style="padding:4px 8px; font-size:11px;">QR Code</a>
+                                        <a href="/admin/member/qr/${m.id}" target="_blank" class="btn btn-success" style="padding:4px 8px; font-size:11px;">QR</a>
                                         <a href="/admin/member/toggle/${m.id}" class="btn ${m.status === 'Active' ? 'btn-danger' : 'btn-success'}" style="padding:4px 8px; font-size:11px;">${m.status === 'Active' ? 'Disable' : 'Enable'}</a>
                                     </td>
                                 </tr>
@@ -470,7 +472,7 @@ function renderAdminHTML(data) {
                 </div>
             </div>
 
-            <!-- Activity Logs -->
+            <!-- System Activity Logs -->
             <div class="section">
                 <h2>System Activity Logs</h2>
                 <div style="max-height:200px; overflow-y:auto;">
@@ -489,27 +491,34 @@ function renderAdminHTML(data) {
 }
 
 // Admin Actions
-app.post('/admin/member/add', requireAdmin, (req, res) => {
+app.post('/admin/member/add', requireAdmin, upload.single('photo'), (req, res) => {
     const { name, position, email, contact } = req.body;
+    const photoFilename = req.file ? req.file.filename : 'default.png';
     
     db.get(`SELECT COUNT(*) as count FROM users`, async (err, row) => {
         const seq = (row ? row.count : 0) + 1;
         const member_id = `CLUB-2026-${String(seq).padStart(4, '0')}`;
         const username = `member${String(seq).padStart(4, '0')}`;
         
-        // Fixed syntax token generation error safely:
         const temp_pass = Math.random().toString(36).substring(2, 10);
         const hashedPass = await bcrypt.hash(temp_pass, 10);
         const qr_token = crypto.randomBytes(16).toString('hex');
-        const qrData = `CLUBATTENDANCE:MEMBER:${qr_token}`;
 
-        db.run(`INSERT INTO users (member_id, name, position, email, contact, username, password, temporary_password, qr_token, status, is_temp_pass) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 1)`,
-            [member_id, name, position, email, contact, username, hashedPass, temp_pass, qr_token], (err) => {
+        db.run(`INSERT INTO users (member_id, name, position, email, contact, photo, username, password, temporary_password, qr_token, status, is_temp_pass) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 1)`,
+            [member_id, name, position, email, contact, photoFilename, username, hashedPass, temp_pass, qr_token], (err) => {
                 if (err) return res.send('Error adding member: ' + err.message);
                 logActivity(req.session.user.username, `Created member ${name} (${member_id})`);
                 res.redirect('/admin');
             });
+    });
+});
+
+app.post('/admin/announcement/add', requireAdmin, (req, res) => {
+    const { title, message } = req.body;
+    db.run(`INSERT INTO announcements (title, message) VALUES (?, ?)`, [title, message], () => {
+        logActivity(req.session.user.username, `Published announcement: ${title}`);
+        res.redirect('/admin');
     });
 });
 
@@ -522,10 +531,6 @@ app.get('/admin/member/toggle/:id', requireAdmin, (req, res) => {
             res.redirect('/admin');
         });
     });
-});
-
-app.get('/admin/settings/update', requireAdmin, (req, res) => {
-    res.redirect('/admin');
 });
 
 app.post('/admin/settings/update', requireAdmin, (req, res) => {
@@ -555,7 +560,7 @@ app.get('/admin/attendance/export', requireAdmin, (req, res) => {
     });
 });
 
-// ID Card Printable Page
+// Printable ID Card including Member Photo
 app.get('/admin/member/id/:id', requireAdmin, (req, res) => {
     db.get(`SELECT u.*, c.* FROM users u CROSS JOIN clubs c WHERE u.id = ?`, [req.params.id], async (err, row) => {
         if (!row) return res.send('Member not found.');
@@ -565,23 +570,23 @@ app.get('/admin/member/id/:id', requireAdmin, (req, res) => {
         res.send(`
             <!DOCTYPE html>
             <html lang="en">
-            <head>
-                <meta charset="UTF-8"><title>ID Card - ${row.name}</title>
-                <style>
-                    body { font-family: sans-serif; background: #e2e8f0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-                    .id-card { width: 85.60mm; height: 53.98mm; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15); padding: 15px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; border: 2px solid #4f46e5; }
-                    .header { text-align: center; border-bottom: 2px solid #4f46e5; padding-bottom: 5px; }
-                    .header h3 { margin: 0; font-size: 11px; color: #4f46e5; text-transform: uppercase; }
-                    .header h4 { margin: 2px 0 0; font-size: 9px; color: #64748b; }
-                    .body { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
-                    .info { font-size: 10px; line-height: 1.4; }
-                    .info strong { color: #1e293b; }
-                    .qr img { width: 85px; height: 85px; }
-                    .footer { font-size: 7px; text-align: center; color: #dc2626; border-top: 1px solid #cbd5e1; padding-top: 3px; }
-                    .no-print { margin-top: 20px; }
-                    .btn { padding: 10px 20px; background: #4f46e5; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; text-decoration: none; }
-                    @media print { body { background: none; } .no-print { display: none; } }
-                </style>
+            <head><meta charset="UTF-8"><title>ID Card - ${row.name}</title>
+            <style>
+                body { font-family: sans-serif; background: #e2e8f0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+                .id-card { width: 85.60mm; height: 53.98mm; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15); padding: 12px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; border: 2px solid #4f46e5; }
+                .header { text-align: center; border-bottom: 2px solid #4f46e5; padding-bottom: 3px; }
+                .header h3 { margin: 0; font-size: 10px; color: #4f46e5; text-transform: uppercase; }
+                .header h4 { margin: 2px 0 0; font-size: 8px; color: #64748b; }
+                .body { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+                .photo { width: 65px; height: 65px; border-radius: 50%; object-fit: cover; border: 2px solid #4f46e5; margin-right: 10px; }
+                .info { font-size: 9px; line-height: 1.3; flex: 1; }
+                .info strong { color: #1e293b; }
+                .qr img { width: 75px; height: 75px; }
+                .footer { font-size: 6px; text-align: center; color: #dc2626; border-top: 1px solid #cbd5e1; padding-top: 2px; }
+                .no-print { margin-top: 20px; }
+                .btn { padding: 10px 20px; background: #4f46e5; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; text-decoration: none; }
+                @media print { body { background: none; } .no-print { display: none; } }
+            </style>
             </head>
             <body>
                 <div class="id-card">
@@ -590,24 +595,19 @@ app.get('/admin/member/id/:id', requireAdmin, (req, res) => {
                         <h4>${row.club_name}</h4>
                     </div>
                     <div class="body">
+                        <img src="/public/uploads/${row.photo || 'default.png'}" class="photo" onerror="this.src='/public/uploads/default.png'">
                         <div class="info">
-                            <div><strong>Name:</strong><br>${row.name}</div>
-                            <div><strong>Position:</strong><br>${row.position}</div>
+                            <div><strong>${row.name}</strong></div>
+                            <div>${row.position}</div>
                             <div><strong>ID:</strong> ${row.member_id}</div>
                             <div><strong>User:</strong> ${row.username}</div>
                             <div><strong>Temp Pass:</strong> ${row.temporary_password || 'Changed'}</div>
                         </div>
-                        <div class="qr">
-                            <img src="${qrDataURL}" alt="QR Code">
-                        </div>
+                        <div class="qr"><img src="${qrDataURL}" alt="QR"></div>
                     </div>
-                    <div class="footer">
-                        IMPORTANT: Temporary password must be changed after first login.
-                    </div>
+                    <div class="footer">Change temporary password after login.</div>
                 </div>
-                <div class="no-print">
-                    <button class="btn" onclick="window.print()">Print ID Card</button>
-                </div>
+                <div class="no-print"><button class="btn" onclick="window.print()">Print ID Card</button></div>
             </body>
             </html>
         `);
@@ -627,9 +627,10 @@ app.get('/admin/members/all-ids', requireAdmin, (req, res) => {
                         <h4>${row.club_name}</h4>
                     </div>
                     <div class="body">
+                        <img src="/public/uploads/${row.photo || 'default.png'}" class="photo" onerror="this.src='/public/uploads/default.png'">
                         <div class="info">
-                            <div><strong>Name:</strong><br>${row.name}</div>
-                            <div><strong>Position:</strong><br>${row.position}</div>
+                            <div><strong>${row.name}</strong></div>
+                            <div>${row.position}</div>
                             <div><strong>ID:</strong> ${row.member_id}</div>
                             <div><strong>User:</strong> ${row.username}</div>
                             <div><strong>Temp Pass:</strong> ${row.temporary_password || 'Changed'}</div>
@@ -651,8 +652,9 @@ app.get('/admin/members/all-ids', requireAdmin, (req, res) => {
                 .header h3 { margin: 0; font-size: 10px; color: #4f46e5; }
                 .header h4 { margin: 2px 0 0; font-size: 8px; color: #64748b; }
                 .body { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
-                .info { font-size: 9px; line-height: 1.3; }
-                .qr img { width: 75px; height: 75px; }
+                .photo { width: 60px; height: 60px; border-radius: 50%; object-fit: cover; border: 2px solid #4f46e5; margin-right: 8px; }
+                .info { font-size: 9px; line-height: 1.3; flex: 1; }
+                .qr img { width: 70px; height: 70px; }
                 .footer { font-size: 6px; text-align: center; color: #dc2626; border-top: 1px solid #ccc; padding-top: 2px; }
                 .no-print { margin-bottom: 20px; }
                 .btn { padding: 10px 20px; background: #4f46e5; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
@@ -695,14 +697,14 @@ app.get('/scanner', (req, res) => {
                 body { font-family: system-ui, sans-serif; background: #0f172a; color: white; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; box-sizing: border-box; }
                 h1 { font-size: 22px; margin-bottom: 10px; color: #38bdf8; text-align: center; }
                 .controls { display: flex; gap: 10px; margin-bottom: 20px; width: 100%; max-width: 400px; }
-                .mode-btn { flex: 1; padding: 14px; border: none; border-radius: 8px; font-weight: bold; font-size: 16px; cursor: pointer; background: #334155; color: #94a3b8; transition: 0.2s; }
+                .mode-btn { flex: 1; padding: 14px; border: none; border-radius: 8px; font-weight: bold; font-size: 16px; cursor: pointer; background: #334155; color: #94a3b8; }
                 .mode-btn.active-in { background: #059669; color: white; }
                 .mode-btn.active-out { background: #d97706; color: white; }
                 #reader { width: 100%; max-width: 400px; background: #1e293b; border-radius: 12px; overflow: hidden; border: 2px solid #334155; }
                 .result-box { margin-top: 20px; width: 100%; max-width: 400px; padding: 20px; border-radius: 12px; text-align: center; background: #1e293b; display: none; box-sizing: border-box; }
                 .success { border: 2px solid #059669; background: #064e3b; }
                 .error { border: 2px solid #dc2626; background: #7f1d1d; }
-                .sound-toggle { margin-top: 15px; font-size: 14px; color: #94a3b8; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+                .sound-toggle { margin-top: 15px; font-size: 14px; color: #94a3b8; cursor: pointer; }
             </style>
         </head>
         <body>
@@ -711,24 +713,19 @@ app.get('/scanner', (req, res) => {
                 <button id="btnIn" class="mode-btn active-in" onclick="setScanMode('TIME IN')">TIME IN</button>
                 <button id="btnOut" class="mode-btn" onclick="setScanMode('TIME OUT')">TIME OUT</button>
             </div>
-
             <div id="reader"></div>
-
             <div id="resultBox" class="result-box">
                 <h2 id="resTitle" style="margin:0 0 10px; font-size:20px;"></h2>
                 <p id="resName" style="font-size:18px; font-weight:bold; margin:5px 0;"></p>
                 <p id="resDetails" style="font-size:14px; color:#cbd5e1; margin:5px 0;"></p>
                 <p id="resTime" style="font-size:16px; font-weight:bold; margin-top:10px;"></p>
             </div>
-
             <div class="sound-toggle" onclick="toggleSound()">
                 <input type="checkbox" id="soundCheck" checked> Sound Effects: <span id="soundStatus">ON</span>
             </div>
-
             <script>
                 let currentMode = 'TIME IN';
                 let soundEnabled = true;
-                let html5QrCode = null;
 
                 function setScanMode(mode) {
                     currentMode = mode;
@@ -742,7 +739,6 @@ app.get('/scanner', (req, res) => {
                     document.getElementById('soundStatus').innerText = soundEnabled ? 'ON' : 'OFF';
                 }
 
-                // Web Audio API Synthesized Sound Effects
                 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 function playTone(type) {
                     if (!soundEnabled) return;
@@ -751,30 +747,18 @@ app.get('/scanner', (req, res) => {
                     const gain = audioCtx.createGain();
                     osc.connect(gain);
                     gain.connect(audioCtx.destination);
-
                     if (type === 'success') {
-                        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
-                        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.1); // A5
+                        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+                        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.1);
                         gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
                         gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-                        osc.start();
-                        osc.stop(audioCtx.currentTime + 0.3);
-                    } else if (type === 'warning') {
-                        osc.type = 'square';
-                        osc.frequency.setValueAtTime(440, audioCtx.currentTime);
-                        osc.frequency.setValueAtTime(330, audioCtx.currentTime + 0.15);
-                        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-                        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-                        osc.start();
-                        osc.stop(audioCtx.currentTime + 0.3);
-                    } else { // error
+                        osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+                    } else {
                         osc.type = 'sawtooth';
                         osc.frequency.setValueAtTime(200, audioCtx.currentTime);
-                        osc.frequency.setValueAtTime(130, audioCtx.currentTime + 0.15);
                         gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
                         gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
-                        osc.start();
-                        osc.stop(audioCtx.currentTime + 0.4);
+                        osc.start(); osc.stop(audioCtx.currentTime + 0.4);
                     }
                 }
 
@@ -788,7 +772,6 @@ app.get('/scanner', (req, res) => {
                     .then(data => {
                         const box = document.getElementById('resultBox');
                         box.style.display = 'block';
-                        
                         if (data.status === 'success') {
                             box.className = 'result-box success';
                             document.getElementById('resTitle').innerText = '✓ ATTENDANCE RECORDED';
@@ -796,76 +779,48 @@ app.get('/scanner', (req, res) => {
                             document.getElementById('resDetails').innerText = data.member.position + ' (' + data.member.member_id + ')';
                             document.getElementById('resTime').innerText = data.scan_type + ' - ' + data.time;
                             playTone('success');
-                        } else if (data.status === 'warning') {
-                            box.className = 'result-box error';
-                            document.getElementById('resTitle').innerText = '⚠ ALREADY SCANNED';
-                            document.getElementById('resName').innerText = data.member.name;
-                            document.getElementById('resDetails').innerText = data.message;
-                            document.getElementById('resTime').innerText = data.time;
-                            playTone('warning');
                         } else {
                             box.className = 'result-box error';
                             document.getElementById('resTitle').innerText = '✕ REJECTED';
-                            document.getElementById('resName').innerText = 'Invalid QR Code';
+                            document.getElementById('resName').innerText = 'Invalid Scan';
                             document.getElementById('resDetails').innerText = data.message;
                             document.getElementById('resTime').innerText = '';
                             playTone('error');
                         }
-
                         setTimeout(() => { box.style.display = 'none'; }, 4000);
-                    })
-                    .catch(err => console.error(err));
+                    });
                 }
-
-                const html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
-                html5QrcodeScanner.render(onScanSuccess, (err) => {});
+                const scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
+                scanner.render(onScanSuccess, (err) => {});
             </script>
         </body>
         </html>
     `);
 });
 
-// Scanner API Endpoint
 app.post('/api/scan', (req, res) => {
     const { qr_data, scan_type, scanner } = req.body;
     if (!qr_data || !qr_data.startsWith('CLUBATTENDANCE:MEMBER:')) {
-        return res.json({ status: 'error', message: 'This QR code is not registered in the system.' });
+        return res.json({ status: 'error', message: 'Unregistered QR code format.' });
     }
-
     const token = qr_data.split(':')[2];
     db.get(`SELECT * FROM users WHERE qr_token = ?`, [token], (err, member) => {
-        if (!member) {
-            return res.json({ status: 'error', message: 'Unrecognized QR security token.' });
+        if (!member || member.status !== 'Active') {
+            return res.json({ status: 'error', message: 'Member not found or disabled.' });
         }
-        if (member.status !== 'Active') {
-            return res.json({ status: 'error', message: 'This member account has been disabled.' });
-        }
-
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-        // Check duplicate scan within the same day for same scan type
         db.get(`SELECT * FROM attendance WHERE member_id = ? AND date = ? AND scan_type = ?`, 
             [member.member_id, dateStr, scan_type], (err, existing) => {
             if (existing) {
-                return res.json({
-                    status: 'warning',
-                    member: { name: member.name, member_id: member.member_id },
-                    message: `${member.name} has already recorded ${scan_type} today.`,
-                    time: existing.time
-                });
+                return res.json({ status: 'error', message: `${member.name} already recorded ${scan_type} today.` });
             }
-
             db.run(`INSERT INTO attendance (member_id, scan_type, date, time, timestamp, scanner_device) VALUES (?, ?, ?, ?, datetime('now'), ?)`,
                 [member.member_id, scan_type, dateStr, timeStr, scanner], () => {
                     logActivity(member.username, `Recorded ${scan_type} via scanner`);
-                    res.json({
-                        status: 'success',
-                        scan_type,
-                        time: timeStr,
-                        member: { name: member.name, position: member.position, member_id: member.member_id }
-                    });
+                    res.json({ status: 'success', scan_type, time: timeStr, member: { name: member.name, position: member.position, member_id: member.member_id } });
                 });
         });
     });
@@ -877,8 +832,7 @@ app.post('/api/scan', (req, res) => {
 app.get('/member/login', (req, res) => {
     res.send(`
         <!DOCTYPE html>
-        <html lang="en">
-        <head><meta charset="UTF-8"><title>Member Login</title>
+        <html lang="en"><head><meta charset="UTF-8"><title>Member Login</title>
         <style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.box{background:white;padding:40px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.05);width:100%;max-width:380px}input{width:100%;padding:12px;margin-bottom:15px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}button{width:100%;padding:12px;background:#d97706;color:white;border:none;border-radius:8px;font-weight:bold;cursor:pointer}.error{background:#fee2e2;color:#991b1b;padding:10px;border-radius:6px;margin-bottom:15px;font-size:14px;}</style>
         </head>
         <body>
@@ -887,7 +841,7 @@ app.get('/member/login', (req, res) => {
             ${req.query.error ? `<div class="error">${req.query.error}</div>` : ''}
             <form method="POST" action="/member/login">
                 <label>Username</label><input type="text" name="username" required autocomplete="username">
-                <label>Password (or Temporary Password)</label><input type="password" name="password" required autocomplete="current-password">
+                <label>Password</label><input type="password" name="password" required autocomplete="current-password">
                 <button type="submit">Login</button>
             </form>
         </div>
@@ -902,9 +856,7 @@ app.post('/member/login', (req, res) => {
             return res.redirect('/member/login?error=Invalid+Credentials');
         }
         req.session.user = user;
-        if (user.is_temp_pass === 1) {
-            return res.redirect('/member/force-change-password');
-        }
+        if (user.is_temp_pass === 1) return res.redirect('/member/force-change-password');
         res.redirect('/member');
     });
 });
@@ -912,13 +864,12 @@ app.post('/member/login', (req, res) => {
 app.get('/member/force-change-password', requireMember, (req, res) => {
     res.send(`
         <!DOCTYPE html>
-        <html lang="en"><head><meta charset="UTF-8"><title>Change Temporary Password</title>
+        <html lang="en"><head><meta charset="UTF-8"><title>Change Temp Password</title>
         <style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.box{background:white;padding:30px;border-radius:10px;box-shadow:0 4px 10px rgba(0,0,0,0.05);width:350px}input{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}button{width:100%;padding:10px;background:#d97706;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer}</style>
         </head>
         <body>
         <div class="box">
             <h3>Change Temporary Password</h3>
-            <p style="font-size:13px; color:#64748b;">For security, please set a new permanent password.</p>
             <form method="POST" action="/member/force-change-password">
                 <label>New Password</label><input type="password" name="new_password" required minlength="6">
                 <button type="submit">Update Password</button>
@@ -930,10 +881,8 @@ app.get('/member/force-change-password', requireMember, (req, res) => {
 
 app.post('/member/force-change-password', requireMember, async (req, res) => {
     const { new_password } = req.body;
-    if (!new_password || new_password.length < 6) return res.send('Password must be at least 6 characters.');
     const hashed = await bcrypt.hash(new_password, 10);
     db.run(`UPDATE users SET password = ?, temporary_password = '', is_temp_pass = 0 WHERE id = ?`, [hashed, req.session.user.id], () => {
-        logActivity(req.session.user.username, 'Changed temporary password to permanent password');
         res.redirect('/member');
     });
 });
@@ -947,29 +896,27 @@ app.get('/member', requireMember, (req, res) => {
     db.all(`SELECT * FROM attendance WHERE member_id = ? ORDER BY id DESC LIMIT 20`, [user.member_id], (err, attendance) => {
         db.all(`SELECT * FROM announcements ORDER BY id DESC LIMIT 5`, (err, announcements) => {
             QRCode.toDataURL(`CLUBATTENDANCE:MEMBER:${user.qr_token}`, (err, qrDataURL) => {
-                
                 db.get(`SELECT COUNT(DISTINCT date) as present FROM attendance WHERE member_id = ? AND scan_type = 'TIME IN'`, [user.member_id], (err, statRow) => {
                     const presentCount = statRow ? statRow.present : 0;
 
                     res.send(`
                         <!DOCTYPE html>
                         <html lang="en">
-                        <head>
-                            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-                            <title>Member Portal - ${user.name}</title>
-                            <style>
-                                body { font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; margin: 0; }
-                                header { background: #d97706; color: white; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; }
-                                header h1 { margin: 0; font-size: 20px; }
-                                .container { max-width: 1000px; margin: 30px auto; padding: 0 20px; box-sizing: border-box; }
-                                .card { background: white; border-radius: 12px; padding: 25px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); border: 1px solid #e2e8f0; }
-                                .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-                                @media(max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
-                                table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
-                                th, td { padding: 10px; text-align: left; border-bottom: 1px solid #e2e8f0; }
-                                th { background: #f1f5f9; }
-                                .btn { background: #d97706; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; display: inline-block; }
-                            </style>
+                        <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Member Portal</title>
+                        <style>
+                            body { font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; margin: 0; }
+                            header { background: #d97706; color: white; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; }
+                            header h1 { margin: 0; font-size: 20px; }
+                            .container { max-width: 1000px; margin: 30px auto; padding: 0 20px; box-sizing: border-box; }
+                            .card { background: white; border-radius: 12px; padding: 25px; margin-bottom: 25px; border: 1px solid #e2e8f0; }
+                            .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+                            @media(max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+                            table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+                            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+                            th { background: #f1f5f9; }
+                            .avatar { width: 90px; height: 90px; border-radius: 50%; object-fit: cover; border: 3px solid #d97706; margin-bottom: 10px; }
+                            .btn { background: #d97706; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; display: inline-block; }
+                        </style>
                         </head>
                         <body>
                             <header>
@@ -978,27 +925,27 @@ app.get('/member', requireMember, (req, res) => {
                             </header>
                             <div class="container">
                                 <div class="grid-2">
-                                    <div class="card">
-                                        <h2>Welcome, ${user.name}</h2>
+                                    <div class="card" style="text-align:center;">
+                                        <img src="/public/uploads/${user.photo || 'default.png'}" class="avatar" onerror="this.src='/public/uploads/default.png'">
+                                        <h2>${user.name}</h2>
                                         <p><strong>Position:</strong> ${user.position}</p>
                                         <p><strong>Member ID:</strong> ${user.member_id}</p>
-                                        <p><strong>Username:</strong> ${user.username}</p>
                                         <p><strong>Days Present:</strong> ${presentCount}</p>
+                                        <a href="/admin/member/id/${user.id}" target="_blank" class="btn">View ID Card</a>
                                     </div>
                                     <div class="card" style="text-align:center;">
                                         <h3>Your QR Code</h3>
                                         <img src="${qrDataURL}" alt="QR" style="width:160px; height:160px;">
-                                        <br><br>
-                                        <a href="/admin/member/id/${user.id}" target="_blank" class="btn">View / Print ID Card</a>
                                     </div>
                                 </div>
 
                                 <div class="card">
-                                    <h3>Announcements</h3>
+                                    <h3>Club Announcements</h3>
                                     ${announcements.length === 0 ? '<p>No announcements yet.</p>' : announcements.map(a => `
-                                        <div style="border-bottom:1px solid #eee; padding-bottom:10px; margin-bottom:10px;">
-                                            <strong>${a.title}</strong><br><small style="color:#666;">${a.created_at}</small>
-                                            <p>${a.message}</p>
+                                        <div style="border-bottom:1px solid #eee; padding-bottom:12px; margin-bottom:12px;">
+                                            <strong style="font-size:16px; color:#d97706;">${a.title}</strong><br>
+                                            <small style="color:#64748b;">${a.created_at}</small>
+                                            <p style="margin:6px 0 0;">${a.message}</p>
                                         </div>
                                     `).join('')}
                                 </div>
@@ -1031,9 +978,7 @@ server.listen(PORT, '0.0.0.0', () => {
     let localIp = 'localhost';
     for (const name of Object.keys(interfaces)) {
         for (const net of interfaces[name]) {
-            if (net.family === 'IPv4' && !net.internal) {
-                localIp = net.address;
-            }
+            if (net.family === 'IPv4' && !net.internal) localIp = net.address;
         }
     }
 
@@ -1046,7 +991,5 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`Admin Portal:   http://${localIp}:${PORT}/admin`);
     console.log(`Scanner Portal: http://${localIp}:${PORT}/scanner`);
     console.log(`Member Portal:  http://${localIp}:${PORT}/member`);
-    console.log('======================================================');
-    console.log('Default Admin Credentials: username: admin / password: Admin123!');
-    console.log('------------------------------------------------------\n');
+    console.log('======================================================\n');
 });
