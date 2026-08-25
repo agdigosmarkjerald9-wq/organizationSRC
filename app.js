@@ -119,7 +119,7 @@ function generateRandomString(length = 8) {
 }
 
 // ==================== HTML TEMPLATE GENERATOR ====================
-function renderLayout(title, bodyContent, activeNav = '') {
+function renderLayout(title, bodyContent) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -167,7 +167,7 @@ app.get('/', (req, res) => {
             <div class="bg-white p-6 rounded-xl shadow border border-slate-200 hover:shadow-lg transition flex flex-col items-center">
                 <div class="bg-indigo-100 text-indigo-600 p-4 rounded-full text-2xl mb-4"><i class="fa-solid fa-user-shield"></i></div>
                 <h3 class="font-bold text-xl mb-2">Admin Portal</h3>
-                <p class="text-slate-500 text-sm mb-6 text-center">Manage members, generate IDs, view attendance logs, and configure system settings.</p>
+                <p class="text-slate-500 text-sm mb-6 text-center">Manage members with custom positions, announcements, attendance logs, and settings.</p>
                 <a href="/admin" class="mt-auto w-full bg-indigo-600 text-white py-2 rounded-lg font-medium hover:bg-indigo-700 transition text-center">Access Admin</a>
             </div>
             <div class="bg-white p-6 rounded-xl shadow border border-slate-200 hover:shadow-lg transition flex flex-col items-center">
@@ -179,7 +179,7 @@ app.get('/', (req, res) => {
             <div class="bg-white p-6 rounded-xl shadow border border-slate-200 hover:shadow-lg transition flex flex-col items-center">
                 <div class="bg-blue-100 text-blue-600 p-4 rounded-full text-2xl mb-4"><i class="fa-solid fa-id-card"></i></div>
                 <h3 class="font-bold text-xl mb-2">Member Portal</h3>
-                <p class="text-slate-500 text-sm mb-6 text-center">Check personal attendance history, download ID QR code, and update profile.</p>
+                <p class="text-slate-500 text-sm mb-6 text-center">Check personal attendance history, announcements, download ID QR code, and update profile.</p>
                 <a href="/member" class="mt-auto w-full bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700 transition text-center">Member Login</a>
             </div>
         </div>
@@ -231,109 +231,101 @@ app.get('/admin/logout', (req, res) => {
     res.redirect('/admin/login');
 });
 
-// Middleware for Admin Authentication
 function requireAdmin(req, res, next) {
     if (!req.session.adminId) return res.redirect('/admin/login');
     next();
 }
 
 app.get('/admin', requireAdmin, (req, res) => {
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.session.adminId], (err, adminUser) => {
-        // Check if admin needs to change password (if default or forced)
-        db.all(`SELECT * FROM users WHERE position != 'Adviser' OR username != 'admin'`, [], (err, members) => {
-            db.get(`SELECT COUNT(*) as total FROM users WHERE position != 'Adviser'`, (err, mCount) => {
-                db.get(`SELECT COUNT(DISTINCT member_id) as present FROM attendance WHERE date = date('localtime') AND scan_type = 'TIME IN'`, (err, pCount) => {
-                    db.get(`SELECT * FROM clubs LIMIT 1`, (err, club) => {
-                        db.all(`SELECT * FROM announcements ORDER BY id DESC LIMIT 5`, (err, announcements) => {
-                            db.all(`SELECT * FROM activity_logs ORDER BY id DESC LIMIT 10`, (err, logs) => {
-                                db.all(`SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC LIMIT 15`, (err, liveAtt) => {
-                                    
-                                    const totalMembers = mCount ? mCount.total : 0;
-                                    const presentToday = pCount ? pCount.present : 0;
-                                    const absentToday = Math.max(0, totalMembers - presentToday);
+    db.get(`SELECT COUNT(DISTINCT member_id) as total FROM users WHERE position != 'Adviser'`, (err, mCount) => {
+        db.get(`SELECT COUNT(DISTINCT member_id) as present FROM attendance WHERE date = date('localtime') AND scan_type = 'TIME IN'`, (err, pCount) => {
+            db.all(`SELECT * FROM announcements ORDER BY id DESC LIMIT 5`, (err, announcements) => {
+                db.all(`SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC LIMIT 15`, (err, liveAtt) => {
+                    
+                    const totalMembers = mCount ? mCount.total : 0;
+                    const presentToday = pCount ? pCount.present : 0;
+                    const absentToday = Math.max(0, totalMembers - presentToday);
 
-                                    const html = `
-                                    <div class="flex flex-col md:flex-row gap-6">
-                                        <!-- Sidebar Navigation -->
-                                        <div class="w-full md:w-64 bg-white p-4 rounded-xl shadow border border-slate-200 h-fit space-y-2">
-                                            <div class="font-bold text-slate-700 px-3 py-2 border-b">Admin Dashboard</div>
-                                            <a href="/admin" class="block px-3 py-2 rounded-lg bg-indigo-50 text-indigo-700 font-medium"><i class="fa-solid fa-chart-pie mr-2"></i> Overview</a>
-                                            <a href="/admin/members" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-users mr-2"></i> Members</a>
-                                            <a href="/admin/attendance" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-clipboard-user mr-2"></i> Attendance</a>
-                                            <a href="/admin/reports" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-file-excel mr-2"></i> Reports</a>
-                                            <a href="/admin/settings" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-gear mr-2"></i> Club Settings</a>
-                                            <a href="/admin/logout" class="block px-3 py-2 rounded-lg hover:bg-red-50 text-red-600 mt-4"><i class="fa-solid fa-right-from-bracket mr-2"></i> Logout</a>
-                                        </div>
+                    const html = `
+                    <div class="flex flex-col md:flex-row gap-6">
+                        <!-- Sidebar Navigation -->
+                        <div class="w-full md:w-64 bg-white p-4 rounded-xl shadow border border-slate-200 h-fit space-y-2">
+                            <div class="font-bold text-slate-700 px-3 py-2 border-b">Admin Dashboard</div>
+                            <a href="/admin" class="block px-3 py-2 rounded-lg bg-indigo-50 text-indigo-700 font-medium"><i class="fa-solid fa-chart-pie mr-2"></i> Overview</a>
+                            <a href="/admin/members" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-users mr-2"></i> Members</a>
+                            <a href="/admin/announcements" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-bullhorn mr-2"></i> Announcements</a>
+                            <a href="/admin/attendance" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-clipboard-user mr-2"></i> Attendance</a>
+                            <a href="/admin/reports" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-file-excel mr-2"></i> Reports</a>
+                            <a href="/admin/settings" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-gear mr-2"></i> Club Settings</a>
+                            <a href="/admin/logout" class="block px-3 py-2 rounded-lg hover:bg-red-50 text-red-600 mt-4"><i class="fa-solid fa-right-from-bracket mr-2"></i> Logout</a>
+                        </div>
 
-                                        <!-- Main Dashboard Content -->
-                                        <div class="flex-grow space-y-6">
-                                            <!-- Stats Cards -->
-                                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                                    <div class="text-slate-400 text-xs font-bold uppercase">Total Members</div>
-                                                    <div class="text-3xl font-extrabold text-slate-800 mt-1">${totalMembers}</div>
+                        <!-- Main Dashboard Content -->
+                        <div class="flex-grow space-y-6">
+                            <!-- Stats Cards -->
+                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
+                                    <div class="text-slate-400 text-xs font-bold uppercase">Total Members</div>
+                                    <div class="text-3xl font-extrabold text-slate-800 mt-1">${totalMembers}</div>
+                                </div>
+                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
+                                    <div class="text-emerald-500 text-xs font-bold uppercase">Present Today</div>
+                                    <div class="text-3xl font-extrabold text-emerald-600 mt-1">${presentToday}</div>
+                                </div>
+                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
+                                    <div class="text-amber-500 text-xs font-bold uppercase">Absent Today</div>
+                                    <div class="text-3xl font-extrabold text-amber-600 mt-1">${absentToday}</div>
+                                </div>
+                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
+                                    <div class="text-indigo-500 text-xs font-bold uppercase">Attendance Rate</div>
+                                    <div class="text-3xl font-extrabold text-indigo-600 mt-1">${totalMembers > 0 ? Math.round((presentToday/totalMembers)*100) : 0}%</div>
+                                </div>
+                            </div>
+
+                            <!-- Quick Actions & Live Feed -->
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
+                                    <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-bolt text-amber-500 mr-2"></i> Quick Actions</h3>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <a href="/admin/members" class="p-3 bg-indigo-50 text-indigo-700 rounded-lg text-center font-medium hover:bg-indigo-100 transition"><i class="fa-solid fa-user-plus block text-xl mb-1"></i> Add Member</a>
+                                        <a href="/admin/announcements" class="p-3 bg-blue-50 text-blue-700 rounded-lg text-center font-medium hover:bg-blue-100 transition"><i class="fa-solid fa-bullhorn block text-xl mb-1"></i> Post Announcement</a>
+                                        <a href="/admin/reports" class="p-3 bg-emerald-50 text-emerald-700 rounded-lg text-center font-medium hover:bg-emerald-100 transition"><i class="fa-solid fa-download block text-xl mb-1"></i> Export Data</a>
+                                        <a href="/scanner" target="_blank" class="p-3 bg-purple-50 text-purple-700 rounded-lg text-center font-medium hover:bg-purple-100 transition"><i class="fa-solid fa-qrcode block text-xl mb-1"></i> Open Scanner</a>
+                                    </div>
+                                </div>
+
+                                <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
+                                    <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-tower-broadcast text-emerald-500 mr-2"></i> Live Attendance Feed</h3>
+                                    <div class="space-y-3 max-h-56 overflow-y-auto pr-2">
+                                        ${liveAtt.length === 0 ? '<p class="text-slate-400 text-sm">No scans recorded yet today.</p>' : liveAtt.map(att => `
+                                            <div class="flex justify-between items-center bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-sm">
+                                                <div>
+                                                    <span class="font-bold text-slate-800">${att.name}</span>
+                                                    <span class="text-xs text-slate-400 ml-2">(${att.position})</span>
                                                 </div>
-                                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                                    <div class="text-emerald-500 text-xs font-bold uppercase">Present Today</div>
-                                                    <div class="text-3xl font-extrabold text-emerald-600 mt-1">${presentToday}</div>
-                                                </div>
-                                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                                    <div class="text-amber-500 text-xs font-bold uppercase">Absent Today</div>
-                                                    <div class="text-3xl font-extrabold text-amber-600 mt-1">${absentToday}</div>
-                                                </div>
-                                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                                    <div class="text-indigo-500 text-xs font-bold uppercase">Attendance Rate</div>
-                                                    <div class="text-3xl font-extrabold text-indigo-600 mt-1">${totalMembers > 0 ? Math.round((presentToday/totalMembers)*100) : 0}%</div>
+                                                <div class="text-right">
+                                                    <span class="px-2 py-0.5 rounded text-xs font-bold ${att.scan_type === 'TIME IN' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}">${att.scan_type}</span>
+                                                    <div class="text-xs text-slate-400 mt-0.5">${att.time}</div>
                                                 </div>
                                             </div>
-
-                                            <!-- Quick Actions & Live Feed -->
-                                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                                <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
-                                                    <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-bolt text-amber-500 mr-2"></i> Quick Actions</h3>
-                                                    <div class="grid grid-cols-2 gap-3">
-                                                        <a href="/admin/members" class="p-3 bg-indigo-50 text-indigo-700 rounded-lg text-center font-medium hover:bg-indigo-100 transition"><i class="fa-solid fa-user-plus block text-xl mb-1"></i> Add Member</a>
-                                                        <a href="/admin/reports" class="p-3 bg-emerald-50 text-emerald-700 rounded-lg text-center font-medium hover:bg-emerald-100 transition"><i class="fa-solid fa-download block text-xl mb-1"></i> Export Data</a>
-                                                        <a href="/admin/backup" class="p-3 bg-blue-50 text-blue-700 rounded-lg text-center font-medium hover:bg-blue-100 transition"><i class="fa-solid fa-database block text-xl mb-1"></i> Backup DB</a>
-                                                        <a href="/scanner" target="_blank" class="p-3 bg-purple-50 text-purple-700 rounded-lg text-center font-medium hover:bg-purple-100 transition"><i class="fa-solid fa-qrcode block text-xl mb-1"></i> Open Scanner</a>
-                                                    </div>
-                                                </div>
-
-                                                <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
-                                                    <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-tower-broadcast text-emerald-500 mr-2"></i> Live Attendance Feed</h3>
-                                                    <div class="space-y-3 max-h-56 overflow-y-auto pr-2">
-                                                        ${liveAtt.length === 0 ? '<p class="text-slate-400 text-sm">No scans recorded yet today.</p>' : liveAtt.map(att => `
-                                                            <div class="flex justify-between items-center bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-sm">
-                                                                <div>
-                                                                    <span class="font-bold text-slate-800">${att.name}</span>
-                                                                    <span class="text-xs text-slate-400 ml-2">(${att.position})</span>
-                                                                </div>
-                                                                <div class="text-right">
-                                                                    <span class="px-2 py-0.5 rounded text-xs font-bold ${att.scan_type === 'TIME IN' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}">${att.scan_type}</span>
-                                                                    <div class="text-xs text-slate-400 mt-0.5">${att.time}</div>
-                                                                </div>
-                                                            </div>
-                                                        `).join('')}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>`;
-                                    res.send(renderLayout('Admin Dashboard', html));
-                                });
-                            });
-                        });
-                    });
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+                    res.send(renderLayout('Admin Dashboard', html));
                 });
             });
         });
     });
 });
 
-// ==================== MEMBER MANAGEMENT ====================
+// ==================== MEMBER MANAGEMENT (WITH DELETE & CUSTOM POSITION) ====================
 app.get('/admin/members', requireAdmin, (req, res) => {
     db.all(`SELECT * FROM users WHERE position != 'Adviser' ORDER BY id DESC`, [], (err, members) => {
-        db.get(`SELECT club_name FROM clubs LIMIT 1`, [], (err, club) => {
+        // Kunin din ang mga natatanging posisyon na ginamit na para sa position selector/filter kung kailangan
+        db.all(`SELECT DISTINCT position FROM users`, [], (err, positions) => {
             const html = `
             <div class="space-y-6">
                 <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -358,14 +350,14 @@ app.get('/admin/members', requireAdmin, (req, res) => {
                                 <tr class="hover:bg-slate-50">
                                     <td class="p-4 font-mono font-bold text-indigo-600">${m.member_id}</td>
                                     <td class="p-4 font-medium text-slate-800">${m.name}</td>
-                                    <td class="p-4 text-slate-600">${m.position}</td>
+                                    <td class="p-4 text-slate-600"><span class="bg-slate-100 px-2 py-1 rounded text-xs font-semibold">${m.position}</span></td>
                                     <td class="p-4 font-mono text-xs text-slate-500">${m.username} / ${m.temporary_password || 'Changed'}</td>
                                     <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-bold ${m.status === 'Active' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${m.status}</span></td>
                                     <td class="p-4 text-right space-x-2">
                                         <a href="/admin/member/id/${m.id}" target="_blank" class="text-indigo-600 hover:text-indigo-800" title="Print/View ID"><i class="fa-solid fa-id-card"></i></a>
                                         <a href="/admin/member/qr/${m.id}" target="_blank" class="text-purple-600 hover:text-purple-800" title="QR Code"><i class="fa-solid fa-qrcode"></i></a>
                                         <a href="/admin/member/toggle/${m.id}" class="text-amber-600 hover:text-amber-800" title="Toggle Status"><i class="fa-solid fa-power-off"></i></a>
-                                        <a href="/admin/member/delete/${m.id}" onclick="return confirm('Are you sure you want to delete this member?')" class="text-red-600 hover:text-red-800" title="Delete"><i class="fa-solid fa-trash"></i></a>
+                                        <a href="/admin/member/delete/${m.id}" onclick="return confirm('Are you sure you want to delete member ${m.name}? This action cannot be undone.')" class="text-red-600 hover:text-red-800" title="Delete Member"><i class="fa-solid fa-trash"></i></a>
                                     </td>
                                 </tr>
                             `).join('')}
@@ -388,7 +380,7 @@ app.get('/admin/members', requireAdmin, (req, res) => {
                         </div>
                         <div>
                             <label class="block text-sm font-medium mb-1">Position</label>
-                            <select name="position" class="w-full border rounded-lg px-3 py-2">
+                            <select name="position_select" id="positionSelect" onchange="checkCustomPosition(this)" class="w-full border rounded-lg px-3 py-2 mb-2">
                                 <option value="Member">Member</option>
                                 <option value="President">President</option>
                                 <option value="Vice President">Vice President</option>
@@ -397,7 +389,9 @@ app.get('/admin/members', requireAdmin, (req, res) => {
                                 <option value="Auditor">Auditor</option>
                                 <option value="Public Information Officer">Public Information Officer</option>
                                 <option value="Sergeant-at-Arms">Sergeant-at-Arms</option>
+                                <option value="CUSTOM">-- Type Custom Position --</option>
                             </select>
+                            <input type="text" name="position_custom" id="customPositionInput" placeholder="Enter custom position..." class="w-full border rounded-lg px-3 py-2 hidden">
                         </div>
                         <div>
                             <label class="block text-sm font-medium mb-1">Email (Optional)</label>
@@ -419,6 +413,20 @@ app.get('/admin/members', requireAdmin, (req, res) => {
             <script>
                 function openAddModal() { document.getElementById('addModal').classList.remove('hidden'); }
                 function closeAddModal() { document.getElementById('addModal').classList.add('hidden'); }
+                function checkCustomPosition(select) {
+                    const customInput = document.getElementById('customPositionInput');
+                    if (select.value === 'CUSTOM') {
+                        customInput.classList.remove('hidden');
+                        customInput.required = true;
+                        customInput.name = 'position';
+                        select.name = 'ignore_pos';
+                    } else {
+                        customInput.classList.add('hidden');
+                        customInput.required = false;
+                        customInput.name = 'position_custom';
+                        select.name = 'position';
+                    }
+                }
             </script>`;
             res.send(renderLayout('Member Management', html));
         });
@@ -426,7 +434,9 @@ app.get('/admin/members', requireAdmin, (req, res) => {
 });
 
 app.post('/admin/member/add', requireAdmin, (req, res) => {
-    const { name, position, email, contact } = req.body;
+    let { name, position, email, contact } = req.body;
+    if (!position) position = 'Member';
+
     db.get(`SELECT COUNT(*) as count FROM users`, async (err, row) => {
         const nextIdNum = (row ? row.count : 0) + 1001;
         const member_id = `CLUB-2026-${String(nextIdNum).padStart(4, '0')}`;
@@ -438,7 +448,7 @@ app.post('/admin/member/add', requireAdmin, (req, res) => {
         db.run(`INSERT INTO users (member_id, name, position, email, contact, username, password, temporary_password, qr_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')`,
             [member_id, name, position, email, contact, username, hashedPass, temp_password, qr_token], (err) => {
                 if (err) console.error(err);
-                logActivity(req.session.adminUser, `Created member ${name} (${member_id})`);
+                logActivity(req.session.adminUser, `Created member ${name} (${member_id}) with position ${position}`);
                 res.redirect('/admin/members');
             });
     });
@@ -458,11 +468,12 @@ app.get('/admin/member/toggle/:id', requireAdmin, (req, res) => {
     });
 });
 
+// Delete Member Route
 app.get('/admin/member/delete/:id', requireAdmin, (req, res) => {
     db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], (err, user) => {
         if (user) {
             db.run(`DELETE FROM users WHERE id = ?`, [req.params.id], () => {
-                logActivity(req.session.adminUser, `Deleted member ${user.name}`);
+                logActivity(req.session.adminUser, `Deleted member ${user.name} (${user.member_id})`);
                 res.redirect('/admin/members');
             });
         } else {
@@ -525,7 +536,6 @@ app.get('/admin/member/id/:id', requireAdmin, (req, res) => {
     });
 });
 
-// QR Code Standalone View
 app.get('/admin/member/qr/:id', requireAdmin, (req, res) => {
     db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], async (err, user) => {
         if (!user) return res.send('Member not found');
@@ -539,6 +549,63 @@ app.get('/admin/member/qr/:id', requireAdmin, (req, res) => {
             <a href="/admin/members" class="block text-sm text-slate-500 hover:underline">Back to Members</a>
         </div>`;
         res.send(renderLayout('Member QR Code', html));
+    });
+});
+
+// ==================== ANNOUNCEMENTS MANAGEMENT ====================
+app.get('/admin/announcements', requireAdmin, (req, res) => {
+    db.all(`SELECT * FROM announcements ORDER BY id DESC`, [], (err, announcements) => {
+        const html = `
+        <div class="space-y-6 max-w-4xl mx-auto">
+            <h2 class="text-2xl font-bold text-slate-800">Announcements Management</h2>
+            
+            <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
+                <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-bullhorn text-indigo-600 mr-2"></i> Post New Announcement</h3>
+                <form action="/admin/announcement/add" method="POST" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Title</label>
+                        <input type="text" name="title" required class="w-full border rounded-lg px-3 py-2" placeholder="e.g. Emergency Meeting on Friday">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Message</label>
+                        <textarea name="message" rows="3" required class="w-full border rounded-lg px-3 py-2" placeholder="Enter announcement details here..."></textarea>
+                    </div>
+                    <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 transition">Publish Announcement</button>
+                </form>
+            </div>
+
+            <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
+                <h3 class="font-bold text-lg text-slate-800">Published Announcements</h3>
+                <div class="space-y-3">
+                    ${announcements.length === 0 ? '<p class="text-slate-400 text-sm">No announcements posted yet.</p>' : announcements.map(ann => `
+                        <div class="flex justify-between items-start bg-slate-50 p-4 rounded-lg border border-slate-100">
+                            <div>
+                                <h4 class="font-bold text-indigo-900">${ann.title}</h4>
+                                <p class="text-sm text-slate-600 mt-1">${ann.message}</p>
+                                <span class="text-xs text-slate-400 mt-2 block"><i class="fa-regular fa-clock mr-1"></i> ${ann.created_at}</span>
+                            </div>
+                            <a href="/admin/announcement/delete/${ann.id}" onclick="return confirm('Delete this announcement?')" class="text-red-500 hover:text-red-700 text-sm p-1"><i class="fa-solid fa-trash"></i></a>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        </div>`;
+        res.send(renderLayout('Announcements', html));
+    });
+});
+
+app.post('/admin/announcement/add', requireAdmin, (req, res) => {
+    const { title, message } = req.body;
+    db.run(`INSERT INTO announcements (title, message) VALUES (?, ?)`, [title, message], () => {
+        logActivity(req.session.adminUser, `Posted announcement: ${title}`);
+        res.redirect('/admin/announcements');
+    });
+});
+
+app.get('/admin/announcement/delete/:id', requireAdmin, (req, res) => {
+    db.run(`DELETE FROM announcements WHERE id = ?`, [req.params.id], () => {
+        logActivity(req.session.adminUser, `Deleted announcement ID ${req.params.id}`);
+        res.redirect('/admin/announcements');
     });
 });
 
@@ -614,7 +681,7 @@ app.get('/admin/reports', requireAdmin, (req, res) => {
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
                     <h3 class="font-bold text-lg text-slate-800"><i class="fa-solid fa-file-csv text-emerald-600 mr-2"></i> CSV Export</h3>
-                    <p class="text-slate-500 text-sm">Download the complete system attendance records in CSV format compatible with Microsoft Excel or Google Sheets.</p>
+                    <p class="text-slate-500 text-sm">Download complete system attendance records in CSV format compatible with Excel or Google Sheets.</p>
                     <button onclick="downloadCSV()" class="bg-emerald-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-emerald-700 transition"><i class="fa-solid fa-download mr-2"></i> Download CSV Report</button>
                 </div>
                 <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
@@ -728,7 +795,7 @@ app.get('/scanner', (req, res) => {
         </div>
 
         <footer class="text-center text-xs text-slate-500 py-2">
-            Point camera at member QR code. Make sure lighting is adequate.
+            Point camera at member QR code.
         </footer>
 
         <script>
@@ -754,7 +821,6 @@ app.get('/scanner', (req, res) => {
                 document.getElementById('soundStatus').className = soundEnabled ? 'text-xs bg-emerald-900 text-emerald-300 px-2 py-1 rounded cursor-pointer' : 'text-xs bg-red-900 text-red-300 px-2 py-1 rounded cursor-pointer';
             }
 
-            // Web Audio API Sound Generator
             function playSound(type) {
                 if (!soundEnabled) return;
                 const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -764,8 +830,8 @@ app.get('/scanner', (req, res) => {
                 gain.connect(ctx.destination);
 
                 if (type === 'success') {
-                    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-                    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1); // A5
+                    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
                     gain.gain.setValueAtTime(0.1, ctx.currentTime);
                     osc.start();
                     osc.stop(ctx.currentTime + 0.3);
@@ -775,7 +841,7 @@ app.get('/scanner', (req, res) => {
                     gain.gain.setValueAtTime(0.1, ctx.currentTime);
                     osc.start();
                     osc.stop(ctx.currentTime + 0.3);
-                } else { // error
+                } else {
                     osc.frequency.setValueAtTime(200, ctx.currentTime);
                     osc.frequency.setValueAtTime(150, ctx.currentTime + 0.15);
                     gain.gain.setValueAtTime(0.15, ctx.currentTime);
@@ -809,7 +875,7 @@ app.get('/scanner', (req, res) => {
             function onScanSuccess(decodedText) {
                 const now = Date.now();
                 if (decodedText === lastScannedToken && now - lastScanTime < 4000) {
-                    return; // Prevent duplicate rapid scans
+                    return;
                 }
                 lastScannedToken = decodedText;
                 lastScanTime = now;
@@ -848,7 +914,6 @@ app.get('/scanner', (req, res) => {
     res.send(html);
 });
 
-// Scan API Endpoint
 app.post('/api/scan', (req, res) => {
     const { token, scan_type, scanner_device } = req.body;
     if (!token) return res.json({ status: 'error', message: 'No QR token provided.' });
@@ -857,10 +922,9 @@ app.post('/api/scan', (req, res) => {
         if (!user) return res.json({ status: 'error', message: 'QR code not recognized in system database.' });
         if (user.status !== 'Active') return res.json({ status: 'error', message: 'This member account is disabled.' });
 
-        const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+        const today = new Date().toLocaleDateString('en-CA');
         const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-        // Check duplicate scan for same type today
         db.get(`SELECT * FROM attendance WHERE member_id = ? AND date = ? AND scan_type = ?`, [user.member_id, today, scan_type], (err, existing) => {
             if (existing) {
                 return res.json({ status: 'duplicate', name: user.name, position: user.position, member_id: user.member_id, time: existing.time });
@@ -1021,7 +1085,7 @@ app.get('/member', requireMember, (req, res) => {
 });
 
 
-// ==================== START SERVER & NETWORK DISCOVERY ====================
+// ==================== START SERVER ====================
 server.listen(PORT, '0.0.0.0', () => {
     console.log('\n======================================================');
     console.log('       SCHOOL CLUB QR CODE ATTENDANCE SYSTEM          ');
@@ -1039,9 +1103,9 @@ server.listen(PORT, '0.0.0.0', () => {
     for (const name of Object.keys(interfaces)) {
         for (const net of interfaces[name]) {
             if (net.family === 'IPv4' && !net.internal) {
-                console.log(`  > Network URL: http://${net.ip}:${PORT}`);
-                console.log(`  > Scanner:     http://${net.ip}:${PORT}/scanner`);
-                console.log(`  > Admin:       http://${net.ip}:${PORT}/admin`);
+                console.log(`  > Network URL: http://${net.address}:${PORT}`);
+                console.log(`  > Scanner:     http://${net.address}:${PORT}/scanner`);
+                console.log(`  > Admin:       http://${net.address}:${PORT}/admin`);
             }
         }
     }
