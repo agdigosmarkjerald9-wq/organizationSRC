@@ -1,393 +1,358 @@
+/*************************************************************
+ * SCHOOL CLUB QR CODE ATTENDANCE SYSTEM - ALL-IN-ONE APP.JS
+ *************************************************************/
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
-const qrcode = require('qrcode');
-const http = require('http');
-const path = require('path');
+const QRCode = require('qrcode');
+const crypto = require('crypto');
 const fs = require('fs');
-const os = require('os');
+const path = require('path');
+const http = require('http');
 
 const app = express();
-const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
 // Ensure data directory exists
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync('./data')) {
+    fs.mkdirSync('./data');
 }
 
-const dbFile = path.join(dataDir, 'database.sqlite');
+// Initialize SQLite Database
+const dbFile = './data/attendance.db';
 const db = new sqlite3.Database(dbFile, (err) => {
-    if (err) console.error('Database opening error: ', err.message);
-    else console.log('Connected to SQLite database.');
+    if (err) {
+        console.error('Database opening error: ', err.message);
+    } else {
+        console.log('Connected to SQLite database.');
+        initDatabase();
+    }
 });
 
-// Initialize Database Tables & Default Admin
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        member_id TEXT UNIQUE,
-        name TEXT NOT NULL,
-        position TEXT DEFAULT 'Member',
-        email TEXT,
-        contact TEXT,
-        photo TEXT DEFAULT '',
-        username TEXT UNIQUE,
-        password TEXT NOT NULL,
-        temporary_password TEXT,
-        qr_token TEXT UNIQUE,
-        status TEXT DEFAULT 'Active',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login DATETIME
-    )`);
+function initDatabase() {
+    db.serialize(() => {
+        db.run(`CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id TEXT UNIQUE,
+            name TEXT,
+            position TEXT,
+            email TEXT,
+            contact TEXT,
+            username TEXT UNIQUE,
+            password TEXT,
+            temporary_password TEXT,
+            qr_token TEXT,
+            status TEXT DEFAULT 'Active',
+            is_temp_pass INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_login DATETIME
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS attendance (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        member_id TEXT,
-        scan_type TEXT,
-        date TEXT,
-        time TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        scanner_device TEXT
-    )`);
+        db.run(`CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id TEXT,
+            scan_type TEXT,
+            date TEXT,
+            time TEXT,
+            timestamp DATETIME,
+            scanner_device TEXT
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS clubs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        club_name TEXT DEFAULT 'Coding & Robotics Club',
-        school_name TEXT DEFAULT 'National High School',
-        school_year TEXT DEFAULT '2025-2026',
-        adviser TEXT DEFAULT 'Faculty Adviser',
-        logo TEXT DEFAULT '',
-        expected_time_in TEXT DEFAULT '08:00',
-        expected_time_out TEXT DEFAULT '17:00',
-        late_threshold TEXT DEFAULT '08:15'
-    )`);
+        db.run(`CREATE TABLE IF NOT EXISTS clubs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            club_name TEXT,
+            school_name TEXT,
+            school_year TEXT,
+            adviser TEXT,
+            logo TEXT,
+            expected_time_in TEXT DEFAULT '08:00',
+            expected_time_out TEXT DEFAULT '17:00',
+            late_threshold TEXT DEFAULT '08:15'
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS announcements (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        message TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+        db.run(`CREATE TABLE IF NOT EXISTS announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            message TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        action TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+        db.run(`CREATE TABLE IF NOT EXISTS activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            action TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
 
-    // Insert Default Club Info if empty
-    db.get(`SELECT COUNT(*) as count FROM clubs`, (err, row) => {
-        if (row && row.count === 0) {
-            db.run(`INSERT INTO clubs (club_name, school_name, school_year, adviser) VALUES ('Coding & Robotics Club', 'Manila Science High School', '2025-2026', 'Dr. Juan Santos')`);
-        }
+        // Insert default club configuration if missing
+        db.get(`SELECT COUNT(*) as count FROM clubs`, (err, row) => {
+            if (row && row.count === 0) {
+                db.run(`INSERT INTO clubs (club_name, school_name, school_year, adviser, expected_time_in, expected_time_out, late_threshold) 
+                        VALUES ('Supreme Student Council', 'National High School', '2026-2027', 'Dr. Maria Santos', '08:00', '17:00', '08:15')`);
+            }
+        });
+
+        // Insert default admin account if missing (admin / Admin123!)
+        db.get(`SELECT COUNT(*) as count FROM users WHERE position = 'Administrator'`, async (err, row) => {
+            if (row && row.count === 0) {
+                const hashedPass = await bcrypt.hash('Admin123!', 10);
+                db.run(`INSERT INTO users (member_id, name, position, username, password, temporary_password, status, is_temp_pass) 
+                        VALUES ('ADMIN-001', 'System Administrator', 'Administrator', 'admin', ?, '', 'Active', 0)`, [hashedPass]);
+            }
+        });
     });
+}
 
-    // Insert Default Admin User
-    db.get(`SELECT COUNT(*) as count FROM users WHERE username = 'admin'`, async (err, row) => {
-        if (row && row.count === 0) {
-            const hashed = await bcrypt.hash('adminpassword', 10);
-            db.run(`INSERT INTO users (member_id, name, position, username, password, qr_token, status) VALUES ('ADMIN-001', 'System Administrator', 'Adviser', 'admin', ?, 'ADMIN_TOKEN_SECURE', 'Active')`, [hashed]);
-        }
-    });
-});
-
+// Middleware setup
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(session({
-    secret: 'school-club-attendance-secret-key-99!',
+    secret: crypto.randomBytes(32).toString('hex'),
     resave: false,
     saveUninitialized: false,
     cookie: { maxAge: 24 * 60 * 60 * 1000 }
 }));
 
-// Helper: Log Activity
 function logActivity(username, action) {
     db.run(`INSERT INTO activity_logs (username, action) VALUES (?, ?)`, [username || 'System', action]);
 }
 
-// Helper: Generate Secure Random String
-function generateRandomString(length = 8) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let result = '';
-    for (let i = 0; i < length; i++) {
-        result += chars.charAt(Math.floor(Math.random() * chars.length));
+// --- AUTHENTICATION MIDDLEWARES ---
+function requireAdmin(req, res, next) {
+    if (req.session && req.session.user && req.session.user.position === 'Administrator') {
+        return next();
     }
-    return result;
+    res.redirect('/admin/login');
 }
 
-// Helper: Generate Club Acronym Shortcut (e.g., "Coding & Robotics Club" -> "CRC")
-function getClubShortcut(clubName) {
-    if (!clubName) return 'CLUB';
-    const words = clubName.replace(/[^a-zA-Z0-9 ]/g, '').split(' ').filter(w => w.length > 0);
-    let acronym = words.map(w => w[0].toUpperCase()).join('');
-    return acronym.length >= 2 ? acronym : 'CLUB';
+function requireMember(req, res, next) {
+    if (req.session && req.session.user && req.session.user.position !== 'Administrator') {
+        return next();
+    }
+    res.redirect('/member/login');
 }
 
-// ==================== HTML TEMPLATE GENERATOR ====================
-function renderLayout(title, bodyContent) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
-    <header class="bg-indigo-700 text-white shadow-md">
-        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
-            <div class="flex items-center space-x-3">
-                <i class="fa-solid fa-qrcode text-2xl"></i>
-                <span class="font-bold text-lg tracking-wide">ClubAttend Pro</span>
-            </div>
-            <nav class="hidden md:flex space-x-6 text-sm font-medium">
-                <a href="/" class="hover:text-indigo-200">Home</a>
-                <a href="/admin" class="hover:text-indigo-200">Admin Portal</a>
-                <a href="/scanner" class="hover:text-indigo-200">QR Scanner</a>
-                <a href="/member" class="hover:text-indigo-200">Member Portal</a>
-            </nav>
-        </div>
-    </header>
-    <main class="flex-grow container mx-auto px-4 py-6">
-        ${bodyContent}
-    </main>
-    <footer class="bg-slate-800 text-slate-400 py-4 text-center text-xs">
-        &copy; 2026 School Club Attendance Management System. All rights reserved.
-    </footer>
-</body>
-</html>`;
-}
-
-// ==================== LANDING PAGE ====================
+// ==========================================
+// LANDING PAGE (PORTAL SELECTOR)
+// ==========================================
 app.get('/', (req, res) => {
-    const html = `
-    <div class="max-w-4xl mx-auto text-center py-12">
-        <div class="bg-indigo-600 text-white p-8 rounded-2xl shadow-xl mb-10">
-            <h1 class="text-4xl font-extrabold mb-3">School Club QR Attendance System</h1>
-            <p class="text-indigo-100 text-lg">Fast, reliable, and automated attendance management with dynamic club IDs.</p>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div class="bg-white p-6 rounded-xl shadow border border-slate-200 hover:shadow-lg transition flex flex-col items-center">
-                <div class="bg-indigo-100 text-indigo-600 p-4 rounded-full text-2xl mb-4"><i class="fa-solid fa-user-shield"></i></div>
-                <h3 class="font-bold text-xl mb-2">Admin Portal</h3>
-                <p class="text-slate-500 text-sm mb-6 text-center">Manage members with shortcut IDs, custom positions, and club configurations.</p>
-                <a href="/admin" class="mt-auto w-full bg-indigo-600 text-white py-2 rounded-lg font-medium hover:bg-indigo-700 transition text-center">Access Admin</a>
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>School Club Attendance System</title>
+            <style>
+                :root { --primary: #4f46e5; --bg: #f8fafc; --text: #1e293b; }
+                body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .container { text-align: center; max-width: 600px; padding: 40px; background: white; border-radius: 16px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); width: 90%; }
+                h1 { margin-bottom: 10px; color: var(--primary); font-size: 28px; }
+                p { color: #64748b; margin-bottom: 30px; }
+                .portal-grid { display: grid; grid-template-columns: 1fr; gap: 15px; }
+                @media(min-width: 600px) { .portal-grid { grid-template-columns: repeat(3, 1fr); } }
+                .btn { display: block; padding: 16px 20px; background: var(--primary); color: white; text-decoration: none; border-radius: 10px; font-weight: 600; transition: transform 0.2s, background 0.2s; box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.2); }
+                .btn:hover { background: #4338ca; transform: translateY(-2px); }
+                .btn-scanner { background: #059669; box-shadow: 0 4px 6px -1px rgba(5, 150, 105, 0.2); }
+                .btn-scanner:hover { background: #047857; }
+                .btn-member { background: #d97706; box-shadow: 0 4px 6px -1px rgba(217, 119, 6, 0.2); }
+                .btn-member:hover { background: #b45309; }
+                .footer { margin-top: 30px; font-size: 13px; color: #94a3b8; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>School Club Attendance</h1>
+                <p>Select your portal to proceed to the system.</p>
+                <div class="portal-grid">
+                    <a href="/admin" class="btn">Admin Portal</a>
+                    <a href="/scanner" class="btn btn-scanner">QR Scanner</a>
+                    <a href="/member" class="btn btn-member">Member Portal</a>
+                </div>
+                <div class="footer">Secure QR-Based Club Management System</div>
             </div>
-            <div class="bg-white p-6 rounded-xl shadow border border-slate-200 hover:shadow-lg transition flex flex-col items-center">
-                <div class="bg-emerald-100 text-emerald-600 p-4 rounded-full text-2xl mb-4"><i class="fa-solid fa-camera"></i></div>
-                <h3 class="font-bold text-xl mb-2">QR Scanner</h3>
-                <p class="text-slate-500 text-sm mb-6 text-center">Dedicated mobile scanner portal for Time In and Time Out processing.</p>
-                <a href="/scanner" class="mt-auto w-full bg-emerald-600 text-white py-2 rounded-lg font-medium hover:bg-emerald-700 transition text-center">Open Scanner</a>
-            </div>
-            <div class="bg-white p-6 rounded-xl shadow border border-slate-200 hover:shadow-lg transition flex flex-col items-center">
-                <div class="bg-blue-100 text-blue-600 p-4 rounded-full text-2xl mb-4"><i class="fa-solid fa-id-card"></i></div>
-                <h3 class="font-bold text-xl mb-2">Member Portal</h3>
-                <p class="text-slate-500 text-sm mb-6 text-center">Update personal info, photo, view attendance, and announcements.</p>
-                <a href="/member" class="mt-auto w-full bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700 transition text-center">Member Login</a>
-            </div>
-        </div>
-    </div>`;
-    res.send(renderLayout('ClubAttend Pro - Home', html));
+        </body>
+        </html>
+    `);
 });
 
-// ==================== ADMIN LOGIN ====================
+// ==========================================
+// ADMIN PORTAL & AUTH
+// ==========================================
 app.get('/admin/login', (req, res) => {
-    const error = req.query.error ? `<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 text-sm">${req.query.error}</div>` : '';
-    const html = `
-    <div class="max-w-md mx-auto bg-white p-8 rounded-xl shadow border border-slate-200 mt-10">
-        <h2 class="text-2xl font-bold mb-6 text-center text-slate-800">Admin Portal Login</h2>
-        ${error}
-        <form action="/admin/login" method="POST" class="space-y-4">
-            <div>
-                <label class="block text-sm font-medium mb-1">Username</label>
-                <input type="text" name="username" required class="w-full border rounded-lg px-3 py-2 focus:ring focus:ring-indigo-300">
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Login</title>
+            <style>
+                body { font-family: system-ui, sans-serif; background: #f1f5f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); width: 100%; max-width: 400px; }
+                h2 { margin-top: 0; color: #1e293b; }
+                label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 14px; }
+                input { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; }
+                button { width: 100%; padding: 12px; background: #4f46e5; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; }
+                button:hover { background: #4338ca; }
+                .error { background: #fee2e2; color: #991b1b; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 14px; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>Admin Login</h2>
+                ${req.query.error ? `<div class="error">${req.query.error}</div>` : ''}
+                <form action="/admin/login" method="POST">
+                    <label>Username</label>
+                    <input type="text" name="username" required autocomplete="username">
+                    <label>Password</label>
+                    <input type="password" name="password" required autocomplete="current-password">
+                    <button type="submit">Login</button>
+                </form>
             </div>
-            <div>
-                <label class="block text-sm font-medium mb-1">Password</label>
-                <input type="password" name="password" required class="w-full border rounded-lg px-3 py-2 focus:ring focus:ring-indigo-300">
-            </div>
-            <button type="submit" class="w-full bg-indigo-600 text-white py-2 rounded-lg font-medium hover:bg-indigo-700 transition">Login</button>
-        </form>
-    </div>`;
-    res.send(renderLayout('Admin Login', html));
+        </body>
+        </html>
+    `);
 });
 
 app.post('/admin/login', (req, res) => {
     const { username, password } = req.body;
-    db.get(`SELECT * FROM users WHERE username = ? AND (position = 'Adviser' OR username = 'admin')`, [username], async (err, user) => {
-        if (user && await bcrypt.compare(password, user.password)) {
-            req.session.adminId = user.id;
-            req.session.adminUser = user.username;
-            logActivity(user.username, 'Admin logged in');
-            res.redirect('/admin');
-        } else {
-            res.redirect('/admin/login?error=Invalid username or password');
+    db.get(`SELECT * FROM users WHERE username = ? AND position = 'Administrator'`, [username], async (err, user) => {
+        if (err || !user || !(await bcrypt.compare(password, user.password))) {
+            return res.redirect('/admin/login?error=Invalid+Username+or+Password');
         }
+        req.session.user = user;
+        logActivity(user.username, 'Admin logged in');
+        res.redirect('/admin');
     });
 });
 
 app.get('/admin/logout', (req, res) => {
-    if (req.session.adminUser) logActivity(req.session.adminUser, 'Admin logged out');
-    req.session.adminId = null;
-    req.session.adminUser = null;
-    res.redirect('/admin/login');
+    if (req.session.user) logActivity(req.session.user.username, 'Admin logged out');
+    req.session.destroy(() => res.redirect('/admin/login'));
 });
 
-function requireAdmin(req, res, next) {
-    if (!req.session.adminId) return res.redirect('/admin/login');
-    next();
-}
+// Force Password Change for Admin if default or requested
+app.get('/admin/change-password', requireAdmin, (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>Change Password</title>
+        <style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.box{background:white;padding:30px;border-radius:10px;box-shadow:0 4px 10px rgba(0,0,0,0.05);width:350px}input{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}button{width:100%;padding:10px;background:#4f46e5;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer}</style>
+        </head>
+        <body>
+        <div class="box">
+            <h3>Change Password</h3>
+            <form method="POST" action="/admin/change-password">
+                <label>New Password</label><input type="password" name="new_password" required>
+                <button type="submit">Update Password</button>
+            </form>
+        </div>
+        </body></html>
+    `);
+});
 
+app.post('/admin/change-password', requireAdmin, async (req, res) => {
+    const { new_password } = req.body;
+    if (!new_password || new_password.length < 6) return res.send('Password must be at least 6 characters.');
+    const hashed = await bcrypt.hash(new_password, 10);
+    db.run(`UPDATE users SET password = ? WHERE id = ?`, [hashed, req.session.user.id], (err) => {
+        if (err) return res.send('Error updating password.');
+        logActivity(req.session.user.username, 'Changed administrator password');
+        res.redirect('/admin');
+    });
+});
+
+// Main Admin Dashboard and Management Interface
 app.get('/admin', requireAdmin, (req, res) => {
-    db.get(`SELECT COUNT(DISTINCT member_id) as total FROM users WHERE position != 'Adviser'`, (err, mCount) => {
-        db.get(`SELECT COUNT(DISTINCT member_id) as present FROM attendance WHERE date = date('localtime') AND scan_type = 'TIME IN'`, (err, pCount) => {
-            db.all(`SELECT * FROM announcements ORDER BY id DESC LIMIT 5`, (err, announcements) => {
-                db.all(`SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC LIMIT 15`, (err, liveAtt) => {
-                    
-                    const totalMembers = mCount ? mCount.total : 0;
-                    const presentToday = pCount ? pCount.present : 0;
-                    const absentToday = Math.max(0, totalMembers - presentToday);
+    db.get(`SELECT * FROM clubs LIMIT 1`, (err, club) => {
+        db.all(`SELECT * FROM users WHERE position != 'Administrator' ORDER BY id DESC`, (err, members) => {
+            db.all(`SELECT * FROM announcements ORDER BY id DESC`, (err, announcements) => {
+                db.all(`SELECT * FROM activity_logs ORDER BY id DESC LIMIT 50`, (err, logs) => {
+                    db.all(`SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC LIMIT 100`, (err, attendance) => {
+                        
+                        // Calculate stats
+                        const today = new Date().toISOString().split('T')[0];
+                        db.all(`SELECT DISTINCT member_id FROM attendance WHERE date = ? AND scan_type = 'TIME IN'`, [today], (err, presentRows) => {
+                            const presentCount = presentRows ? presentRows.length : 0;
+                            const totalMembers = members ? members.length : 0;
+                            const absentCount = Math.max(0, totalMembers - presentCount);
 
-                    const html = `
-                    <div class="flex flex-col md:flex-row gap-6">
-                        <div class="w-full md:w-64 bg-white p-4 rounded-xl shadow border border-slate-200 h-fit space-y-2">
-                            <div class="font-bold text-slate-700 px-3 py-2 border-b">Admin Dashboard</div>
-                            <a href="/admin" class="block px-3 py-2 rounded-lg bg-indigo-50 text-indigo-700 font-medium"><i class="fa-solid fa-chart-pie mr-2"></i> Overview</a>
-                            <a href="/admin/members" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-users mr-2"></i> Members</a>
-                            <a href="/admin/announcements" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-bullhorn mr-2"></i> Announcements</a>
-                            <a href="/admin/attendance" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-clipboard-user mr-2"></i> Attendance</a>
-                            <a href="/admin/reports" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-file-excel mr-2"></i> Reports</a>
-                            <a href="/admin/settings" class="block px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-600"><i class="fa-solid fa-gear mr-2"></i> Club Settings</a>
-                            <a href="/admin/logout" class="block px-3 py-2 rounded-lg hover:bg-red-50 text-red-600 mt-4"><i class="fa-solid fa-right-from-bracket mr-2"></i> Logout</a>
-                        </div>
-
-                        <div class="flex-grow space-y-6">
-                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                    <div class="text-slate-400 text-xs font-bold uppercase">Total Members</div>
-                                    <div class="text-3xl font-extrabold text-slate-800 mt-1">${totalMembers}</div>
-                                </div>
-                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                    <div class="text-emerald-500 text-xs font-bold uppercase">Present Today</div>
-                                    <div class="text-3xl font-extrabold text-emerald-600 mt-1">${presentToday}</div>
-                                </div>
-                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                    <div class="text-amber-500 text-xs font-bold uppercase">Absent Today</div>
-                                    <div class="text-3xl font-extrabold text-amber-600 mt-1">${absentToday}</div>
-                                </div>
-                                <div class="bg-white p-5 rounded-xl shadow border border-slate-200">
-                                    <div class="text-indigo-500 text-xs font-bold uppercase">Attendance Rate</div>
-                                    <div class="text-3xl font-extrabold text-indigo-600 mt-1">${totalMembers > 0 ? Math.round((presentToday/totalMembers)*100) : 0}%</div>
-                                </div>
-                            </div>
-
-                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
-                                    <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-bolt text-amber-500 mr-2"></i> Quick Actions</h3>
-                                    <div class="grid grid-cols-2 gap-3">
-                                        <a href="/admin/members" class="p-3 bg-indigo-50 text-indigo-700 rounded-lg text-center font-medium hover:bg-indigo-100 transition"><i class="fa-solid fa-user-plus block text-xl mb-1"></i> Add Member</a>
-                                        <a href="/admin/announcements" class="p-3 bg-blue-50 text-blue-700 rounded-lg text-center font-medium hover:bg-blue-100 transition"><i class="fa-solid fa-bullhorn block text-xl mb-1"></i> Post Announcement</a>
-                                        <a href="/admin/reports" class="p-3 bg-emerald-50 text-emerald-700 rounded-lg text-center font-medium hover:bg-emerald-100 transition"><i class="fa-solid fa-download block text-xl mb-1"></i> Export Data</a>
-                                        <a href="/scanner" target="_blank" class="p-3 bg-purple-50 text-purple-700 rounded-lg text-center font-medium hover:bg-purple-100 transition"><i class="fa-solid fa-qrcode block text-xl mb-1"></i> Open Scanner</a>
-                                    </div>
-                                </div>
-
-                                <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
-                                    <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-tower-broadcast text-emerald-500 mr-2"></i> Live Attendance Feed</h3>
-                                    <div class="space-y-3 max-h-56 overflow-y-auto pr-2">
-                                        ${liveAtt.length === 0 ? '<p class="text-slate-400 text-sm">No scans recorded yet today.</p>' : liveAtt.map(att => `
-                                            <div class="flex justify-between items-center bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-sm">
-                                                <div>
-                                                    <span class="font-bold text-slate-800">${att.name}</span>
-                                                    <span class="text-xs text-slate-400 ml-2">(${att.position})</span>
-                                                </div>
-                                                <div class="text-right">
-                                                    <span class="px-2 py-0.5 rounded text-xs font-bold ${att.scan_type === 'TIME IN' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}">${att.scan_type}</span>
-                                                    <div class="text-xs text-slate-400 mt-0.5">${att.time}</div>
-                                                </div>
-                                            </div>
-                                        `).join('')}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>`;
-                    res.send(renderLayout('Admin Dashboard', html));
+                            res.send(renderAdminHTML({
+                                club, members, announcements, logs, attendance, presentCount, absentCount, totalMembers
+                            }));
+                        });
+                    });
                 });
             });
         });
     });
 });
 
-// ==================== MEMBER MANAGEMENT ====================
-app.get('/admin/members', requireAdmin, (req, res) => {
-    db.all(`SELECT * FROM users WHERE position != 'Adviser' ORDER BY id DESC`, [], (err, members) => {
-        const html = `
-        <div class="space-y-6">
-            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                <h2 class="text-2xl font-bold text-slate-800">Member Management</h2>
-                <button onclick="openAddModal()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 transition"><i class="fa-solid fa-user-plus mr-2"></i> Add Member</button>
+function renderAdminHTML(data) {
+    const { club, members, announcements, logs, attendance, presentCount, absentCount, totalMembers } = data;
+    return `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Admin Dashboard - ${club ? club.club_name : 'Club System'}</title>
+        <style>
+            :root { --primary: #4f46e5; --bg: #f8fafc; --card: #ffffff; --text: #1e293b; --border: #e2e8f0; }
+            body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; flex-direction: column; min-height: 100vh; }
+            header { background: var(--primary); color: white; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; }
+            header h1 { margin: 0; font-size: 20px; }
+            .nav-links a { color: white; text-decoration: none; margin-left: 20px; font-weight: 500; font-size: 14px; }
+            .container { padding: 30px; max-width: 1400px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+            .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+            .stat-card { background: var(--card); padding: 20px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); border: 1px solid var(--border); }
+            .stat-card h3 { margin: 0 0 10px; font-size: 14px; color: #64748b; }
+            .stat-card .val { font-size: 28px; font-weight: bold; color: var(--primary); }
+            .section { background: var(--card); border-radius: 12px; padding: 25px; margin-bottom: 30px; border: 1px solid var(--border); box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+            h2 { margin-top: 0; font-size: 18px; border-bottom: 2px solid var(--border); padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
+            th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
+            th { background: #f1f5f9; font-weight: 600; }
+            .btn { background: var(--primary); color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500; text-decoration: none; display: inline-block; font-size: 13px; }
+            .btn:hover { background: #4338ca; }
+            .btn-danger { background: #dc2626; } .btn-danger:hover { background: #b91c1c; }
+            .btn-success { background: #059669; } .btn-success:hover { background: #047857; }
+            form input, form select, form textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid var(--border); border-radius: 6px; box-sizing: border-box; }
+            .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+            @media(max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+            .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+            .badge-active { background: #d1fae5; color: #065f46; }
+            .badge-disabled { background: #fee2e2; color: #991b1b; }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Admin Portal - ${club ? club.club_name : 'Club System'}</h1>
+            <div class="nav-links">
+                <a href="/scanner" target="_blank">Open Scanner</a>
+                <a href="/admin/backup" class="btn-success" style="padding:6px 12px; border-radius:4px;">Backup DB</a>
+                <a href="/admin/change-password">Change Password</a>
+                <a href="/admin/logout">Logout</a>
+            </div>
+        </header>
+
+        <div class="container">
+            <div class="stats-grid">
+                <div class="stat-card"><h3>Total Members</h3><div class="val">${totalMembers}</div></div>
+                <div class="stat-card"><h3>Present Today</h3><div class="val" style="color:#059669;">${presentCount}</div></div>
+                <div class="stat-card"><h3>Absent Today</h3><div class="val" style="color:#dc2626;">${absentCount}</div></div>
+                <div class="stat-card"><h3>Attendance Rate</h3><div class="val">${totalMembers > 0 ? Math.round((presentCount/totalMembers)*100) : 0}%</div></div>
             </div>
 
-            <div class="bg-white rounded-xl shadow border border-slate-200 overflow-hidden">
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="bg-slate-100 text-slate-600 text-xs uppercase tracking-wider border-b">
-                            <th class="p-4">Member ID</th>
-                            <th class="p-4">Name</th>
-                            <th class="p-4">Position</th>
-                            <th class="p-4">Username / Temp Pass</th>
-                            <th class="p-4">Status</th>
-                            <th class="p-4 text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 text-sm">
-                        ${members.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-400">No members registered yet.</td></tr>` : members.map(m => `
-                            <tr class="hover:bg-slate-50">
-                                <td class="p-4 font-mono font-bold text-indigo-600">${m.member_id}</td>
-                                <td class="p-4 font-medium text-slate-800 flex items-center gap-3">
-                                    <div class="w-8 h-8 rounded-full bg-slate-200 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">
-                                        ${m.photo ? `<img src="${m.photo}" class="w-full h-full object-cover">` : m.name[0]}
-                                    </div>
-                                    ${m.name}
-                                </td>
-                                <td class="p-4 text-slate-600"><span class="bg-slate-100 px-2 py-1 rounded text-xs font-semibold">${m.position}</span></td>
-                                <td class="p-4 font-mono text-xs text-slate-500">${m.username} / ${m.temporary_password || 'Changed'}</td>
-                                <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-bold ${m.status === 'Active' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${m.status}</span></td>
-                                <td class="p-4 text-right space-x-2">
-                                    <a href="/admin/member/id/${m.id}" target="_blank" class="text-indigo-600 hover:text-indigo-800" title="Print/View ID"><i class="fa-solid fa-id-card"></i></a>
-                                    <a href="/admin/member/qr/${m.id}" target="_blank" class="text-purple-600 hover:text-purple-800" title="QR Code"><i class="fa-solid fa-qrcode"></i></a>
-                                    <a href="/admin/member/toggle/${m.id}" class="text-amber-600 hover:text-amber-800" title="Toggle Status"><i class="fa-solid fa-power-off"></i></a>
-                                    <a href="/admin/member/delete/${m.id}" onclick="return confirm('Are you sure you want to delete member ${m.name}?')" class="text-red-600 hover:text-red-800" title="Delete Member"><i class="fa-solid fa-trash"></i></a>
-                                </td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Add Member Modal -->
-        <div id="addModal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center p-4 z-50">
-            <div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-6 space-y-4">
-                <div class="flex justify-between items-center border-b pb-3">
-                    <h3 class="font-bold text-lg text-slate-800">Add New Club Member</h3>
-                    <button onclick="closeAddModal()" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-xl"></i></button>
-                </div>
-                <form action="/admin/member/add" method="POST" class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Full Name</label>
-                        <input type="text" name="name" required class="w-full border rounded-lg px-3 py-2">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Position</label>
-                        <select name="position_select" id="positionSelect" onchange="checkCustomPosition(this)" class="w-full border rounded-lg px-3 py-2 mb-2">
-                            <option value="Member">Member</option>
+            <div class="grid-2">
+                <!-- Add Member Form -->
+                <div class="section">
+                    <h2>Add New Member</h2>
+                    <form action="/admin/member/add" method="POST">
+                        <label>Full Name</label>
+                        <input type="text" name="name" required placeholder="Juan Dela Cruz">
+                        
+                        <label>Position</label>
+                        <select name="position">
                             <option value="President">President</option>
                             <option value="Vice President">Vice President</option>
                             <option value="Secretary">Secretary</option>
@@ -395,659 +360,693 @@ app.get('/admin/members', requireAdmin, (req, res) => {
                             <option value="Auditor">Auditor</option>
                             <option value="Public Information Officer">Public Information Officer</option>
                             <option value="Sergeant-at-Arms">Sergeant-at-Arms</option>
-                            <option value="CUSTOM">-- Type Custom Position --</option>
+                            <option value="Member" selected>Member</option>
+                            <option value="Adviser">Adviser</option>
+                            <option value="Other">Other</option>
                         </select>
-                        <input type="text" name="position_custom" id="customPositionInput" placeholder="Enter custom position..." class="w-full border rounded-lg px-3 py-2 hidden">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Email (Optional)</label>
-                        <input type="email" name="email" class="w-full border rounded-lg px-3 py-2">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Contact Number (Optional)</label>
-                        <input type="text" name="contact" class="w-full border rounded-lg px-3 py-2">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Photo URL (Optional)</label>
-                        <input type="url" name="photo" placeholder="https://example.com/photo.jpg" class="w-full border rounded-lg px-3 py-2">
-                    </div>
-                    <p class="text-xs text-slate-400">Member ID will automatically start with the Club Name shortcut.</p>
-                    <div class="flex justify-end space-x-3 pt-3 border-t">
-                        <button type="button" onclick="closeAddModal()" class="px-4 py-2 border rounded-lg text-slate-600 hover:bg-slate-100">Cancel</button>
-                        <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">Create Member</button>
-                    </div>
-                </form>
+
+                        <label>Email (Optional)</label>
+                        <input type="email" name="email" placeholder="juan@example.com">
+
+                        <label>Contact Number (Optional)</label>
+                        <input type="text" name="contact" placeholder="09123456789">
+
+                        <button type="submit" class="btn">Create Member</button>
+                    </form>
+                </div>
+
+                <!-- Club Settings -->
+                <div class="section">
+                    <h2>Club Configuration</h2>
+                    <form action="/admin/settings/update" method="POST">
+                        <label>School Name</label>
+                        <input type="text" name="school_name" value="${club ? club.school_name : ''}" required>
+
+                        <label>Club Name</label>
+                        <input type="text" name="club_name" value="${club ? club.club_name : ''}" required>
+
+                        <label>School Year</label>
+                        <input type="text" name="school_year" value="${club ? club.school_year : ''}" required>
+
+                        <label>Adviser Name</label>
+                        <input type="text" name="adviser" value="${club ? club.adviser : ''}" required>
+
+                        <button type="submit" class="btn">Save Settings</button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Members Management Table -->
+            <div class="section">
+                <h2>Members Management 
+                    <a href="/admin/members/all-ids" target="_blank" class="btn btn-success" style="font-size:12px;">Generate All ID Cards</a>
+                </h2>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Member ID</th>
+                                <th>Name</th>
+                                <th>Position</th>
+                                <th>Username</th>
+                                <th>Temp Password</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${members.map(m => `
+                                <tr>
+                                    <td><strong>${m.member_id}</strong></td>
+                                    <td>${m.name}</td>
+                                    <td>${m.position}</td>
+                                    <td><code>${m.username}</code></td>
+                                    <td><code>${m.temporary_password || 'Changed'}</code></td>
+                                    <td><span class="badge ${m.status === 'Active' ? 'badge-active' : 'badge-disabled'}">${m.status}</span></td>
+                                    <td>
+                                        <a href="/admin/member/id/${m.id}" target="_blank" class="btn" style="padding:4px 8px; font-size:11px;">ID Card</a>
+                                        <a href="/admin/member/qr/${m.id}" target="_blank" class="btn btn-success" style="padding:4px 8px; font-size:11px;">QR Code</a>
+                                        <a href="/admin/member/toggle/${m.id}" class="btn ${m.status === 'Active' ? 'btn-danger' : 'btn-success'}" style="padding:4px 8px; font-size:11px;">${m.status === 'Active' ? 'Disable' : 'Enable'}</a>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Attendance Logs Table -->
+            <div class="section">
+                <h2>Live Attendance Logs
+                    <a href="/admin/attendance/export" class="btn btn-success" style="font-size:12px;">Export CSV Report</a>
+                </h2>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Member ID</th>
+                                <th>Name</th>
+                                <th>Position</th>
+                                <th>Scan Type</th>
+                                <th>Date</th>
+                                <th>Time</th>
+                                <th>Scanner</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${attendance.map(a => `
+                                <tr>
+                                    <td>${a.member_id}</td>
+                                    <td>${a.name}</td>
+                                    <td>${a.position}</td>
+                                    <td><strong><span style="color:${a.scan_type === 'TIME IN' ? '#059669' : '#d97706'}">${a.scan_type}</span></strong></td>
+                                    <td>${a.date}</td>
+                                    <td>${a.time}</td>
+                                    <td>${a.scanner_device}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Activity Logs -->
+            <div class="section">
+                <h2>System Activity Logs</h2>
+                <div style="max-height:200px; overflow-y:auto;">
+                    <table>
+                        <thead><tr><th>User</th><th>Action</th><th>Timestamp</th></tr></thead>
+                        <tbody>
+                            ${logs.map(l => `<tr><td>${l.username}</td><td>${l.action}</td><td>${l.timestamp}</td></tr>`).join('')}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
+    </body>
+    </html>
+    `;
+}
 
-        <script>
-            function openAddModal() { document.getElementById('addModal').classList.remove('hidden'); }
-            function closeAddModal() { document.getElementById('addModal').classList.add('hidden'); }
-            function checkCustomPosition(select) {
-                const customInput = document.getElementById('customPositionInput');
-                if (select.value === 'CUSTOM') {
-                    customInput.classList.remove('hidden');
-                    customInput.required = true;
-                    customInput.name = 'position';
-                    select.name = 'ignore_pos';
-                } else {
-                    customInput.classList.add('hidden');
-                    customInput.required = false;
-                    customInput.name = 'position_custom';
-                    select.name = 'position';
-                }
-            }
-        </script>`;
-        res.send(renderLayout('Member Management', html));
-    });
-});
-
+// Admin Actions
 app.post('/admin/member/add', requireAdmin, (req, res) => {
-    let { name, position, email, contact, photo } = req.body;
-    if (!position) position = 'Member';
-
-    db.get(`SELECT club_name FROM clubs LIMIT 1`, [], (err, club) => {
-        const clubShortcut = getClubShortcut(club ? club.club_name : 'Club');
+    const { name, position, email, contact } = req.body;
+    
+    db.get(`SELECT COUNT(*) as count FROM users`, async (err, row) => {
+        const seq = (row ? row.count : 0) + 1;
+        const member_id = `CLUB-2026-${String(seq).padStart(4, '0')}`;
+        const username = `member${String(seq).padStart(4, '0')}`;
         
-        db.get(`SELECT COUNT(*) as count FROM users`, async (err, row) => {
-            const nextIdNum = (row ? row.count : 0) + 1001;
-            const member_id = `${clubShortcut}-${new Date().getFullYear()}-${String(nextIdNum).padStart(4, '0')}`;
-            const username = `member${String(nextIdNum).padStart(4, '0')}`;
-            const temp_password = generateRandomString(8);
-            const hashedPass = await bcrypt.hash(temp_password, 10);
-            const qr_token = `CLUBATTEND:MEMBER:${generateRandomString(32)}`;
+        // Fixed syntax token generation error safely:
+        const temp_pass = Math.random().toString(36).substring(2, 10);
+        const hashedPass = await bcrypt.hash(temp_pass, 10);
+        const qr_token = crypto.randomBytes(16).toString('hex');
+        const qrData = `CLUBATTENDANCE:MEMBER:${qr_token}`;
 
-            db.run(`INSERT INTO users (member_id, name, position, email, contact, photo, username, password, temporary_password, qr_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')`,
-                [member_id, name, position, email, contact, photo || '', username, hashedPass, temp_password, qr_token], (err) => {
-                    if (err) console.error(err);
-                    logActivity(req.session.adminUser, `Created member ${name} (${member_id})`);
-                    res.redirect('/admin/members');
-                });
-        });
+        db.run(`INSERT INTO users (member_id, name, position, email, contact, username, password, temporary_password, qr_token, status, is_temp_pass) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 1)`,
+            [member_id, name, position, email, contact, username, hashedPass, temp_pass, qr_token], (err) => {
+                if (err) return res.send('Error adding member: ' + err.message);
+                logActivity(req.session.user.username, `Created member ${name} (${member_id})`);
+                res.redirect('/admin');
+            });
     });
 });
 
 app.get('/admin/member/toggle/:id', requireAdmin, (req, res) => {
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], (err, user) => {
-        if (user) {
-            const newStatus = user.status === 'Active' ? 'Disabled' : 'Active';
-            db.run(`UPDATE users SET status = ? WHERE id = ?`, [newStatus, req.params.id], () => {
-                res.redirect('/admin/members');
-            });
-        } else {
-            res.redirect('/admin/members');
-        }
+    db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], (err, member) => {
+        if (!member) return res.redirect('/admin');
+        const newStatus = member.status === 'Active' ? 'Disabled' : 'Active';
+        db.run(`UPDATE users SET status = ? WHERE id = ?`, [newStatus, req.params.id], () => {
+            logActivity(req.session.user.username, `Changed member ${member.name} status to ${newStatus}`);
+            res.redirect('/admin');
+        });
     });
 });
 
-app.get('/admin/member/delete/:id', requireAdmin, (req, res) => {
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], (err, user) => {
-        if (user) {
-            db.run(`DELETE FROM users WHERE id = ?`, [req.params.id], () => {
-                logActivity(req.session.adminUser, `Deleted member ${user.name} (${user.member_id})`);
-                res.redirect('/admin/members');
-            });
-        } else {
-            res.redirect('/admin/members');
-        }
+app.get('/admin/settings/update', requireAdmin, (req, res) => {
+    res.redirect('/admin');
+});
+
+app.post('/admin/settings/update', requireAdmin, (req, res) => {
+    const { school_name, club_name, school_year, adviser } = req.body;
+    db.run(`UPDATE clubs SET school_name = ?, club_name = ?, school_year = ?, adviser = ? WHERE id = 1`,
+        [school_name, club_name, school_year, adviser], () => {
+            logActivity(req.session.user.username, 'Updated club settings');
+            res.redirect('/admin');
+        });
+});
+
+app.get('/admin/backup', requireAdmin, (req, res) => {
+    logActivity(req.session.user.username, 'Downloaded database backup');
+    res.download(dbFile);
+});
+
+app.get('/admin/attendance/export', requireAdmin, (req, res) => {
+    db.all(`SELECT a.member_id, u.name, u.position, a.scan_type, a.date, a.time, a.scanner_device FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC`, (err, rows) => {
+        let csv = 'Member ID,Name,Position,Scan Type,Date,Time,Scanner Device\n';
+        rows.forEach(r => {
+            csv += `"${r.member_id}","${r.name}","${r.position}","${r.scan_type}","${r.date}","${r.time}","${r.scanner_device}"\n`;
+        });
+        logActivity(req.session.user.username, 'Exported attendance CSV report');
+        res.header('Content-Type', 'text/csv');
+        res.attachment('attendance_report.csv');
+        res.send(csv);
     });
 });
 
+// ID Card Printable Page
 app.get('/admin/member/id/:id', requireAdmin, (req, res) => {
-    db.get(`SELECT u.*, c.* FROM users u CROSS JOIN clubs c WHERE u.id = ?`, [req.params.id], async (err, data) => {
-        if (!data) return res.send('Member not found');
-        const qrDataUrl = await qrcode.toDataURL(data.qr_token);
-        const html = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>ID Card - ${data.name}</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <style>
-                @media print { body { -webkit-print-color-adjust: exact; } }
-                .id-card { width: 340px; height: 210px; border-radius: 12px; border: 2px solid #cbd5e1; background: white; overflow: hidden; position: relative; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            </style>
-        </head>
-        <body class="bg-slate-100 flex flex-col items-center justify-center min-h-screen p-4">
-            <div class="mb-6 flex gap-4 print:hidden">
-                <button onclick="window.print()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium shadow hover:bg-indigo-700"><i class="fa-solid fa-print mr-2"></i> Print ID Card</button>
-                <a href="/admin/members" class="bg-slate-500 text-white px-4 py-2 rounded-lg font-medium shadow hover:bg-slate-600">Back</a>
-            </div>
-            
-            <div class="id-card flex flex-col p-4 justify-between">
-                <div class="flex justify-between items-center border-b pb-2">
-                    <div>
-                        <div class="text-[10px] font-bold text-indigo-600 uppercase">${data.school_name}</div>
-                        <div class="text-xs font-extrabold text-slate-800">${data.club_name}</div>
+    db.get(`SELECT u.*, c.* FROM users u CROSS JOIN clubs c WHERE u.id = ?`, [req.params.id], async (err, row) => {
+        if (!row) return res.send('Member not found.');
+        const qrData = `CLUBATTENDANCE:MEMBER:${row.qr_token}`;
+        const qrDataURL = await QRCode.toDataURL(qrData);
+
+        res.send(`
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8"><title>ID Card - ${row.name}</title>
+                <style>
+                    body { font-family: sans-serif; background: #e2e8f0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+                    .id-card { width: 85.60mm; height: 53.98mm; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15); padding: 15px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; border: 2px solid #4f46e5; }
+                    .header { text-align: center; border-bottom: 2px solid #4f46e5; padding-bottom: 5px; }
+                    .header h3 { margin: 0; font-size: 11px; color: #4f46e5; text-transform: uppercase; }
+                    .header h4 { margin: 2px 0 0; font-size: 9px; color: #64748b; }
+                    .body { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
+                    .info { font-size: 10px; line-height: 1.4; }
+                    .info strong { color: #1e293b; }
+                    .qr img { width: 85px; height: 85px; }
+                    .footer { font-size: 7px; text-align: center; color: #dc2626; border-top: 1px solid #cbd5e1; padding-top: 3px; }
+                    .no-print { margin-top: 20px; }
+                    .btn { padding: 10px 20px; background: #4f46e5; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; text-decoration: none; }
+                    @media print { body { background: none; } .no-print { display: none; } }
+                </style>
+            </head>
+            <body>
+                <div class="id-card">
+                    <div class="header">
+                        <h3>${row.school_name}</h3>
+                        <h4>${row.club_name}</h4>
                     </div>
-                    <div class="text-right text-[9px] font-mono font-bold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded">${data.member_id}</div>
-                </div>
-                <div class="flex items-center gap-3 my-auto">
-                    <div class="w-16 h-20 bg-slate-200 rounded border overflow-hidden flex items-center justify-center text-slate-400 text-xs font-bold">
-                        ${data.photo ? `<img src="${data.photo}" class="w-full h-full object-cover">` : 'PHOTO'}
-                    </div>
-                    <div class="flex-grow">
-                        <div class="text-sm font-extrabold text-slate-800 leading-tight">${data.name}</div>
-                        <div class="text-[11px] font-semibold text-indigo-600">${data.position}</div>
-                        <div class="mt-2 text-[9px] text-slate-500 font-mono">
-                            User: <b>${data.username}</b><br>
-                            Pass: <b>${data.temporary_password || 'Custom'}</b>
+                    <div class="body">
+                        <div class="info">
+                            <div><strong>Name:</strong><br>${row.name}</div>
+                            <div><strong>Position:</strong><br>${row.position}</div>
+                            <div><strong>ID:</strong> ${row.member_id}</div>
+                            <div><strong>User:</strong> ${row.username}</div>
+                            <div><strong>Temp Pass:</strong> ${row.temporary_password || 'Changed'}</div>
+                        </div>
+                        <div class="qr">
+                            <img src="${qrDataURL}" alt="QR Code">
                         </div>
                     </div>
-                    <div>
-                        <img src="${qrDataUrl}" class="w-20 h-20 border rounded p-1 bg-white">
+                    <div class="footer">
+                        IMPORTANT: Temporary password must be changed after first login.
                     </div>
                 </div>
-                <div class="text-[8px] text-center text-slate-400 border-t pt-1">
-                    Official Club ID • Present upon entry.
+                <div class="no-print">
+                    <button class="btn" onclick="window.print()">Print ID Card</button>
                 </div>
-            </div>
-        </body>
-        </html>`;
-        res.send(html);
+            </body>
+            </html>
+        `);
+    });
+});
+
+app.get('/admin/members/all-ids', requireAdmin, (req, res) => {
+    db.all(`SELECT u.*, c.* FROM users u CROSS JOIN clubs c WHERE u.position != 'Administrator'`, async (err, rows) => {
+        let cardsHTML = '';
+        for (const row of rows) {
+            const qrData = `CLUBATTENDANCE:MEMBER:${row.qr_token}`;
+            const qrDataURL = await QRCode.toDataURL(qrData);
+            cardsHTML += `
+                <div class="id-card">
+                    <div class="header">
+                        <h3>${row.school_name}</h3>
+                        <h4>${row.club_name}</h4>
+                    </div>
+                    <div class="body">
+                        <div class="info">
+                            <div><strong>Name:</strong><br>${row.name}</div>
+                            <div><strong>Position:</strong><br>${row.position}</div>
+                            <div><strong>ID:</strong> ${row.member_id}</div>
+                            <div><strong>User:</strong> ${row.username}</div>
+                            <div><strong>Temp Pass:</strong> ${row.temporary_password || 'Changed'}</div>
+                        </div>
+                        <div class="qr"><img src="${qrDataURL}" alt="QR"></div>
+                    </div>
+                    <div class="footer">Change temporary password after login.</div>
+                </div>
+            `;
+        }
+
+        res.send(`
+            <!DOCTYPE html>
+            <html><head><title>All Member IDs</title>
+            <style>
+                body { background: #cbd5e1; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+                .id-card { width: 85.60mm; height: 53.98mm; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15); padding: 12px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; border: 2px solid #4f46e5; margin-bottom: 20px; page-break-inside: avoid; }
+                .header { text-align: center; border-bottom: 2px solid #4f46e5; padding-bottom: 3px; }
+                .header h3 { margin: 0; font-size: 10px; color: #4f46e5; }
+                .header h4 { margin: 2px 0 0; font-size: 8px; color: #64748b; }
+                .body { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+                .info { font-size: 9px; line-height: 1.3; }
+                .qr img { width: 75px; height: 75px; }
+                .footer { font-size: 6px; text-align: center; color: #dc2626; border-top: 1px solid #ccc; padding-top: 2px; }
+                .no-print { margin-bottom: 20px; }
+                .btn { padding: 10px 20px; background: #4f46e5; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
+                @media print { .no-print { display: none; } body { background: white; padding: 0; } }
+            </style></head>
+            <body>
+                <div class="no-print"><button class="btn" onclick="window.print()">Print All ID Cards</button></div>
+                ${cardsHTML}
+            </body></html>
+        `);
     });
 });
 
 app.get('/admin/member/qr/:id', requireAdmin, (req, res) => {
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], async (err, user) => {
-        if (!user) return res.send('Member not found');
-        const qrDataUrl = await qrcode.toDataURL(user.qr_token, { width: 300 });
-        const html = `
-        <div class="max-w-sm mx-auto bg-white p-8 rounded-xl shadow text-center space-y-4 mt-10">
-            <h2 class="font-bold text-xl text-slate-800">${user.name}</h2>
-            <p class="text-sm text-indigo-600 font-semibold">${user.position} (${user.member_id})</p>
-            <div class="flex justify-center"><img src="${qrDataUrl}" class="border p-2 rounded-lg shadow-inner"></div>
-            <a href="${qrDataUrl}" download="${user.member_id}-QR.png" class="block w-full bg-indigo-600 text-white py-2 rounded-lg font-medium hover:bg-indigo-700">Download QR Code</a>
-            <a href="/admin/members" class="block text-sm text-slate-500 hover:underline">Back to Members</a>
-        </div>`;
-        res.send(renderLayout('Member QR Code', html));
-    });
-});
-
-// ==================== ANNOUNCEMENTS MANAGEMENT ====================
-app.get('/admin/announcements', requireAdmin, (req, res) => {
-    db.all(`SELECT * FROM announcements ORDER BY id DESC`, [], (err, announcements) => {
-        const html = `
-        <div class="space-y-6 max-w-4xl mx-auto">
-            <h2 class="text-2xl font-bold text-slate-800">Announcements Management</h2>
-            
-            <div class="bg-white p-6 rounded-xl shadow border border-slate-200">
-                <h3 class="font-bold text-lg mb-4 text-slate-800"><i class="fa-solid fa-bullhorn text-indigo-600 mr-2"></i> Post New Announcement</h3>
-                <form action="/admin/announcement/add" method="POST" class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Title</label>
-                        <input type="text" name="title" required class="w-full border rounded-lg px-3 py-2" placeholder="e.g. Club Meeting">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Message</label>
-                        <textarea name="message" rows="3" required class="w-full border rounded-lg px-3 py-2" placeholder="Enter details..."></textarea>
-                    </div>
-                    <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700">Publish</button>
-                </form>
+    db.get(`SELECT * FROM users WHERE id = ?`, [req.params.id], async (err, row) => {
+        if (!row) return res.send('Member not found.');
+        const qrDataURL = await QRCode.toDataURL(`CLUBATTENDANCE:MEMBER:${row.qr_token}`);
+        res.send(`
+            <div style="text-align:center; padding:50px; font-family:sans-serif;">
+                <h2>${row.name} (${row.member_id})</h2>
+                <img src="${qrDataURL}" style="width:250px;height:250px; border:2px solid #333; padding:10px; border-radius:8px;">
+                <br><br><a href="/admin" style="padding:10px 20px; background:#4f46e5; color:white; text-decoration:none; border-radius:6px;">Back to Dashboard</a>
             </div>
-
-            <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
-                <h3 class="font-bold text-lg text-slate-800">Published Announcements</h3>
-                <div class="space-y-3">
-                    ${announcements.length === 0 ? '<p class="text-slate-400 text-sm">No announcements posted yet.</p>' : announcements.map(ann => `
-                        <div class="flex justify-between items-start bg-slate-50 p-4 rounded-lg border border-slate-100">
-                            <div>
-                                <h4 class="font-bold text-indigo-900">${ann.title}</h4>
-                                <p class="text-sm text-slate-600 mt-1">${ann.message}</p>
-                                <span class="text-xs text-slate-400 mt-2 block"><i class="fa-regular fa-clock mr-1"></i> ${ann.created_at}</span>
-                            </div>
-                            <a href="/admin/announcement/delete/${ann.id}" onclick="return confirm('Delete this announcement?')" class="text-red-500 hover:text-red-700 text-sm"><i class="fa-solid fa-trash"></i></a>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        </div>`;
-        res.send(renderLayout('Announcements', html));
+        `);
     });
 });
 
-app.post('/admin/announcement/add', requireAdmin, (req, res) => {
-    const { title, message } = req.body;
-    db.run(`INSERT INTO announcements (title, message) VALUES (?, ?)`, [title, message], () => {
-        res.redirect('/admin/announcements');
-    });
-});
-
-app.get('/admin/announcement/delete/:id', requireAdmin, (req, res) => {
-    db.run(`DELETE FROM announcements WHERE id = ?`, [req.params.id], () => {
-        res.redirect('/admin/announcements');
-    });
-});
-
-// ==================== ATTENDANCE & REPORTS ====================
-app.get('/admin/attendance', requireAdmin, (req, res) => {
-    const dateFilter = req.query.date || '';
-    const searchFilter = req.query.search || '';
-    
-    let query = `SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id WHERE 1=1`;
-    let params = [];
-    if (dateFilter) { query += ` AND a.date = ?`; params.push(dateFilter); }
-    if (searchFilter) { query += ` AND (u.name LIKE ? OR u.member_id LIKE ?)`; params.push(`%${searchFilter}%`, `%${searchFilter}%`); }
-    query += ` ORDER BY a.id DESC LIMIT 100`;
-
-    db.all(query, params, (err, rows) => {
-        const html = `
-        <div class="space-y-6">
-            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                <h2 class="text-2xl font-bold text-slate-800">Attendance Records</h2>
-                <form method="GET" class="flex gap-2 w-full sm:w-auto">
-                    <input type="date" name="date" value="${dateFilter}" class="border rounded-lg px-3 py-1.5 text-sm">
-                    <input type="text" name="search" placeholder="Search..." value="${searchFilter}" class="border rounded-lg px-3 py-1.5 text-sm">
-                    <button type="submit" class="bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium">Filter</button>
-                </form>
-            </div>
-
-            <div class="bg-white rounded-xl shadow border border-slate-200 overflow-hidden">
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="bg-slate-100 text-slate-600 text-xs uppercase tracking-wider border-b">
-                            <th class="p-4">Date & Time</th>
-                            <th class="p-4">Member ID</th>
-                            <th class="p-4">Name</th>
-                            <th class="p-4">Position</th>
-                            <th class="p-4">Scan Type</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 text-sm">
-                        ${rows.length === 0 ? `<tr><td colspan="5" class="p-6 text-center text-slate-400">No records found.</td></tr>` : rows.map(r => `
-                            <tr class="hover:bg-slate-50">
-                                <td class="p-4 text-slate-600">${r.date} ${r.time}</td>
-                                <td class="p-4 font-mono font-bold text-indigo-600">${r.member_id}</td>
-                                <td class="p-4 font-medium text-slate-800">${r.name}</td>
-                                <td class="p-4 text-slate-600">${r.position}</td>
-                                <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-bold ${r.scan_type === 'TIME IN' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}">${r.scan_type}</span></td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>`;
-        res.send(renderLayout('Attendance', html));
-    });
-});
-
-app.get('/admin/reports', requireAdmin, (req, res) => {
-    db.all(`SELECT a.*, u.name, u.position FROM attendance a JOIN users u ON a.member_id = u.member_id ORDER BY a.id DESC`, [], (err, rows) => {
-        const csvRows = ['ID,Member ID,Name,Position,Scan Type,Date,Time'];
-        rows.forEach(r => {
-            csvRows.push(`${r.id},${r.member_id},"${r.name}",${r.position},${r.scan_type},${r.date},${r.time}`);
-        });
-        const csvContent = csvRows.join('\n');
-
-        const html = `
-        <div class="space-y-6">
-            <h2 class="text-2xl font-bold text-slate-800">Reports</h2>
-            <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
-                <h3 class="font-bold text-lg text-slate-800"><i class="fa-solid fa-file-csv text-emerald-600 mr-2"></i> CSV Export</h3>
-                <button onclick="downloadCSV()" class="bg-emerald-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-emerald-700"><i class="fa-solid fa-download mr-2"></i> Download CSV</button>
-            </div>
-        </div>
-        <script>
-            function downloadCSV() {
-                const csv = \`${csvContent}\`;
-                const blob = new Blob([csv], { type: 'text/csv' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'attendance_report.csv';
-                a.click();
-            }
-        </script>`;
-        res.send(renderLayout('Reports', html));
-    });
-});
-
-app.get('/admin/settings', requireAdmin, (req, res) => {
-    db.get(`SELECT * FROM clubs LIMIT 1`, [], (err, club) => {
-        const success = req.query.success ? `<div class="bg-emerald-100 text-emerald-700 p-3 rounded-lg text-sm mb-4">Settings updated!</div>` : '';
-        const html = `
-        <div class="max-w-xl mx-auto bg-white p-8 rounded-xl shadow border border-slate-200 space-y-6">
-            <h2 class="text-2xl font-bold text-slate-800">Club Configuration</h2>
-            ${success}
-            <form action="/admin/settings" method="POST" class="space-y-4">
-                <div>
-                    <label class="block text-sm font-medium mb-1">Club Name (Used for ID Shortcut)</label>
-                    <input type="text" name="club_name" value="${club ? club.club_name : ''}" required class="w-full border rounded-lg px-3 py-2">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium mb-1">School Name</label>
-                    <input type="text" name="school_name" value="${club ? club.school_name : ''}" required class="w-full border rounded-lg px-3 py-2">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium mb-1">School Year</label>
-                    <input type="text" name="school_year" value="${club ? club.school_year : ''}" required class="w-full border rounded-lg px-3 py-2">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium mb-1">Faculty Adviser</label>
-                    <input type="text" name="adviser" value="${club ? club.adviser : ''}" required class="w-full border rounded-lg px-3 py-2">
-                </div>
-                <button type="submit" class="w-full bg-indigo-600 text-white py-2 rounded-lg font-medium hover:bg-indigo-700">Save Settings</button>
-            </form>
-        </div>`;
-        res.send(renderLayout('Settings', html));
-    });
-});
-
-app.post('/admin/settings', requireAdmin, (req, res) => {
-    const { club_name, school_name, school_year, adviser } = req.body;
-    db.run(`UPDATE clubs SET club_name = ?, school_name = ?, school_year = ?, adviser = ? WHERE id = 1`, [club_name, school_name, school_year, adviser], () => {
-        res.redirect('/admin/settings?success=1');
-    });
-});
-
-
-// ==================== QR SCANNER PORTAL ====================
+// ==========================================
+// SEPARATE QR SCANNER PORTAL (/scanner)
+// ==========================================
 app.get('/scanner', (req, res) => {
-    const html = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>QR Scanner Portal</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-        <script src="https://unpkg.com/html5-qrcode"></script>
-    </head>
-    <body class="bg-slate-900 text-white min-h-screen flex flex-col justify-between p-4">
-        <header class="flex justify-between items-center py-2 border-b border-slate-800">
-            <div class="font-bold text-lg flex items-center space-x-2">
-                <i class="fa-solid fa-camera text-emerald-400"></i>
-                <span>Scanner Terminal</span>
-            </div>
-            <a href="/" class="text-slate-400 hover:text-white"><i class="fa-solid fa-house"></i></a>
-        </header>
-
-        <div class="max-w-md mx-auto w-full my-auto space-y-4 text-center">
-            <div class="grid grid-cols-2 gap-2 bg-slate-800 p-1.5 rounded-xl border border-slate-700">
-                <button id="modeIn" onclick="setMode('TIME IN')" class="py-3 rounded-lg font-bold text-sm bg-emerald-600 text-white transition shadow">TIME IN</button>
-                <button id="modeOut" onclick="setMode('TIME OUT')" class="py-3 rounded-lg font-bold text-sm bg-slate-700 text-slate-300 transition">TIME OUT</button>
-            </div>
-
-            <div class="bg-black rounded-xl overflow-hidden border border-slate-700 relative aspect-square flex items-center justify-center">
-                <div id="reader" class="w-full h-full"></div>
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>QR Scanner Portal</title>
+            <script src="https://unpkg.com/html5-qrcode"></script>
+            <style>
+                body { font-family: system-ui, sans-serif; background: #0f172a; color: white; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; box-sizing: border-box; }
+                h1 { font-size: 22px; margin-bottom: 10px; color: #38bdf8; text-align: center; }
+                .controls { display: flex; gap: 10px; margin-bottom: 20px; width: 100%; max-width: 400px; }
+                .mode-btn { flex: 1; padding: 14px; border: none; border-radius: 8px; font-weight: bold; font-size: 16px; cursor: pointer; background: #334155; color: #94a3b8; transition: 0.2s; }
+                .mode-btn.active-in { background: #059669; color: white; }
+                .mode-btn.active-out { background: #d97706; color: white; }
+                #reader { width: 100%; max-width: 400px; background: #1e293b; border-radius: 12px; overflow: hidden; border: 2px solid #334155; }
+                .result-box { margin-top: 20px; width: 100%; max-width: 400px; padding: 20px; border-radius: 12px; text-align: center; background: #1e293b; display: none; box-sizing: border-box; }
+                .success { border: 2px solid #059669; background: #064e3b; }
+                .error { border: 2px solid #dc2626; background: #7f1d1d; }
+                .sound-toggle { margin-top: 15px; font-size: 14px; color: #94a3b8; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+            </style>
+        </head>
+        <body>
+            <h1>Club Attendance Scanner</h1>
+            <div class="controls">
+                <button id="btnIn" class="mode-btn active-in" onclick="setScanMode('TIME IN')">TIME IN</button>
+                <button id="btnOut" class="mode-btn" onclick="setScanMode('TIME OUT')">TIME OUT</button>
             </div>
 
-            <div id="resultBox" class="hidden p-4 rounded-xl border text-left">
-                <div id="resultHeader" class="font-bold text-base flex items-center"></div>
-                <div id="resultBody" class="text-sm mt-1 text-slate-300"></div>
+            <div id="reader"></div>
+
+            <div id="resultBox" class="result-box">
+                <h2 id="resTitle" style="margin:0 0 10px; font-size:20px;"></h2>
+                <p id="resName" style="font-size:18px; font-weight:bold; margin:5px 0;"></p>
+                <p id="resDetails" style="font-size:14px; color:#cbd5e1; margin:5px 0;"></p>
+                <p id="resTime" style="font-size:16px; font-weight:bold; margin-top:10px;"></p>
             </div>
-        </div>
 
-        <footer class="text-center text-xs text-slate-500 py-2">Point camera at QR code.</footer>
+            <div class="sound-toggle" onclick="toggleSound()">
+                <input type="checkbox" id="soundCheck" checked> Sound Effects: <span id="soundStatus">ON</span>
+            </div>
 
-        <script>
-            let currentMode = 'TIME IN';
-            let lastScannedToken = '';
-            let lastScanTime = 0;
+            <script>
+                let currentMode = 'TIME IN';
+                let soundEnabled = true;
+                let html5QrCode = null;
 
-            function setMode(mode) {
-                currentMode = mode;
-                document.getElementById('modeIn').className = mode === 'TIME IN' ? 'py-3 rounded-lg font-bold text-sm bg-emerald-600 text-white shadow' : 'py-3 rounded-lg font-bold text-sm bg-slate-700 text-slate-300';
-                document.getElementById('modeOut').className = mode === 'TIME OUT' ? 'py-3 rounded-lg font-bold text-sm bg-blue-600 text-white shadow' : 'py-3 rounded-lg font-bold text-sm bg-slate-700 text-slate-300';
-            }
+                function setScanMode(mode) {
+                    currentMode = mode;
+                    document.getElementById('btnIn').className = mode === 'TIME IN' ? 'mode-btn active-in' : 'mode-btn';
+                    document.getElementById('btnOut').className = mode === 'TIME OUT' ? 'mode-btn active-out' : 'mode-btn';
+                }
 
-            function showResult(title, body, status) {
-                const box = document.getElementById('resultBox');
-                box.classList.remove('hidden');
-                box.className = 'p-4 rounded-xl border ' + (status === 'success' ? 'bg-emerald-950 border-emerald-600 text-emerald-100' : status === 'warning' ? 'bg-amber-950 border-amber-600 text-amber-100' : 'bg-red-950 border-red-600 text-red-100');
-                document.getElementById('resultHeader').innerHTML = title;
-                document.getElementById('resultBody').innerHTML = body;
-            }
+                function toggleSound() {
+                    soundEnabled = !soundEnabled;
+                    document.getElementById('soundCheck').checked = soundEnabled;
+                    document.getElementById('soundStatus').innerText = soundEnabled ? 'ON' : 'OFF';
+                }
 
-            function onScanSuccess(decodedText) {
-                const now = Date.now();
-                if (decodedText === lastScannedToken && now - lastScanTime < 4000) return;
-                lastScannedToken = decodedText;
-                lastScanTime = now;
+                // Web Audio API Synthesized Sound Effects
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                function playTone(type) {
+                    if (!soundEnabled) return;
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
 
-                fetch('/api/scan', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token: decodedText, scan_type: currentMode })
-                })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        showResult('SUCCESS', \`<b>\${data.name}</b> (\${data.position})<br>\${currentMode} at \${data.time}\`, 'success');
-                    } else if (data.status === 'duplicate') {
-                        showResult('ALREADY RECORDED', \`<b>\${data.name}</b> Already scanned \${currentMode} today.\`, 'warning');
-                    } else {
-                        showResult('INVALID', data.message || 'Unknown QR Code', 'error');
+                    if (type === 'success') {
+                        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
+                        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.1); // A5
+                        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+                        osc.start();
+                        osc.stop(audioCtx.currentTime + 0.3);
+                    } else if (type === 'warning') {
+                        osc.type = 'square';
+                        osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+                        osc.frequency.setValueAtTime(330, audioCtx.currentTime + 0.15);
+                        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+                        osc.start();
+                        osc.stop(audioCtx.currentTime + 0.3);
+                    } else { // error
+                        osc.type = 'sawtooth';
+                        osc.frequency.setValueAtTime(200, audioCtx.currentTime);
+                        osc.frequency.setValueAtTime(130, audioCtx.currentTime + 0.15);
+                        gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+                        osc.start();
+                        osc.stop(audioCtx.currentTime + 0.4);
                     }
+                }
+
+                function onScanSuccess(decodedText) {
+                    fetch('/api/scan', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ qr_data: decodedText, scan_type: currentMode, scanner: 'Mobile Camera' })
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        const box = document.getElementById('resultBox');
+                        box.style.display = 'block';
+                        
+                        if (data.status === 'success') {
+                            box.className = 'result-box success';
+                            document.getElementById('resTitle').innerText = '✓ ATTENDANCE RECORDED';
+                            document.getElementById('resName').innerText = data.member.name;
+                            document.getElementById('resDetails').innerText = data.member.position + ' (' + data.member.member_id + ')';
+                            document.getElementById('resTime').innerText = data.scan_type + ' - ' + data.time;
+                            playTone('success');
+                        } else if (data.status === 'warning') {
+                            box.className = 'result-box error';
+                            document.getElementById('resTitle').innerText = '⚠ ALREADY SCANNED';
+                            document.getElementById('resName').innerText = data.member.name;
+                            document.getElementById('resDetails').innerText = data.message;
+                            document.getElementById('resTime').innerText = data.time;
+                            playTone('warning');
+                        } else {
+                            box.className = 'result-box error';
+                            document.getElementById('resTitle').innerText = '✕ REJECTED';
+                            document.getElementById('resName').innerText = 'Invalid QR Code';
+                            document.getElementById('resDetails').innerText = data.message;
+                            document.getElementById('resTime').innerText = '';
+                            playTone('error');
+                        }
+
+                        setTimeout(() => { box.style.display = 'none'; }, 4000);
+                    })
+                    .catch(err => console.error(err));
+                }
+
+                const html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
+                html5QrcodeScanner.render(onScanSuccess, (err) => {});
+            </script>
+        </body>
+        </html>
+    `);
+});
+
+// Scanner API Endpoint
+app.post('/api/scan', (req, res) => {
+    const { qr_data, scan_type, scanner } = req.body;
+    if (!qr_data || !qr_data.startsWith('CLUBATTENDANCE:MEMBER:')) {
+        return res.json({ status: 'error', message: 'This QR code is not registered in the system.' });
+    }
+
+    const token = qr_data.split(':')[2];
+    db.get(`SELECT * FROM users WHERE qr_token = ?`, [token], (err, member) => {
+        if (!member) {
+            return res.json({ status: 'error', message: 'Unrecognized QR security token.' });
+        }
+        if (member.status !== 'Active') {
+            return res.json({ status: 'error', message: 'This member account has been disabled.' });
+        }
+
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0];
+        const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+        // Check duplicate scan within the same day for same scan type
+        db.get(`SELECT * FROM attendance WHERE member_id = ? AND date = ? AND scan_type = ?`, 
+            [member.member_id, dateStr, scan_type], (err, existing) => {
+            if (existing) {
+                return res.json({
+                    status: 'warning',
+                    member: { name: member.name, member_id: member.member_id },
+                    message: `${member.name} has already recorded ${scan_type} today.`,
+                    time: existing.time
                 });
             }
 
-            new Html5Qrcode("reader").start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScanSuccess);
-        </script>
-    </body>
-    </html>`;
-    res.send(html);
-});
-
-app.post('/api/scan', (req, res) => {
-    const { token, scan_type } = req.body;
-    if (!token) return res.json({ status: 'error', message: 'No token' });
-
-    db.get(`SELECT * FROM users WHERE qr_token = ?`, [token], (err, user) => {
-        if (!user) return res.json({ status: 'error', message: 'QR not recognized' });
-        if (user.status !== 'Active') return res.json({ status: 'error', message: 'Account disabled' });
-
-        const today = new Date().toLocaleDateString('en-CA');
-        const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-        db.get(`SELECT * FROM attendance WHERE member_id = ? AND date = ? AND scan_type = ?`, [user.member_id, today, scan_type], (err, existing) => {
-            if (existing) return res.json({ status: 'duplicate', name: user.name, time: existing.time });
-
-            db.run(`INSERT INTO attendance (member_id, scan_type, date, time, scanner_device) VALUES (?, ?, ?, ?, 'Scanner')`,
-                [user.member_id, scan_type, today, timeNow], () => {
-                    res.json({ status: 'success', name: user.name, position: user.position, member_id: user.member_id, time: timeNow });
+            db.run(`INSERT INTO attendance (member_id, scan_type, date, time, timestamp, scanner_device) VALUES (?, ?, ?, ?, datetime('now'), ?)`,
+                [member.member_id, scan_type, dateStr, timeStr, scanner], () => {
+                    logActivity(member.username, `Recorded ${scan_type} via scanner`);
+                    res.json({
+                        status: 'success',
+                        scan_type,
+                        time: timeStr,
+                        member: { name: member.name, position: member.position, member_id: member.member_id }
+                    });
                 });
         });
     });
 });
 
-
-// ==================== MEMBER PORTAL ====================
+// ==========================================
+// MEMBER PORTAL (/member)
+// ==========================================
 app.get('/member/login', (req, res) => {
-    const error = req.query.error ? `<div class="bg-red-100 text-red-700 p-3 rounded-lg text-sm mb-4">${req.query.error}</div>` : '';
-    const html = `
-    <div class="max-w-md mx-auto bg-white p-8 rounded-xl shadow border border-slate-200 mt-10">
-        <h2 class="text-2xl font-bold mb-6 text-center text-slate-800">Member Portal Login</h2>
-        ${error}
-        <form action="/member/login" method="POST" class="space-y-4">
-            <div>
-                <label class="block text-sm font-medium mb-1">Username</label>
-                <input type="text" name="username" required class="w-full border rounded-lg px-3 py-2">
-            </div>
-            <div>
-                <label class="block text-sm font-medium mb-1">Password</label>
-                <input type="password" name="password" required class="w-full border rounded-lg px-3 py-2">
-            </div>
-            <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700">Login</button>
-        </form>
-    </div>`;
-    res.send(renderLayout('Member Login', html));
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>Member Login</title>
+        <style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.box{background:white;padding:40px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.05);width:100%;max-width:380px}input{width:100%;padding:12px;margin-bottom:15px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}button{width:100%;padding:12px;background:#d97706;color:white;border:none;border-radius:8px;font-weight:bold;cursor:pointer}.error{background:#fee2e2;color:#991b1b;padding:10px;border-radius:6px;margin-bottom:15px;font-size:14px;}</style>
+        </head>
+        <body>
+        <div class="box">
+            <h2>Member Portal Login</h2>
+            ${req.query.error ? `<div class="error">${req.query.error}</div>` : ''}
+            <form method="POST" action="/member/login">
+                <label>Username</label><input type="text" name="username" required autocomplete="username">
+                <label>Password (or Temporary Password)</label><input type="password" name="password" required autocomplete="current-password">
+                <button type="submit">Login</button>
+            </form>
+        </div>
+        </body></html>
+    `);
 });
 
 app.post('/member/login', (req, res) => {
     const { username, password } = req.body;
-    db.get(`SELECT * FROM users WHERE username = ? AND position != 'Adviser'`, [username], async (err, user) => {
-        if (user && await bcrypt.compare(password, user.password)) {
-            req.session.memberId = user.id;
-            if (user.temporary_password) res.redirect('/member/change-password');
-            else res.redirect('/member');
-        } else {
-            res.redirect('/member/login?error=Invalid username or password');
+    db.get(`SELECT * FROM users WHERE username = ? AND position != 'Administrator'`, [username], async (err, user) => {
+        if (err || !user || !(await bcrypt.compare(password, user.password))) {
+            return res.redirect('/member/login?error=Invalid+Credentials');
         }
+        req.session.user = user;
+        if (user.is_temp_pass === 1) {
+            return res.redirect('/member/force-change-password');
+        }
+        res.redirect('/member');
+    });
+});
+
+app.get('/member/force-change-password', requireMember, (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en"><head><meta charset="UTF-8"><title>Change Temporary Password</title>
+        <style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.box{background:white;padding:30px;border-radius:10px;box-shadow:0 4px 10px rgba(0,0,0,0.05);width:350px}input{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}button{width:100%;padding:10px;background:#d97706;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer}</style>
+        </head>
+        <body>
+        <div class="box">
+            <h3>Change Temporary Password</h3>
+            <p style="font-size:13px; color:#64748b;">For security, please set a new permanent password.</p>
+            <form method="POST" action="/member/force-change-password">
+                <label>New Password</label><input type="password" name="new_password" required minlength="6">
+                <button type="submit">Update Password</button>
+            </form>
+        </div>
+        </body></html>
+    `);
+});
+
+app.post('/member/force-change-password', requireMember, async (req, res) => {
+    const { new_password } = req.body;
+    if (!new_password || new_password.length < 6) return res.send('Password must be at least 6 characters.');
+    const hashed = await bcrypt.hash(new_password, 10);
+    db.run(`UPDATE users SET password = ?, temporary_password = '', is_temp_pass = 0 WHERE id = ?`, [hashed, req.session.user.id], () => {
+        logActivity(req.session.user.username, 'Changed temporary password to permanent password');
+        res.redirect('/member');
     });
 });
 
 app.get('/member/logout', (req, res) => {
-    req.session.memberId = null;
-    res.redirect('/member/login');
+    req.session.destroy(() => res.redirect('/member/login'));
 });
 
-function requireMember(req, res, next) {
-    if (!req.session.memberId) return res.redirect('/member/login');
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.session.memberId], (err, user) => {
-        if (!user || user.status !== 'Active') return res.redirect('/member/login?error=Account disabled');
-        if (user.temporary_password && req.path !== '/change-password') return res.redirect('/member/change-password');
-        next();
-    });
-}
-
-app.get('/member/change-password', (req, res) => {
-    if (!req.session.memberId) return res.redirect('/member/login');
-    const error = req.query.error ? `<div class="bg-red-100 text-red-700 p-3 rounded-lg text-sm mb-4">${req.query.error}</div>` : '';
-    const html = `
-    <div class="max-w-md mx-auto bg-white p-8 rounded-xl shadow border border-slate-200 mt-10 space-y-4">
-        <h2 class="text-xl font-bold text-slate-800">Change Temporary Password</h2>
-        ${error}
-        <form action="/member/change-password" method="POST" class="space-y-4">
-            <div>
-                <label class="block text-sm font-medium mb-1">New Password</label>
-                <input type="password" name="new_password" required minlength="6" class="w-full border rounded-lg px-3 py-2">
-            </div>
-            <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded-lg font-medium">Update Password</button>
-        </form>
-    </div>`;
-    res.send(renderLayout('Change Password', html));
-});
-
-app.post('/member/change-password', (req, res) => {
-    if (!req.session.memberId) return res.redirect('/member/login');
-    const { new_password } = req.body;
-    bcrypt.hash(new_password, 10, (err, hashed) => {
-        db.run(`UPDATE users SET password = ?, temporary_password = NULL WHERE id = ?`, [hashed, req.session.memberId], () => {
-            res.redirect('/member');
-        });
-    });
-});
-
-// Member Dashboard & Profile Update Page
 app.get('/member', requireMember, (req, res) => {
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.session.memberId], async (err, user) => {
-        db.all(`SELECT * FROM attendance WHERE member_id = ? ORDER BY id DESC LIMIT 10`, [user.member_id], async (err, attendance) => {
-            db.all(`SELECT * FROM announcements ORDER BY id DESC LIMIT 3`, [], async (err, announcements) => {
-                const qrDataUrl = await qrcode.toDataURL(user.qr_token, { width: 220 });
-                const successMsg = req.query.success ? `<div class="bg-emerald-100 text-emerald-700 p-3 rounded-lg text-sm mb-4">Profile updated successfully!</div>` : '';
+    const user = req.session.user;
+    db.all(`SELECT * FROM attendance WHERE member_id = ? ORDER BY id DESC LIMIT 20`, [user.member_id], (err, attendance) => {
+        db.all(`SELECT * FROM announcements ORDER BY id DESC LIMIT 5`, (err, announcements) => {
+            QRCode.toDataURL(`CLUBATTENDANCE:MEMBER:${user.qr_token}`, (err, qrDataURL) => {
+                
+                db.get(`SELECT COUNT(DISTINCT date) as present FROM attendance WHERE member_id = ? AND scan_type = 'TIME IN'`, [user.member_id], (err, statRow) => {
+                    const presentCount = statRow ? statRow.present : 0;
 
-                const html = `
-                <div class="max-w-4xl mx-auto space-y-6">
-                    ${successMsg}
-                    <div class="bg-white p-6 rounded-xl shadow border border-slate-200 flex flex-col md:flex-row justify-between items-center gap-6">
-                        <div class="flex items-center gap-4">
-                            <div class="w-20 h-20 rounded-full bg-slate-200 overflow-hidden flex items-center justify-center font-bold text-2xl text-slate-500 border shadow-inner">
-                                ${user.photo ? `<img src="${user.photo}" class="w-full h-full object-cover">` : user.name[0]}
-                            </div>
-                            <div>
-                                <span class="bg-indigo-100 text-indigo-700 text-xs font-bold px-2.5 py-1 rounded-full">${user.position}</span>
-                                <h2 class="text-2xl font-extrabold text-slate-800 mt-1">${user.name}</h2>
-                                <p class="text-sm font-mono text-indigo-600 font-bold">${user.member_id}</p>
-                                <div class="mt-3 flex gap-2">
-                                    <button onclick="openProfileModal()" class="text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-150"><i class="fa-solid fa-user-pen mr-1"></i> Edit Profile</button>
-                                    <a href="/member/logout" class="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded-lg font-medium hover:bg-red-100"><i class="fa-solid fa-right-from-bracket mr-1"></i> Logout</a>
+                    res.send(`
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <title>Member Portal - ${user.name}</title>
+                            <style>
+                                body { font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; margin: 0; }
+                                header { background: #d97706; color: white; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; }
+                                header h1 { margin: 0; font-size: 20px; }
+                                .container { max-width: 1000px; margin: 30px auto; padding: 0 20px; box-sizing: border-box; }
+                                .card { background: white; border-radius: 12px; padding: 25px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); border: 1px solid #e2e8f0; }
+                                .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+                                @media(max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+                                table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+                                th, td { padding: 10px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+                                th { background: #f1f5f9; }
+                                .btn { background: #d97706; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; display: inline-block; }
+                            </style>
+                        </head>
+                        <body>
+                            <header>
+                                <h1>Member Portal</h1>
+                                <div><a href="/member/logout" style="color:white; text-decoration:none; font-weight:bold;">Logout</a></div>
+                            </header>
+                            <div class="container">
+                                <div class="grid-2">
+                                    <div class="card">
+                                        <h2>Welcome, ${user.name}</h2>
+                                        <p><strong>Position:</strong> ${user.position}</p>
+                                        <p><strong>Member ID:</strong> ${user.member_id}</p>
+                                        <p><strong>Username:</strong> ${user.username}</p>
+                                        <p><strong>Days Present:</strong> ${presentCount}</p>
+                                    </div>
+                                    <div class="card" style="text-align:center;">
+                                        <h3>Your QR Code</h3>
+                                        <img src="${qrDataURL}" alt="QR" style="width:160px; height:160px;">
+                                        <br><br>
+                                        <a href="/admin/member/id/${user.id}" target="_blank" class="btn">View / Print ID Card</a>
+                                    </div>
+                                </div>
+
+                                <div class="card">
+                                    <h3>Announcements</h3>
+                                    ${announcements.length === 0 ? '<p>No announcements yet.</p>' : announcements.map(a => `
+                                        <div style="border-bottom:1px solid #eee; padding-bottom:10px; margin-bottom:10px;">
+                                            <strong>${a.title}</strong><br><small style="color:#666;">${a.created_at}</small>
+                                            <p>${a.message}</p>
+                                        </div>
+                                    `).join('')}
+                                </div>
+
+                                <div class="card">
+                                    <h3>Recent Attendance History</h3>
+                                    <table>
+                                        <thead><tr><th>Scan Type</th><th>Date</th><th>Time</th><th>Scanner</th></tr></thead>
+                                        <tbody>
+                                            ${attendance.map(a => `<tr><td>${a.scan_type}</td><td>${a.date}</td><td>${a.time}</td><td>${a.scanner_device}</td></tr>`).join('')}
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
-                        </div>
-                        <div class="bg-slate-50 p-4 rounded-xl border text-center">
-                            <img src="${qrDataUrl}" class="mx-auto border p-1 rounded bg-white mb-2">
-                            <a href="${qrDataUrl}" download="my_qr_code.png" class="text-xs font-medium text-indigo-600 hover:underline">Download QR Code</a>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
-                            <h3 class="font-bold text-lg text-slate-800">Attendance History</h3>
-                            <div class="space-y-2">
-                                ${attendance.length === 0 ? '<p class="text-slate-400 text-sm">No records found.</p>' : attendance.map(a => `
-                                    <div class="flex justify-between items-center bg-slate-50 p-2.5 rounded-lg text-sm border">
-                                        <div>
-                                            <span class="font-bold text-slate-700">${a.date}</span>
-                                            <span class="text-xs text-slate-400 ml-2">${a.time}</span>
-                                        </div>
-                                        <span class="px-2 py-0.5 rounded text-xs font-bold ${a.scan_type === 'TIME IN' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}">${a.scan_type}</span>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </div>
-
-                        <div class="bg-white p-6 rounded-xl shadow border border-slate-200 space-y-4">
-                            <h3 class="font-bold text-lg text-slate-800">Club Announcements</h3>
-                            <div class="space-y-3">
-                                ${announcements.length === 0 ? '<p class="text-slate-400 text-sm">No announcements.</p>' : announcements.map(ann => `
-                                    <div class="p-3 bg-indigo-50/50 rounded-lg border border-indigo-100 space-y-1">
-                                        <div class="font-bold text-sm text-indigo-900">${ann.title}</div>
-                                        <p class="text-xs text-slate-600">${ann.message}</p>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Edit Profile Modal -->
-                <div id="profileModal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center p-4 z-50">
-                    <div class="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
-                        <div class="flex justify-between items-center border-b pb-3">
-                            <h3 class="font-bold text-lg text-slate-800">Update Profile Information</h3>
-                            <button onclick="closeProfileModal()" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-xl"></i></button>
-                        </div>
-                        <form action="/member/profile/update" method="POST" class="space-y-4">
-                            <div>
-                                <label class="block text-sm font-medium mb-1">Member ID <span class="text-xs text-slate-400">(Permanent)</span></label>
-                                <input type="text" value="${user.member_id}" disabled class="w-full border rounded-lg px-3 py-2 bg-slate-100 text-slate-500 font-mono">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium mb-1">Full Name</label>
-                                <input type="text" name="name" value="${user.name}" required class="w-full border rounded-lg px-3 py-2">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium mb-1">Email</label>
-                                <input type="email" name="email" value="${user.email || ''}" class="w-full border rounded-lg px-3 py-2">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium mb-1">Contact Number</label>
-                                <input type="text" name="contact" value="${user.contact || ''}" class="w-full border rounded-lg px-3 py-2">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium mb-1">Photo URL</label>
-                                <input type="url" name="photo" value="${user.photo || ''}" placeholder="https://example.com/photo.jpg" class="w-full border rounded-lg px-3 py-2">
-                            </div>
-                            <div class="flex justify-end space-x-3 pt-3 border-t">
-                                <button type="button" onclick="closeProfileModal()" class="px-4 py-2 border rounded-lg text-slate-600">Cancel</button>
-                                <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg">Save Changes</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-
-                <script>
-                    function openProfileModal() { document.getElementById('profileModal').classList.remove('hidden'); }
-                    function closeProfileModal() { document.getElementById('profileModal').classList.add('hidden'); }
-                </script>`;
-                res.send(renderLayout('Member Portal', html));
+                        </body>
+                        </html>
+                    `);
+                });
             });
         });
     });
 });
 
-app.post('/member/profile/update', requireMember, (req, res) => {
-    const { name, email, contact, photo } = req.body;
-    db.run(`UPDATE users SET name = ?, email = ?, contact = ?, photo = ? WHERE id = ?`,
-        [name, email, contact, photo, req.session.memberId], () => {
-            res.redirect('/member?success=1');
-        });
-});
-
-
-// ==================== START SERVER ====================
+// ==========================================
+// START SERVER ON 0.0.0.0 FOR NETWORK ACCESS
+// ==========================================
+const server = http.createServer(app);
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\nServer is running at http://localhost:${PORT}\n`);
+    const interfaces = require('os').networkInterfaces();
+    let localIp = 'localhost';
+    for (const name of Object.keys(interfaces)) {
+        for (const net of interfaces[name]) {
+            if (net.family === 'IPv4' && !net.internal) {
+                localIp = net.address;
+            }
+        }
+    }
+
+    console.log('\n======================================================');
+    console.log('SCHOOL CLUB QR CODE ATTENDANCE SYSTEM RUNNING');
+    console.log('======================================================');
+    console.log(`Local:    http://localhost:${PORT}`);
+    console.log(`Network:  http://${localIp}:${PORT}`);
+    console.log('------------------------------------------------------');
+    console.log(`Admin Portal:   http://${localIp}:${PORT}/admin`);
+    console.log(`Scanner Portal: http://${localIp}:${PORT}/scanner`);
+    console.log(`Member Portal:  http://${localIp}:${PORT}/member`);
+    console.log('======================================================');
+    console.log('Default Admin Credentials: username: admin / password: Admin123!');
+    console.log('------------------------------------------------------\n');
 });
