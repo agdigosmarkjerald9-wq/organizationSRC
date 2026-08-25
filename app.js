@@ -1,5 +1,5 @@
 /**
- * School Organization QR Attendance System
+ * School Organization QR Atte
  * Complete Full-Stack Single-File Node.js Application for Render Deployment
  */
 
