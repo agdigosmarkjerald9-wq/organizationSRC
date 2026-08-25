@@ -1,22 +1,20 @@
 {
-  "name": "school-organization-qr-attendance",
+  "name": "club-qr-attendance-system",
   "version": "1.0.0",
-  "description": "Complete Full-Stack High School Club QR Code Attendance System",
+  "description": "School Club QR Code Attendance Management System",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "connect-pg-simple": "^10.0.0",
-    "dotenv": "^16.4.5",
+    "ejs": "^3.1.9",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
-    "pg": "^8.11.5",
-    "qrcode": "^1.5.3",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "uuid": "^9.0.1"
   },
   "engines": {
-    "node": ">=18.x"
+    "node": ">=18.0.0"
   }
 }
