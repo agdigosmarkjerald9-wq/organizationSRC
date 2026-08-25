@@ -816,7 +816,7 @@ app.get('/scanner', (req, res) => {
                     if (data.status === 'success') {
                         showResult('SUCCESS', \`<b>\${data.name}</b> (\${data.position})<br>\${currentMode} at \${data.time}\`, 'success');
                     } else if (data.status === 'duplicate') {
-                        showResult('ALREADY RECORDED', \`<b>\index</b> Already scanned \${currentMode} today.\`, 'warning');
+                        showResult('ALREADY RECORDED', \`<b>\${data.name}</b> Already scanned \${currentMode} today.\`, 'warning');
                     } else {
                         showResult('INVALID', data.message || 'Unknown QR Code', 'error');
                     }
@@ -1000,6 +1000,10 @@ app.get('/member', requireMember, (req, res) => {
                             <button onclick="closeProfileModal()" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-xl"></i></button>
                         </div>
                         <form action="/member/profile/update" method="POST" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Member ID <span class="text-xs text-slate-400">(Permanent)</span></label>
+                                <input type="text" value="${user.member_id}" disabled class="w-full border rounded-lg px-3 py-2 bg-slate-100 text-slate-500 font-mono">
+                            </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Full Name</label>
                                 <input type="text" name="name" value="${user.name}" required class="w-full border rounded-lg px-3 py-2">
