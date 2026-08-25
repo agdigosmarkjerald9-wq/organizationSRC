@@ -1,7 +1,7 @@
 {
   "name": "school-club-attendance",
-  "version": "1.0.0",
-  "description": "School Club QR Code Attendance System",
+  "version": "1.2.0",
+  "description": "School Club QR Code Attendance System with Member Profile Update and Dynamic Club ID",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
