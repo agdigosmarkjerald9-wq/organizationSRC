@@ -1,856 +1,1645 @@
+/**
+ * SCHOOL CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM
+ * Complete All-In-One Application (Node.js + Express + PostgreSQL + EJS)
+ */
+
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const { Pool } = require('pg');
-const QRCode = require('qrcode');
 const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SESSION_SECRET = process.env.SESSION_SECRET || 'school-club-qr-secret-key-2026';
-
-// Middleware
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-app.use(session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: { secure: false }
-}));
 
 // PostgreSQL Connection Pool Setup
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
+// Automatically uses DATABASE_URL if provided (e.g. Render), otherwise falls back to local configuration
+const pool = new Pool(
+  process.env.DATABASE_URL
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }
+      }
+    : {
+        user: process.env.DB_USER || 'postgres',
+        host: process.env.DB_HOST || 'localhost',
+        database: process.env.DB_NAME || 'club_attendance',
+        password: process.env.DB_PASSWORD || 'postgres',
+        port: process.env.DB_PORT || 5432,
+      }
+);
 
-pool.connect((err, client, release) => {
-    if (err) {
-        console.error('Error acquiring client', err.stack);
-    } else {
-        console.log('Connected to PostgreSQL database successfully!');
-        release();
+// Middleware Configuration
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.set('view engine', 'ejs');
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+    resave: false,
+    saveUninitialized: false,
+    cookie: { secure: false } // Set to true if utilizing HTTPS-only production enforcement
+  })
+);
+
+// Database Initialization Routine
+async function initializeDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admins (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS members (
+        id SERIAL PRIMARY KEY,
+        member_id VARCHAR(50) UNIQUE NOT NULL,
+        full_name VARCHAR(100) NOT NULL,
+        position VARCHAR(50) DEFAULT 'Member',
+        club VARCHAR(100) DEFAULT 'General School Club',
+        year_level VARCHAR(20),
+        course VARCHAR(100),
+        section VARCHAR(50),
+        contact VARCHAR(30),
+        email VARCHAR(100),
+        photo TEXT,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        temporary_password_status BOOLEAN DEFAULT TRUE,
+        qr_token VARCHAR(100) UNIQUE NOT NULL,
+        status VARCHAR(20) DEFAULT 'Active',
+        date_joined DATE DEFAULT CURRENT_DATE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS attendance (
+        id SERIAL PRIMARY KEY,
+        member_id VARCHAR(50) NOT NULL,
+        date VARCHAR(20) NOT NULL,
+        time_in VARCHAR(20),
+        time_out VARCHAR(20),
+        status VARCHAR(20) DEFAULT 'Present',
+        remarks TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS announcements (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(150) NOT NULL,
+        message TEXT NOT NULL,
+        status VARCHAR(20) DEFAULT 'Active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS settings (
+        id SERIAL PRIMARY KEY,
+        organization_name VARCHAR(150) DEFAULT 'Supreme Student Council & Clubs',
+        school_name VARCHAR(150) DEFAULT 'National High School',
+        logo TEXT DEFAULT '',
+        attendance_start VARCHAR(10) DEFAULT '08:00',
+        grace_period INTEGER DEFAULT 15,
+        scanner_pin VARCHAR(20) DEFAULT '1234'
+      );
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        action TEXT NOT NULL,
+        user_name VARCHAR(100) NOT NULL,
+        date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Seed default admin account if not existing
+    const adminCheck = await pool.query('SELECT * FROM admins WHERE username = $1', ['admin']);
+    let defaultPlainPassword = '';
+    if (adminCheck.rows.length === 0) {
+      defaultPlainPassword = Math.random().toString(36).substring(2, 10).toUpperCase();
+      const hash = await bcrypt.hash(defaultPlainPassword, 10);
+      await pool.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', ['admin', hash]);
+      console.log('----------------------------------------------------');
+      console.log('[SETUP] Default Admin Account Created Successfully!');
+      console.log('[SETUP] Username: admin');
+      console.log(`[SETUP] Temporary Password: ${defaultPlainPassword}`);
+      console.log('----------------------------------------------------');
     }
-});
 
-// Create Tables Safely on Startup
-async function initDB() {
-    try {
-        await pool.query(`CREATE TABLE IF NOT EXISTS admins (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE,
-            password_hash TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        await pool.query(`CREATE TABLE IF NOT EXISTS members (
-            id SERIAL PRIMARY KEY,
-            member_id TEXT UNIQUE,
-            full_name TEXT,
-            position TEXT,
-            club TEXT,
-            year_level TEXT,
-            course TEXT,
-            section TEXT,
-            contact TEXT,
-            email TEXT,
-            photo TEXT,
-            username TEXT UNIQUE,
-            password_hash TEXT,
-            temporary_password_status INTEGER DEFAULT 1,
-            qr_token TEXT UNIQUE,
-            status TEXT DEFAULT 'Active',
-            date_joined TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        await pool.query(`CREATE TABLE IF NOT EXISTS attendance (
-            id SERIAL PRIMARY KEY,
-            member_id TEXT,
-            date TEXT,
-            time_in TEXT,
-            time_out TEXT,
-            status TEXT,
-            remarks TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        await pool.query(`CREATE TABLE IF NOT EXISTS announcements (
-            id SERIAL PRIMARY KEY,
-            title TEXT,
-            message TEXT,
-            status TEXT DEFAULT 'Active',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        await pool.query(`CREATE TABLE IF NOT EXISTS settings (
-            id SERIAL PRIMARY KEY,
-            organization_name TEXT,
-            school_name TEXT,
-            logo TEXT,
-            attendance_start TEXT,
-            grace_period INTEGER
-        )`);
-
-        await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (
-            id SERIAL PRIMARY KEY,
-            action TEXT,
-            user_name TEXT,
-            date TEXT,
-            time TEXT
-        )`);
-
-        // Seed Settings if empty
-        const settingsCheck = await pool.query(`SELECT COUNT(*) as count FROM settings`);
-        if (parseInt(settingsCheck.rows[0].count) === 0) {
-            await pool.query(
-                `INSERT INTO settings (organization_name, school_name, logo, attendance_start, grace_period) VALUES ($1, $2, $3, $4, $5)`,
-                ['Supreme Student Council', 'National University', 'https://api.iconify.design/lucide:graduation-cap.svg?color=%234f46e5', '08:00', 15]
-            );
-        }
-
-        // Seed Admin if empty
-        const adminCheck = await pool.query(`SELECT COUNT(*) as count FROM admins`);
-        if (parseInt(adminCheck.rows[0].count) === 0) {
-            const hash = await bcrypt.hash('admin123', 10);
-            await pool.query(`INSERT INTO admins (username, password_hash) VALUES ($1, $2)`, ['admin', hash]);
-            console.log('Default Admin Account Created -> Username: admin | Password: admin123');
-        }
-    } catch (err) {
-        console.error('Database initialization error:', err);
+    // Seed default settings if empty
+    const settingsCheck = await pool.query('SELECT * FROM settings WHERE id = 1');
+    if (settingsCheck.rows.length === 0) {
+      await pool.query('INSERT INTO settings (id, organization_name, school_name) VALUES (1, $1, $2)', [
+        'Supreme Student Council & Clubs',
+        'National High School'
+      ]);
     }
-}
-initDB();
-
-// Helper for Audit Logs
-async function logAction(action, user) {
-    try {
-        const now = new Date();
-        const date = now.toISOString().split('T')[0];
-        const time = now.toLocaleTimeString();
-        await pool.query(`INSERT INTO audit_logs (action, user_name, date, time) VALUES ($1, $2, $3, $4)`, [action, user, date, time]);
-    } catch(e) { console.error('Audit log error:', e); }
+  } catch (err) {
+    console.error('Database Initialization Error:', err);
+  }
 }
 
-// HTML Layout Helper
-const layoutHead = (title) => `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        @media print {
-            body * { visibility: hidden; }
-            #printable-id-card, #printable-id-card * { visibility: visible; }
-            #printable-id-card { position: absolute; left: 0; top: 0; width: 85.6mm; height: 53.98mm; margin: 0; padding: 0; }
-        }
-        .cr80-card { width: 342px; height: 215px; background: white; border-radius: 12px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); position: relative; overflow: hidden; border: 1px solid #e2e8f0; }
-    </style>
-</head>
-<body class="bg-slate-50 text-slate-800 font-sans antialiased min-h-screen">
-`;
+// Helper: Log Admin Actions
+async function logAudit(action, userName) {
+  try {
+    await pool.query('INSERT INTO audit_logs (action, user_name) VALUES ($1, $2)', [action, userName]);
+  } catch (e) {
+    console.error('Audit Log Error:', e);
+  }
+}
 
-// Home Route
+// Middleware Guards
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.isAdmin) return next();
+  res.redirect('/admin/login');
+}
+
+function requireMember(req, res, next) {
+  if (req.session && req.session.isMember) {
+    if (req.session.mustChangePassword && req.path !== '/change-password') {
+      return res.redirect('/member/change-password');
+    }
+    return next();
+  }
+  res.redirect('/member/login');
+}
+
+// ==========================================
+// ROUTES: PORTAL ROUTING & AUTHENTICATION
+// ==========================================
+
 app.get('/', (req, res) => {
-    res.send(`
-        ${layoutHead('School Club QR System')}
-        <div class="flex flex-col items-center justify-center min-h-screen p-6">
-            <div class="text-center max-w-xl">
-                <div class="inline-flex p-4 bg-indigo-100 text-indigo-600 rounded-full mb-4 text-3xl"><i class="fa-solid fa-qrcode"></i></div>
-                <h1 class="text-3xl font-bold text-slate-900 mb-2">School Club QR Attendance System</h1>
-                <p class="text-slate-600 mb-8">Select your portal to proceed with management, member access, or live event scanning.</p>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <a href="/admin/login" class="p-6 bg-white border border-slate-200 rounded-xl shadow-sm hover:border-indigo-500 hover:shadow-md transition text-center group">
-                        <div class="text-indigo-600 text-2xl mb-2 group-hover:scale-110 transition"><i class="fa-solid fa-user-shield"></i></div>
-                        <h2 class="font-bold text-slate-800">Admin Portal</h2>
-                        <p class="text-xs text-slate-500 mt-1">Manage members, reports, and settings</p>
-                    </a>
-                    <a href="/scanner" class="p-6 bg-white border border-slate-200 rounded-xl shadow-sm hover:border-indigo-500 hover:shadow-md transition text-center group">
-                        <div class="text-emerald-600 text-2xl mb-2 group-hover:scale-110 transition"><i class="fa-solid fa-camera"></i></div>
-                        <h2 class="font-bold text-slate-800">Scanner Portal</h2>
-                        <p class="text-xs text-slate-500 mt-1">Live smartphone attendance scanner</p>
-                    </a>
-                    <a href="/member" class="p-6 bg-white border border-slate-200 rounded-xl shadow-sm hover:border-indigo-500 hover:shadow-md transition text-center group">
-                        <div class="text-amber-600 text-2xl mb-2 group-hover:scale-110 transition"><i class="fa-solid fa-users"></i></div>
-                        <h2 class="font-bold text-slate-800">Member Portal</h2>
-                        <p class="text-xs text-slate-500 mt-1">Check attendance records and profile</p>
-                    </a>
-                </div>
-            </div>
+  res.send(`
+    <html>
+      <head>
+        <title>School Club QR Attendance System</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; color: #333; text-align: center; padding: 50px; }
+          .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+          h1 { color: #2c3e50; margin-bottom: 10px; }
+          p { color: #666; margin-bottom: 30px; }
+          .btn { display: block; width: 100%; padding: 14px; margin: 12px 0; background: #3498db; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px; transition: 0.2s; box-sizing: border-box; }
+          .btn:hover { background: #2980b9; }
+          .btn-scanner { background: #2ecc71; }
+          .btn-scanner:hover { background: #27ae60; }
+          .btn-member { background: #9b59b6; }
+          .btn-member:hover { background: #8e44ad; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🏫 Club QR Attendance System</h1>
+          <p>Select your designated portal below to proceed.</p>
+          <a href="/admin/login" class="btn">Admin Portal</a>
+          <a href="/scanner" class="btn btn-scanner">Scanner Portal (Smartphone Entrance)</a>
+          <a href="/member/login" class="btn btn-member">Member Portal</a>
         </div>
-        </body></html>
-    `);
+      </body>
+    </html>
+  `);
 });
 
-// Admin Login
+// --- ADMIN AUTH & DASHBOARD ---
 app.get('/admin/login', (req, res) => {
-    res.send(`
-        ${layoutHead('Admin Login')}
-        <div class="flex items-center justify-center min-h-screen">
-            <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-slate-100">
-                <div class="text-center mb-6">
-                    <div class="bg-indigo-600 text-white w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3 text-xl"><i class="fa-solid fa-shield-halved"></i></div>
-                    <h1 class="text-2xl font-bold text-slate-900">Admin Portal</h1>
-                    <p class="text-sm text-slate-500">Sign in to manage club system</p>
-                </div>
-                <form action="/admin/login" method="POST" class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Username</label>
-                        <input type="text" name="username" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none">
-                    </div>
-                    <div>
-                        <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Password</label>
-                        <input type="password" name="password" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none">
-                    </div>
-                    <button type="submit" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-semibold hover:bg-indigo-700 transition">Sign In</button>
-                </form>
-                <div class="text-center mt-4"><a href="/" class="text-xs text-indigo-600 hover:underline">← Back to Home</a></div>
+  res.send(`
+    <html>
+      <head><title>Admin Login</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family:sans-serif; background:#2c3e50; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
+        <div style="background:white; padding:40px; border-radius:8px; width:100%; max-width:400px; box-shadow:0 4px 10px rgba(0,0,0,0.3);">
+          <h2 style="margin-top:0; color:#2c3e50; text-align:center;">Admin Portal</h2>
+          <form method="POST" action="/admin/login">
+            <div style="margin-bottom:15px;">
+              <label style="font-size:13px; font-weight:bold; display:block; margin-bottom:5px;">Username</label>
+              <input type="text" name="username" required style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;">
             </div>
+            <div style="margin-bottom:20px;">
+              <label style="font-size:13px; font-weight:bold; display:block; margin-bottom:5px;">Password</label>
+              <input type="password" name="password" required style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;">
+            </div>
+            <button type="submit" style="width:100%; padding:12px; background:#3498db; color:white; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Login</button>
+          </form>
         </div>
-        </body></html>
-    `);
+      </body>
+    </html>
+  `);
 });
 
 app.post('/admin/login', async (req, res) => {
-    const { username, password } = req.body;
-    try {
-        const result = await pool.query(`SELECT * FROM admins WHERE username = $1`, [username]);
-        const admin = result.rows[0];
-        if (admin && await bcrypt.compare(password, admin.password_hash)) {
-            req.session.adminId = admin.id;
-            req.session.adminUser = admin.username;
-            res.redirect('/admin');
-        } else {
-            res.send(`<script>alert('Invalid credentials'); window.location='/admin/login';</script>`);
-        }
-    } catch(e) {
-        res.send(`<script>alert('Database error'); window.location='/admin/login';</script>`);
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
+    if (result.rows.length > 0) {
+      const admin = result.rows[0];
+      const match = await bcrypt.compare(password, admin.password_hash);
+      if (match) {
+        req.session.isAdmin = true;
+        req.session.adminUser = admin.username;
+        return res.redirect('/admin');
+      }
     }
+    res.send("<script>alert('Invalid credentials!'); window.location='/admin/login';</script>");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
 });
 
 app.get('/admin/logout', (req, res) => {
-    req.session.destroy(() => res.redirect('/admin/login'));
+  req.session.destroy(() => {
+    res.redirect('/admin/login');
+  });
 });
 
-function requireAdmin(req, res, next) {
-    if (req.session.adminId) next();
-    else res.redirect('/admin/login');
-}
-
-// Admin Dashboard
+// Admin Dashboard Main View
 app.get('/admin', requireAdmin, async (req, res) => {
-    try {
-        const totalRow = await pool.query(`SELECT COUNT(*) as total FROM members`);
-        const activeRow = await pool.query(`SELECT COUNT(*) as active FROM members WHERE status = 'Active'`);
-        const inactiveRow = await pool.query(`SELECT COUNT(*) as inactive FROM members WHERE status = 'Inactive'`);
-        const today = new Date().toISOString().split('T')[0];
-        const presentRow = await pool.query(`SELECT COUNT(DISTINCT member_id) as present FROM attendance WHERE date = $1 AND time_in IS NOT NULL`, [today]);
-        const todayScanRow = await pool.query(`SELECT COUNT(*) as totalToday FROM attendance WHERE date = $1`, [today]);
-        const recentMembers = await pool.query(`SELECT * FROM members ORDER BY id DESC LIMIT 5`);
-        const recentScans = await pool.query(`SELECT a.*, m.full_name, m.position FROM attendance a JOIN members m ON a.member_id = m.member_id ORDER BY a.id DESC LIMIT 5`);
+  try {
+    const totalMembers = (await pool.query('SELECT COUNT(*) FROM members')).rows[0].count;
+    const activeMembers = (await pool.query("SELECT COUNT(*) FROM members WHERE status='Active'")).rows[0].count;
+    const inactiveMembers = (await pool.query("SELECT COUNT(*) FROM members WHERE status='Inactive'")).rows[0].count;
+    
+    const todayStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const todayAtt = await pool.query('SELECT * FROM attendance WHERE date = $1', [todayStr]);
+    
+    const presentToday = todayAtt.rows.filter(r => r.status === 'Present').length;
+    const lateToday = todayAtt.rows.filter(r => r.status === 'Late').length;
+    const totalAttendanceToday = todayAtt.rows.length;
+    const absentToday = Math.max(0, parseInt(activeMembers) - presentToday - lateToday);
+    const attendancePct = activeMembers > 0 ? Math.round(((presentToday + lateToday) / activeMembers) * 100) : 0;
 
-        const total = parseInt(totalRow.rows[0]?.total || 0);
-        const present = parseInt(presentRow.rows[0]?.present || 0);
-        const absent = Math.max(0, total - present);
-        const pct = total > 0 ? ((present / total) * 100).toFixed(1) : 0;
+    const recentScans = await pool.query('SELECT a.*, m.full_name, m.position FROM attendance a JOIN members m ON a.member_id = m.member_id ORDER BY a.id DESC LIMIT 5');
+    const recentRegs = await pool.query('SELECT * FROM members ORDER BY id DESC LIMIT 5');
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
 
-        res.send(`
-            ${layoutHead('Admin Dashboard')}
-            <div class="flex h-screen overflow-hidden">
-                <div class="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between hidden md:flex">
-                    <div>
-                        <div class="p-5 border-b border-slate-800 flex items-center space-x-3">
-                            <div class="bg-indigo-600 text-white p-2 rounded-lg"><i class="fa-solid fa-qrcode"></i></div>
-                            <span class="font-bold text-white text-lg">Club QR System</span>
-                        </div>
-                        <nav class="p-4 space-y-1">
-                            <a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg bg-indigo-600 text-white font-medium"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a>
-                            <a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-users w-5"></i><span>Members</span></a>
-                            <a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a>
-                            <a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a>
-                            <a href="/admin/audit" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-clock-rotate-left w-5"></i><span>Audit Logs</span></a>
-                            <a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-gear w-5"></i><span>Settings</span></a>
-                        </nav>
-                    </div>
-                    <div class="p-4 border-t border-slate-800">
-                        <a href="/admin/logout" class="flex items-center space-x-3 px-4 py-2 rounded-lg text-rose-400 hover:bg-slate-800 transition"><i class="fa-solid fa-right-from-bracket w-5"></i><span>Logout</span></a>
-                    </div>
-                </div>
-
-                <div class="flex-1 flex flex-col overflow-y-auto">
-                    <header class="bg-white border-b h-16 flex items-center justify-between px-6 shadow-sm">
-                        <h1 class="text-xl font-bold text-slate-800">Dashboard Overview</h1>
-                        <span class="text-sm font-medium text-slate-600">Hello, Admin</span>
-                    </header>
-                    <main class="p-6 space-y-6">
-                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                            <div class="bg-white p-5 rounded-xl border shadow-sm">
-                                <p class="text-xs font-semibold text-slate-500 uppercase">Total Members</p>
-                                <h3 class="text-2xl font-bold text-slate-900 mt-1">${total}</h3>
-                                <span class="text-xs text-emerald-600 font-medium">Active: ${activeRow.rows[0]?.active || 0}</span>
-                            </div>
-                            <div class="bg-white p-5 rounded-xl border shadow-sm">
-                                <p class="text-xs font-semibold text-slate-500 uppercase">Present Today</p>
-                                <h3 class="text-2xl font-bold text-slate-900 mt-1">${present}</h3>
-                                <span class="text-xs text-slate-500 font-medium">Absent Today: ${absent}</span>
-                            </div>
-                            <div class="bg-white p-5 rounded-xl border shadow-sm">
-                                <p class="text-xs font-semibold text-slate-500 uppercase">Total Scans Today</p>
-                                <h3 class="text-2xl font-bold text-slate-900 mt-1">${todayScanRow.rows[0]?.totalToday || 0}</h3>
-                                <span class="text-xs text-indigo-600 font-medium">Live tracking</span>
-                            </div>
-                            <div class="bg-white p-5 rounded-xl border shadow-sm">
-                                <p class="text-xs font-semibold text-slate-500 uppercase">Attendance Rate</p>
-                                <h3 class="text-2xl font-bold text-slate-900 mt-1">${pct}%</h3>
-                                <span class="text-xs text-emerald-600 font-medium">Daily participation</span>
-                            </div>
-                        </div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <div class="bg-white rounded-xl border shadow-sm p-5">
-                                <h3 class="font-bold text-slate-800 mb-4">Recent Scans</h3>
-                                <table class="w-full text-left text-sm">
-                                    <thead><tr class="border-b text-xs text-slate-500 uppercase"><th class="pb-2">Name</th><th class="pb-2">Status</th><th class="pb-2">Time In</th></tr></thead>
-                                    <tbody class="divide-y">
-                                        ${recentScans.rows.map(s => `<tr><td class="py-2 font-medium">${s.full_name}</td><td class="py-2"><span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">${s.status}</span></td><td class="py-2 text-slate-500">${s.time_in || '-'}</td></tr>`).join('') || '<tr><td colspan="3" class="py-3 text-center text-slate-400">No scans yet</td></tr>'}
-                                    </tbody>
-                                </table>
-                            </div>
-                            <div class="bg-white rounded-xl border shadow-sm p-5">
-                                <h3 class="font-bold text-slate-800 mb-4">Recent Registrations</h3>
-                                <table class="w-full text-left text-sm">
-                                    <thead><tr class="border-b text-xs text-slate-500 uppercase"><th class="pb-2">ID</th><th class="pb-2">Name</th><th class="pb-2">Position</th></tr></thead>
-                                    <tbody class="divide-y">
-                                        ${recentMembers.rows.map(m => `<tr><td class="py-2 font-mono text-xs">${m.member_id}</td><td class="py-2 font-medium">${m.full_name}</td><td class="py-2 text-slate-500">${m.position}</td></tr>`).join('') || '<tr><td colspan="3" class="py-3 text-center text-slate-400">No members yet</td></tr>'}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </main>
-                </div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) {
-        console.error(e);
-        res.status(500).send('Database Error');
-    }
+    res.render('admin_dashboard', {
+      totalMembers, activeMembers, inactiveMembers, presentToday, absentToday, lateToday, totalAttendanceToday, attendancePct,
+      recentScans: recentScans.rows, recentRegs: recentRegs.rows, settings, adminUser: req.session.adminUser
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading dashboard');
+  }
 });
 
-// Members Management Page
+// --- MEMBER MANAGEMENT & REGISTRATION ---
 app.get('/admin/members', requireAdmin, async (req, res) => {
+  try {
     const search = req.query.search || '';
-    try {
-        const result = await pool.query(`SELECT * FROM members WHERE full_name ILIKE $1 OR member_id ILIKE $1 ORDER BY id DESC`, [`%${search}%`]);
-        res.send(`
-            ${layoutHead('Manage Members')}
-            <div class="flex h-screen overflow-hidden">
-                <div class="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between hidden md:flex">
-                    <div>
-                        <div class="p-5 border-b border-slate-800 flex items-center space-x-3">
-                            <div class="bg-indigo-600 text-white p-2 rounded-lg"><i class="fa-solid fa-qrcode"></i></div>
-                            <span class="font-bold text-white text-lg">Club QR System</span>
-                        </div>
-                        <nav class="p-4 space-y-1">
-                            <a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a>
-                            <a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg bg-indigo-600 text-white font-medium"><i class="fa-solid fa-users w-5"></i><span>Members</span></a>
-                            <a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a>
-                            <a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a>
-                            <a href="/admin/audit" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-clock-rotate-left w-5"></i><span>Audit Logs</span></a>
-                            <a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300 transition"><i class="fa-solid fa-gear w-5"></i><span>Settings</span></a>
-                        </nav>
-                    </div>
-                    <div class="p-4 border-t border-slate-800"><a href="/admin/logout" class="flex items-center space-x-3 px-4 py-2 rounded-lg text-rose-400 hover:bg-slate-800 transition"><i class="fa-solid fa-right-from-bracket w-5"></i><span>Logout</span></a></div>
-                </div>
-                <div class="flex-1 flex flex-col overflow-y-auto">
-                    <header class="bg-white border-b h-16 flex items-center justify-between px-6 shadow-sm">
-                        <h1 class="text-xl font-bold text-slate-800">Member Management</h1>
-                        <button onclick="document.getElementById('addModal').classList.remove('hidden')" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-700 transition"><i class="fa-solid fa-user-plus mr-2"></i>Add Member</button>
-                    </header>
-                    <main class="p-6 space-y-6">
-                        <div class="bg-white rounded-xl border shadow-sm p-4">
-                            <form action="/admin/members" method="GET" class="flex gap-4">
-                                <input type="text" name="search" value="${search}" placeholder="Search by name or ID..." class="flex-1 px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-indigo-500">
-                                <button type="submit" class="bg-slate-800 text-white px-5 py-2 rounded-lg font-semibold text-sm">Search</button>
-                            </form>
-                        </div>
-                        <div class="bg-white rounded-xl border shadow-sm overflow-hidden">
-                            <table class="w-full text-left text-sm">
-                                <thead class="bg-slate-50 border-b text-xs text-slate-500 uppercase">
-                                    <tr><th class="p-4">Member ID</th><th class="p-4">Full Name</th><th class="p-4">Position</th><th class="p-4">Course / Section</th><th class="p-4">Status</th><th class="p-4 text-right">Actions</th></tr>
-                                </thead>
-                                <tbody class="divide-y">
-                                    ${result.rows.map(m => `
-                                        <tr>
-                                            <td class="p-4 font-mono text-xs">${m.member_id}</td>
-                                            <td class="p-4 font-medium">${m.full_name}</td>
-                                            <td class="p-4 text-slate-600">${m.position}</td>
-                                            <td class="p-4 text-slate-600">${m.course} - ${m.section}</td>
-                                            <td class="p-4"><span class="px-2 py-0.5 rounded text-xs ${m.status === 'Active' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}">${m.status}</span></td>
-                                            <td class="p-4 text-right space-x-2">
-                                                <a href="/admin/members/id/${m.id}" class="text-indigo-600 hover:underline text-xs font-semibold"><i class="fa-solid fa-id-card"></i> ID</a>
-                                                <a href="/admin/members/toggle/${m.id}" class="text-amber-600 hover:underline text-xs font-semibold">${m.status === 'Active' ? 'Deactivate' : 'Activate'}</a>
-                                                <a href="/admin/members/reset/${m.id}" class="text-blue-600 hover:underline text-xs font-semibold" onclick="return confirm('Reset temporary password?')">Reset Pwd</a>
-                                                <a href="/admin/members/delete/${m.id}" class="text-rose-600 hover:underline text-xs font-semibold" onclick="return confirm('Delete member?')">Delete</a>
-                                            </td>
-                                        </tr>
-                                    `).join('') || '<tr><td colspan="6" class="p-4 text-center text-slate-400">No members found</td></tr>'}
-                                </tbody>
-                            </table>
-                        </div>
-                    </main>
-                </div>
-            </div>
-            <!-- Add Modal -->
-            <div id="addModal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center p-4 z-50">
-                <div class="bg-white rounded-2xl max-w-xl w-full p-6 max-h-[90vh] overflow-y-auto">
-                    <div class="flex justify-between items-center mb-4"><h3 class="font-bold text-lg text-slate-800">Add New Member</h3><button onclick="document.getElementById('addModal').classList.add('hidden')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-lg"></i></button></div>
-                    <form action="/admin/members/add" method="POST" class="space-y-4">
-                        <div class="grid grid-cols-2 gap-4">
-                            <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Full Name</label><input type="text" name="full_name" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                            <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Position</label><input type="text" name="position" value="Member" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                        </div>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Year Level</label><input type="text" name="year_level" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                            <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Course / Program</label><input type="text" name="course" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                        </div>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Section</label><input type="text" name="section" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                            <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Contact Number</label><input type="text" name="contact" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                        </div>
-                        <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Email Address</label><input type="email" name="email" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                        <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Profile Photo URL</label><input type="text" name="photo" placeholder="https://..." class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                        <button type="submit" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-semibold hover:bg-indigo-700 transition">Create Member & Generate ID</button>
-                    </form>
-                </div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) { res.status(500).send('Database Error'); }
+    const statusFilter = req.query.status || '';
+    let query = 'SELECT * FROM members WHERE (full_name ILIKE $1 OR member_id ILIKE $1 OR username ILIKE $1)';
+    let params = [`%${search}%`];
+
+    if (statusFilter) {
+      query += ' AND status = $2';
+      params.push(statusFilter);
+    }
+    query += ' ORDER BY id DESC';
+
+    const members = await pool.query(query, params);
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+    res.render('admin_members', { members: members.rows, search, statusFilter, settings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error fetching members');
+  }
 });
 
-// Add Member
 app.post('/admin/members/add', requireAdmin, async (req, res) => {
-    const { full_name, position, year_level, course, section, contact, email, photo } = req.body;
-    const year = new Date().getFullYear();
-    const randomNum = Math.floor(100 + Math.random() * 900);
-    const member_id = `CLUB-${year}-${randomNum}`;
-    const username = `MEM-${year}-${Math.floor(1000 + Math.random() * 9000)}`;
+  try {
+    const { full_name, position, club, year_level, course, section, contact, email, status } = req.body;
+    
+    // Generate unique member ID and credentials
+    const countRes = await pool.query('SELECT COUNT(*) FROM members');
+    const nextIdNum = parseInt(countRes.rows[0].count) + 1;
+    const yearStr = new Date().getFullYear();
+    const member_id = `MEM-${yearStr}-${String(nextIdNum).padStart(3, '0')}`;
+    const username = `CLUB-${yearStr}-${String(nextIdNum).padStart(3, '0')}`;
     const tempPassword = Math.random().toString(36).substring(2, 10).toUpperCase();
     const password_hash = await bcrypt.hash(tempPassword, 10);
-    const qr_token = member_id + '-' + crypto.randomBytes(4).toString('hex');
-    const date_joined = new Date().toISOString().split('T')[0];
-    const profilePhoto = photo || 'https://api.iconify.design/lucide:user.svg?color=%2394a3b8';
+    const qr_token = `${member_id}-${crypto.randomBytes(8).toString('hex')}`;
 
-    try {
-        const ins = await pool.query(
-            `INSERT INTO members (member_id, full_name, position, club, year_level, course, section, contact, email, photo, username, password_hash, temporary_password_status, qr_token, status, date_joined) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, 'Active', $14) RETURNING id`,
-            [member_id, full_name, position, 'Supreme Student Council', year_level, course, section, contact, email, profilePhoto, username, password_hash, qr_token, date_joined]
-        );
-        logAction(`Created member: ${full_name} (${member_id})`, req.session.adminUser);
-        res.redirect(`/admin/members/id/${ins.rows[0].id}?new=true&user=${username}&pass=${tempPassword}`);
-    } catch(e) {
-        console.error(e);
-        res.send(`<script>alert('Error creating member.'); window.location='/admin/members';</script>`);
+    await pool.query(
+      `INSERT INTO members (member_id, full_name, position, club, year_level, course, section, contact, email, username, password_hash, qr_token, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [member_id, full_name, position, club, year_level, course, section, contact, email, username, password_hash, qr_token, status || 'Active']
+    );
+
+    await logAudit(`Registered member: ${full_name} (${member_id})`, req.session.adminUser);
+
+    // Render success modal popup with credentials & ID card view capability
+    res.send(`
+      <html>
+        <head><title>Member Created</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+        <body style="font-family:sans-serif; background:#f4f7f6; padding:30px; text-align:center;">
+          <div style="background:white; max-width:600px; margin:0 auto; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">
+            <h2 style="color:#27ae60;">✓ MEMBER CREATED SUCCESSFULLY</h2>
+            <p>Please safely record or print the portal temporary credentials below:</p>
+            <div style="background:#f8f9fa; padding:15px; border-radius:6px; text-align:left; margin-bottom:20px; border:1px solid #ddd;">
+              <p><strong>Member ID:</strong> ${member_id}</p>
+              <p><strong>TEMPORARY USERNAME:</strong> <span style="color:#d9534f; font-weight:bold;">${username}</span></p>
+              <p><strong>TEMPORARY PASSWORD:</strong> <span style="color:#d9534f; font-weight:bold;">${tempPassword}</span></p>
+              <p style="font-size:12px; color:#e67e22; margin-top:10px;">⚠️ Member must change this temporary password after their first login.</p>
+            </div>
+            <a href="/admin/members/id/${member_id}" target="_blank" style="display:inline-block; padding:12px 20px; background:#3498db; color:white; text-decoration:none; border-radius:5px; font-weight:bold; margin-right:10px;">View & Print ID Card</a>
+            <a href="/admin/members" style="display:inline-block; padding:12px 20px; background:#7f8c8d; color:white; text-decoration:none; border-radius:5px; font-weight:bold;">Back to Members</a>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error creating member: ' + err.message);
+  }
+});
+
+// Printable CR80 Standard ID Card Route
+app.get('/admin/members/id/:member_id', requireAdmin, async (req, res) => {
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE member_id = $1', [req.params.member_id]);
+    if (memberRes.rows.length === 0) return res.status(404).send('Member not found');
+    const member = memberRes.rows[0];
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+    const schoolYear = new Date().getFullYear() + '-' + (new Date().getFullYear() + 1);
+
+    res.render('member_id_card', { member, settings, schoolYear });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading ID card');
+  }
+});
+
+app.post('/admin/members/reset-password/:id', requireAdmin, async (req, res) => {
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE id = $1', [req.params.id]);
+    if (memberRes.rows.length === 0) return res.status(404).send('Member not found');
+    const member = memberRes.rows[0];
+
+    const newTempPass = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const hash = await bcrypt.hash(newTempPass, 10);
+
+    await pool.query('UPDATE members SET password_hash = $1, temporary_password_status = TRUE WHERE id = $2', [hash, req.params.id]);
+    await logAudit(`Reset password for member: ${member.full_name}`, req.session.adminUser);
+
+    res.send(`
+      <html><head><title>Password Reset</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family:sans-serif; text-align:center; padding:50px;">
+        <div style="max-width:400px; margin:0 auto; background:white; padding:30px; border-radius:8px; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
+          <h3>Password Reset Successful</h3>
+          <p>New Temporary Password for <strong>${member.full_name}</strong>:</p>
+          <h2 style="color:#d9534f; background:#f8f9fa; padding:10px; border:1px solid #ddd;">${newTempPass}</h2>
+          <p style="font-size:12px; color:#e67e22;">User must change this upon next login.</p>
+          <a href="/admin/members" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#3498db; color:white; text-decoration:none; border-radius:4px;">Back to Members</a>
+        </div>
+      </body></html>
+    `);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error resetting password');
+  }
+});
+
+app.post('/admin/members/regenerate-qr/:id', requireAdmin, async (req, res) => {
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE id = $1', [req.params.id]);
+    if (memberRes.rows.length === 0) return res.status(404).send('Member not found');
+    const member = memberRes.rows[0];
+
+    const newQrToken = `${member.member_id}-${crypto.randomBytes(8).toString('hex')}`;
+    await pool.query('UPDATE members SET qr_token = $1 WHERE id = $2', [newQrToken, req.params.id]);
+    await logAudit(`Regenerated QR code for member: ${member.full_name}`, req.session.adminUser);
+
+    res.redirect('/admin/members');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error regenerating QR code');
+  }
+});
+
+app.post('/admin/members/status/:id', requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    await pool.query('UPDATE members SET status = $1 WHERE id = $2', [status, req.params.id]);
+    await logAudit(`Updated member status to ${status} for ID ${req.params.id}`, req.session.adminUser);
+    res.redirect('/admin/members');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error updating status');
+  }
+});
+
+app.post('/admin/members/delete/:id', requireAdmin, async (req, res) => {
+  try {
+    const memberRes = await pool.query('SELECT full_name FROM members WHERE id = $1', [req.params.id]);
+    if (memberRes.rows.length > 0) {
+      await logAudit(`Deleted member: ${memberRes.rows[0].full_name}`, req.session.adminUser);
     }
+    await pool.query('DELETE FROM members WHERE id = $1', [req.params.id]);
+    res.redirect('/admin/members');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error deleting member');
+  }
 });
 
-// Member ID View
-app.get('/admin/members/id/:id', requireAdmin, async (req, res) => {
-    const isNew = req.query.new === 'true';
-    const tempUser = req.query.user || '';
-    const tempPass = req.query.pass || '';
-    try {
-        const memRes = await pool.query(`SELECT * FROM members WHERE id = $1`, [req.params.id]);
-        const member = memRes.rows[0];
-        if (!member) return res.redirect('/admin/members');
-
-        const setRes = await pool.query(`SELECT school_name FROM settings LIMIT 1`);
-        const qrDataUrl = await QRCode.toDataURL(member.qr_token);
-
-        res.send(`
-            ${layoutHead('Member ID Card')}
-            <div class="min-h-screen bg-slate-100 flex flex-col items-center justify-center p-4">
-                ${isNew ? `<div class="mb-6 bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center max-w-md w-full"><h3 class="font-bold text-emerald-800 text-lg mb-1">Member Created Successfully!</h3><div class="bg-white p-3 rounded border text-left font-mono text-xs space-y-1 mt-2"><div><strong>Username:</strong> ${tempUser}</div><div><strong>Temp Password:</strong> ${tempPass}</div></div></div>` : ''}
-                <div id="printable-id-card" class="cr80-card flex flex-col justify-between p-4 bg-gradient-to-br from-indigo-900 to-slate-900 text-white">
-                    <div class="flex justify-between items-center border-b border-white/10 pb-2"><div class="text-[10px] uppercase font-semibold text-indigo-200">${setRes.rows[0]?.school_name || ''}</div><div class="text-[10px] bg-indigo-600 px-2 py-0.5 rounded">${member.position}</div></div>
-                    <div class="flex items-center space-x-3 my-auto"><img src="${member.photo}" class="w-16 h-16 rounded-full object-cover border-2 border-white/20"><div><h2 class="font-bold text-sm leading-tight">${member.full_name}</h2><p class="text-[10px] text-indigo-300">${member.course} - ${member.section}</p><p class="text-[9px] font-mono mt-1 text-slate-300">ID: ${member.member_id}</p></div><div class="ml-auto bg-white p-1 rounded"><img src="${qrDataUrl}" class="w-14 h-14"></div></div>
-                    <div class="text-[8px] text-center text-slate-400 border-t border-white/10 pt-1">Official Membership ID Card</div>
-                </div>
-                <div class="mt-6 flex space-x-3"><button onclick="window.print()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-700 transition">Print ID</button><a href="/admin/members" class="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-semibold">Back to Members</a></div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) { res.redirect('/admin/members'); }
-});
-
-// Toggle Status
-app.get('/admin/members/toggle/:id', requireAdmin, async (req, res) => {
-    try {
-        const m = await pool.query(`SELECT status, full_name FROM members WHERE id = $1`, [req.params.id]);
-        if (m.rows.length > 0) {
-            const newStatus = m.rows[0].status === 'Active' ? 'Inactive' : 'Active';
-            await pool.query(`UPDATE members SET status = $1 WHERE id = $2`, [newStatus, req.params.id]);
-            logAction(`Toggled status: ${m.rows[0].full_name} to ${newStatus}`, req.session.adminUser);
-        }
-        res.redirect('/admin/members');
-    } catch(e) { res.redirect('/admin/members'); }
-});
-
-// Reset Password
-app.get('/admin/members/reset/:id', requireAdmin, async (req, res) => {
-    try {
-        const tempPassword = Math.random().toString(36).substring(2, 10).toUpperCase();
-        const password_hash = await bcrypt.hash(tempPassword, 10);
-        const m = await pool.query(`SELECT full_name FROM members WHERE id = $1`, [req.params.id]);
-        if (m.rows.length > 0) {
-            await pool.query(`UPDATE members SET password_hash = $1, temporary_password_status = 1 WHERE id = $2`, [password_hash, req.params.id]);
-            logAction(`Reset password for member: ${m.rows[0].full_name}`, req.session.adminUser);
-            res.send(`<script>alert('New Temporary Password: ${tempPassword}'); window.location='/admin/members';</script>`);
-        } else { res.redirect('/admin/members'); }
-    } catch(e) { res.redirect('/admin/members'); }
-});
-
-// Delete Member
-app.get('/admin/members/delete/:id', requireAdmin, async (req, res) => {
-    try {
-        const m = await pool.query(`SELECT full_name FROM members WHERE id = $1`, [req.params.id]);
-        await pool.query(`DELETE FROM members WHERE id = $1`, [req.params.id]);
-        if (m.rows.length > 0) logAction(`Deleted member: ${m.rows[0].full_name}`, req.session.adminUser);
-        res.redirect('/admin/members');
-    } catch(e) { res.redirect('/admin/members'); }
-});
-
-// Attendance Page
+// --- ATTENDANCE MANAGEMENT & REPORTS ---
 app.get('/admin/attendance', requireAdmin, async (req, res) => {
-    try {
-        const records = await pool.query(`SELECT a.*, m.full_name, m.position FROM attendance a JOIN members m ON a.member_id = m.member_id ORDER BY a.id DESC`);
-        res.send(`
-            ${layoutHead('Attendance Records')}
-            <div class="flex h-screen overflow-hidden">
-                <div class="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between hidden md:flex">
-                    <div>
-                        <div class="p-5 border-b border-slate-800 flex items-center space-x-3"><div class="bg-indigo-600 text-white p-2 rounded-lg"><i class="fa-solid fa-qrcode"></i></div><span class="font-bold text-white text-lg">Club QR System</span></div>
-                        <nav class="p-4 space-y-1"><a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a><a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-users w-5"></i><span>Members</span></a><a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg bg-indigo-600 text-white font-medium"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a><a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a><a href="/admin/audit" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-clock-rotate-left w-5"></i><span>Audit Logs</span></a><a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-gear w-5"></i><span>Settings</span></a></nav>
-                    </div>
-                    <div class="p-4 border-t border-slate-800"><a href="/admin/logout" class="text-rose-400 text-sm">Logout</a></div>
-                </div>
-                <div class="flex-1 flex flex-col overflow-y-auto">
-                    <header class="bg-white border-b h-16 flex items-center justify-between px-6 shadow-sm"><h1 class="text-xl font-bold text-slate-800">Attendance Log</h1><button onclick="window.print()" class="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-semibold">Print Report</button></header>
-                    <main class="p-6">
-                        <div class="bg-white rounded-xl border shadow-sm overflow-hidden">
-                            <table class="w-full text-left text-sm">
-                                <thead class="bg-slate-50 border-b text-xs text-slate-500 uppercase"><tr><th class="p-4">Date</th><th class="p-4">Member ID</th><th class="p-4">Name</th><th class="p-4">Time In</th><th class="p-4">Time Out</th><th class="p-4">Status</th></tr></thead>
-                                <tbody class="divide-y">
-                                    ${records.rows.map(r => `<tr><td class="p-4">${r.date}</td><td class="p-4 font-mono text-xs">${r.member_id}</td><td class="p-4 font-medium">${r.full_name}</td><td class="p-4 text-slate-600">${r.time_in || '-'}</td><td class="p-4 text-slate-600">${r.time_out || '-'}</td><td class="p-4"><span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">${r.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="p-4 text-center text-slate-400">No attendance records found</td></tr>'}
-                                </tbody>
-                            </table>
-                        </div>
-                    </main>
-                </div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) { res.status(500).send('Error'); }
+  try {
+    const { date, search, status } = req.query;
+    let query = `SELECT a.*, m.full_name, m.position, m.club FROM attendance a JOIN members m ON a.member_id = m.member_id WHERE 1=1`;
+    let params = [];
+
+    if (date) {
+      params.push(date);
+      query += ` AND a.date = $${params.length}`;
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      query += ` AND (m.full_name ILIKE $${params.length} OR m.member_id ILIKE $${params.length})`;
+    }
+    if (status) {
+      params.push(status);
+      query += ` AND a.status = $${params.length}`;
+    }
+
+    query += ` ORDER BY a.id DESC`;
+    const attendance = await pool.query(query, params);
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+
+    res.render('admin_attendance', { attendance: attendance.rows, queryParams: req.query, settings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading attendance table');
+  }
 });
 
-// Announcements
+app.get('/admin/reports', requireAdmin, async (req, res) => {
+  try {
+    const totalMembers = (await pool.query('SELECT COUNT(*) FROM members')).rows[0].count;
+    const totalScans = (await pool.query('SELECT COUNT(*) FROM attendance')).rows[0].count;
+    const presentCount = (await pool.query("SELECT COUNT(*) FROM attendance WHERE status='Present'")).rows[0].count;
+    const lateCount = (await pool.query("SELECT COUNT(*) FROM attendance WHERE status='Late'")).rows[0].count;
+    const absentCount = Math.max(0, parseInt(totalMembers) - parseInt(presentCount) - parseInt(lateCount));
+    const attendanceRate = totalMembers > 0 ? Math.round(((parseInt(presentCount) + parseInt(lateCount)) / parseInt(totalMembers)) * 100) : 0;
+
+    const lateMembers = await pool.query("SELECT DISTINCT m.full_name, m.member_id, m.position FROM attendance a JOIN members m ON a.member_id = m.member_id WHERE a.status='Late'");
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+
+    res.render('admin_reports', {
+      totalMembers, totalScans, presentCount, lateCount, absentCount, attendanceRate,
+      lateMembers: lateMembers.rows, settings
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error generating reports');
+  }
+});
+
+// --- ANNOUNCEMENTS ---
 app.get('/admin/announcements', requireAdmin, async (req, res) => {
-    try {
-        const items = await pool.query(`SELECT * FROM announcements ORDER BY id DESC`);
-        res.send(`
-            ${layoutHead('Announcements')}
-            <div class="flex h-screen overflow-hidden">
-                <div class="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between hidden md:flex">
-                    <div>
-                        <div class="p-5 border-b border-slate-800 flex items-center space-x-3"><div class="bg-indigo-600 text-white p-2 rounded-lg"><i class="fa-solid fa-qrcode"></i></div><span class="font-bold text-white text-lg">Club QR System</span></div>
-                        <nav class="p-4 space-y-1"><a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a><a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-users w-5"></i><span>Members</span></a><a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a><a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg bg-indigo-600 text-white font-medium"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a><a href="/admin/audit" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-clock-rotate-left w-5"></i><span>Audit Logs</span></a><a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-gear w-5"></i><span>Settings</span></a></nav>
-                    </div>
-                    <div class="p-4 border-t border-slate-800"><a href="/admin/logout" class="text-rose-400 text-sm">Logout</a></div>
-                </div>
-                <div class="flex-1 flex flex-col overflow-y-auto">
-                    <header class="bg-white border-b h-16 flex items-center px-6 shadow-sm"><h1 class="text-xl font-bold text-slate-800">Announcements</h1></header>
-                    <main class="p-6 space-y-6">
-                        <div class="bg-white p-6 rounded-xl border shadow-sm max-w-xl">
-                            <h3 class="font-bold text-slate-800 mb-4">Post Announcement</h3>
-                            <form action="/admin/announcements" method="POST" class="space-y-4">
-                                <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Title</label><input type="text" name="title" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                                <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Message</label><textarea name="message" rows="3" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></textarea></div>
-                                <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold text-sm">Post</button>
-                            </form>
-                        </div>
-                        <div class="space-y-4 max-w-xl">
-                            ${items.rows.map(i => `<div class="bg-white p-4 rounded-xl border shadow-sm"><h4 class="font-bold text-slate-800">${i.title}</h4><p class="text-sm text-slate-600 mt-2">${i.message}</p></div>`).join('') || '<p class="text-slate-400">No announcements</p>'}
-                        </div>
-                    </main>
-                </div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) { res.status(500).send('Error'); }
+  try {
+    const announcements = await pool.query('SELECT * FROM announcements ORDER BY id DESC');
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+    res.render('admin_announcements', { announcements: announcements.rows, settings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading announcements');
+  }
 });
 
-app.post('/admin/announcements', requireAdmin, async (req, res) => {
-    const { title, message } = req.body;
-    try {
-        await pool.query(`INSERT INTO announcements (title, message) VALUES ($1, $2)`, [title, message]);
-        logAction(`Created announcement: ${title}`, req.session.adminUser);
-        res.redirect('/admin/announcements');
-    } catch(e) { res.redirect('/admin/announcements'); }
+app.post('/admin/announcements/add', requireAdmin, async (req, res) => {
+  try {
+    const { title, message, status } = req.body;
+    await pool.query('INSERT INTO announcements (title, message, status) VALUES ($1, $2, $3)', [title, message, status || 'Active']);
+    await logAudit(`Created announcement: ${title}`, req.session.adminUser);
+    res.redirect('/admin/announcements');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error saving announcement');
+  }
 });
 
-// Audit Logs
-app.get('/admin/audit', requireAdmin, async (req, res) => {
-    try {
-        const logs = await pool.query(`SELECT * FROM audit_logs ORDER BY id DESC`);
-        res.send(`
-            ${layoutHead('Audit Logs')}
-            <div class="flex h-screen overflow-hidden">
-                <div class="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between hidden md:flex">
-                    <div>
-                        <div class="p-5 border-b border-slate-800 flex items-center space-x-3"><div class="bg-indigo-600 text-white p-2 rounded-lg"><i class="fa-solid fa-qrcode"></i></div><span class="font-bold text-white text-lg">Club QR System</span></div>
-                        <nav class="p-4 space-y-1"><a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a><a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-users w-5"></i><span>Members</span></a><a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a><a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a><a href="/admin/audit" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg bg-indigo-600 text-white font-medium"><i class="fa-solid fa-clock-rotate-left w-5"></i><span>Audit Logs</span></a><a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-gear w-5"></i><span>Settings</span></a></nav>
-                    </div>
-                    <div class="p-4 border-t border-slate-800"><a href="/admin/logout" class="text-rose-400 text-sm">Logout</a></div>
-                </div>
-                <div class="flex-1 flex flex-col overflow-y-auto">
-                    <header class="bg-white border-b h-16 flex items-center px-6 shadow-sm"><h1 class="text-xl font-bold text-slate-800">System Audit Logs</h1></header>
-                    <main class="p-6">
-                        <div class="bg-white rounded-xl border shadow-sm overflow-hidden">
-                            <table class="w-full text-left text-sm">
-                                <thead class="bg-slate-50 border-b text-xs text-slate-500 uppercase"><tr><th class="p-4">Action</th><th class="p-4">Admin User</th><th class="p-4">Date</th><th class="p-4">Time</th></tr></thead>
-                                <tbody class="divide-y">
-                                    ${logs.rows.map(l => `<tr><td class="p-4 font-medium">${l.action}</td><td class="p-4 text-slate-600">${l.user_name}</td><td class="p-4 text-slate-500">${l.date}</td><td class="p-4 text-slate-500">${l.time}</td></tr>`).join('') || '<tr><td colspan="4" class="p-4 text-center text-slate-400">No logs</td></tr>'}
-                                </tbody>
-                            </table>
-                        </div>
-                    </main>
-                </div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) { res.status(500).send('Error'); }
+app.post('/admin/announcements/delete/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM announcements WHERE id = $1', [req.params.id]);
+    res.redirect('/admin/announcements');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error deleting announcement');
+  }
 });
 
-// Settings
+// --- SETTINGS & AUDIT LOGS ---
 app.get('/admin/settings', requireAdmin, async (req, res) => {
-    try {
-        const settings = await pool.query(`SELECT * FROM settings LIMIT 1`);
-        res.send(`
-            ${layoutHead('Settings')}
-            <div class="flex h-screen overflow-hidden">
-                <div class="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between hidden md:flex">
-                    <div>
-                        <div class="p-5 border-b border-slate-800 flex items-center space-x-3"><div class="bg-indigo-600 text-white p-2 rounded-lg"><i class="fa-solid fa-qrcode"></i></div><span class="font-bold text-white text-lg">Club QR System</span></div>
-                        <nav class="p-4 space-y-1"><a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-chart-pie w-5"></i><span>Dashboard</span></a><a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-users w-5"></i><span>Members</span></a><a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-clipboard-user w-5"></i><span>Attendance</span></a><a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-bullhorn w-5"></i><span>Announcements</span></a><a href="/admin/audit" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg hover:bg-slate-800 text-slate-300"><i class="fa-solid fa-clock-rotate-left w-5"></i><span>Audit Logs</span></a><a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg bg-indigo-600 text-white font-medium"><i class="fa-solid fa-gear w-5"></i><span>Settings</span></a></nav>
-                    </div>
-                    <div class="p-4 border-t border-slate-800"><a href="/admin/logout" class="text-rose-400 text-sm">Logout</a></div>
-                </div>
-                <div class="flex-1 flex flex-col overflow-y-auto">
-                    <header class="bg-white border-b h-16 flex items-center px-6 shadow-sm"><h1 class="text-xl font-bold text-slate-800">System Configuration</h1></header>
-                    <main class="p-6">
-                        <div class="bg-white p-6 rounded-xl border shadow-sm max-w-xl">
-                            <form action="/admin/settings" method="POST" class="space-y-4">
-                                <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Organization Name</label><input type="text" name="organization_name" value="${settings.rows[0]?.organization_name || ''}" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                                <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">School Name</label><input type="text" name="school_name" value="${settings.rows[0]?.school_name || ''}" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                                <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Attendance Start Time</label><input type="text" name="attendance_start" value="${settings.rows[0]?.attendance_start || '08:00'}" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                                <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Grace Period (Minutes)</label><input type="number" name="grace_period" value="${settings.rows[0]?.grace_period || 15}" required class="w-full px-3 py-2 border rounded-lg text-sm outline-none"></div>
-                                <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold text-sm">Save Settings</button>
-                            </form>
-                        </div>
-                    </main>
-                </div>
-            </div>
-            </body></html>
-        `);
-    } catch(e) { res.status(500).send('Error'); }
+  try {
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+    const auditLogs = await pool.query('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 50');
+    res.render('admin_settings', { settings, auditLogs: auditLogs.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading settings');
+  }
 });
 
 app.post('/admin/settings', requireAdmin, async (req, res) => {
-    const { organization_name, school_name, attendance_start, grace_period } = req.body;
-    try {
-        await pool.query(`UPDATE settings SET organization_name = $1, school_name = $2, attendance_start = $3, grace_period = $4`, [organization_name, school_name, attendance_start, grace_period]);
-        logAction(`Updated system settings`, req.session.adminUser);
-        res.redirect('/admin/settings');
-    } catch(e) { res.redirect('/admin/settings'); }
-});
+  try {
+    const { organization_name, school_name, logo, attendance_start, grace_period, scanner_pin, admin_password } = req.body;
+    await pool.query(
+      `UPDATE settings SET organization_name = $1, school_name = $2, logo = $3, attendance_start = $4, grace_period = $5, scanner_pin = $6 WHERE id = 1`,
+      [organization_name, school_name, logo, attendance_start, parseInt(grace_period), scanner_pin]
+    );
 
-// Scanner Portal
-app.get('/scanner', (req, res) => {
-    res.send(`
-        ${layoutHead('Scanner Portal')}
-        <div class="min-h-screen bg-slate-900 text-white flex flex-col justify-between p-4">
-            <div class="flex justify-between items-center max-w-md mx-auto w-full pt-2">
-                <h1 class="font-bold text-lg"><i class="fa-solid fa-camera text-indigo-400 mr-2"></i>Scanner Portal</h1>
-                <div class="flex bg-slate-800 p-1 rounded-lg text-xs font-semibold">
-                    <button onclick="setMode('IN')" id="btn-in" class="px-3 py-1.5 rounded bg-indigo-600 text-white transition">TIME IN</button>
-                    <button onclick="setMode('OUT')" id="btn-out" class="px-3 py-1.5 rounded text-slate-400 transition">TIME OUT</button>
-                </div>
-            </div>
-            <div class="max-w-md mx-auto w-full my-auto text-center space-y-4">
-                <div id="reader" class="overflow-hidden rounded-2xl border-2 border-indigo-500/50 bg-black"></div>
-                <div id="scan-result" class="p-4 rounded-xl bg-slate-800 border border-slate-700 min-h-[90px] flex flex-col justify-center items-center"><p class="text-sm text-slate-400">Position QR code inside scanner frame</p></div>
-            </div>
-            <div class="text-center text-xs text-slate-500 pb-2">School Club QR Attendance System</div>
-        </div>
-        <script>
-            let currentMode = 'IN';
-            function setMode(mode) {
-                currentMode = mode;
-                document.getElementById('btn-in').className = mode === 'IN' ? 'px-3 py-1.5 rounded bg-indigo-600 text-white transition' : 'px-3 py-1.5 rounded text-slate-400 transition';
-                document.getElementById('btn-out').className = mode === 'OUT' ? 'px-3 py-1.5 rounded bg-indigo-600 text-white transition' : 'px-3 py-1.5 rounded text-slate-400 transition';
-            }
-            let isProcessing = false;
-            function onScanSuccess(decodedText) {
-                if(isProcessing) return;
-                isProcessing = true;
-                fetch('/scanner/process', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token: decodedText, mode: currentMode })
-                })
-                .then(res => res.json())
-                .then(data => {
-                    const resBox = document.getElementById('scan-result');
-                    if(data.success) {
-                        resBox.className = 'p-4 rounded-xl bg-emerald-950 border border-emerald-600 flex flex-col justify-center items-center';
-                        resBox.innerHTML = \`<div class="font-bold text-emerald-400 text-sm">✓ \${data.message}</div><div class="text-xs text-white mt-1">\${data.name} (\${data.position})</div>\`;
-                    } else {
-                        resBox.className = 'p-4 rounded-xl bg-rose-950 border border-rose-600 flex flex-col justify-center items-center';
-                        resBox.innerHTML = \`<div class="font-bold text-rose-400 text-sm">✕ \${data.message}</div>\`;
-                    }
-                    setTimeout(() => { isProcessing = false; }, 2500);
-                }).catch(() => { isProcessing = false; });
-            }
-            const html5QrCode = new Html5Qrcode("reader");
-            html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScanSuccess, err => {});
-        </script>
-        </body></html>
-    `);
-});
-
-// Scanner Process API
-app.post('/scanner/process', async (req, res) => {
-    const { token, mode } = req.body;
-    try {
-        const memRes = await pool.query(`SELECT * FROM members WHERE qr_token = $1`, [token]);
-        const member = memRes.rows[0];
-        if (!member) return res.json({ success: false, message: 'Invalid QR Code. Not registered.' });
-        if (member.status !== 'Active') return res.json({ success: false, message: 'Member account is inactive.' });
-
-        const today = new Date().toISOString().split('T')[0];
-        const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-        const attRes = await pool.query(`SELECT * FROM attendance WHERE member_id = $1 AND date = $2`, [member.member_id, today]);
-        const att = attRes.rows[0];
-
-        if (mode === 'IN') {
-            if (att && att.time_in) return res.json({ success: false, message: 'Already Timed In Today' });
-            if (att) {
-                await pool.query(`UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3`, [timeNow, 'Present', att.id]);
-            } else {
-                await pool.query(`INSERT INTO attendance (member_id, date, time_in, status) VALUES ($1, $2, $3, $4)`, [member.member_id, today, timeNow, 'Present']);
-            }
-            res.json({ success: true, message: 'TIME IN RECORDED', name: member.full_name, position: member.position, time: timeNow });
-        } else {
-            if (!att || !att.time_in) return res.json({ success: false, message: 'No Time-In Record Found' });
-            if (att.time_out) return res.json({ success: false, message: 'Already Timed Out' });
-            await pool.query(`UPDATE attendance SET time_out = $1 WHERE id = $2`, [timeNow, att.id]);
-            res.json({ success: true, message: 'TIME OUT RECORDED', name: member.full_name, position: member.position, time: timeNow });
-        }
-    } catch(e) {
-        res.json({ success: false, message: 'Server error processing scan' });
+    if (admin_password && admin_password.trim() !== '') {
+      const hash = await bcrypt.hash(admin_password, 10);
+      await pool.query('UPDATE admins SET password_hash = $1 WHERE username = $2', [hash, req.session.adminUser]);
     }
+
+    await logAudit('Updated organization settings & configurations', req.session.adminUser);
+    res.redirect('/admin/settings');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error updating settings');
+  }
 });
 
-// Member Portal
-app.get('/member', (req, res) => {
-    if (req.session.memberId) return res.redirect('/member/dashboard');
-    res.send(`
-        ${layoutHead('Member Portal Login')}
-        <div class="flex items-center justify-center min-h-screen p-4">
-            <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border">
-                <div class="text-center mb-6"><div class="bg-amber-600 text-white w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3 text-xl"><i class="fa-solid fa-users"></i></div><h1 class="text-2xl font-bold text-slate-900">Member Portal</h1><p class="text-sm text-slate-500">Sign in with credentials</p></div>
-                <form action="/member/login" method="POST" class="space-y-4">
-                    <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Username</label><input type="text" name="username" required class="w-full px-4 py-2 border rounded-lg outline-none"></div>
-                    <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Password</label><input type="password" name="password" required class="w-full px-4 py-2 border rounded-lg outline-none"></div>
-                    <button type="submit" class="w-full bg-amber-600 text-white py-2.5 rounded-lg font-semibold hover:bg-amber-700 transition">Member Login</button>
-                </form>
+app.get('/admin/backup', requireAdmin, async (req, res) => {
+  try {
+    const members = (await pool.query('SELECT * FROM members')).rows;
+    const attendance = (await pool.query('SELECT * FROM attendance')).rows;
+    const settings = (await pool.query('SELECT * FROM settings')).rows;
+    
+    const backupData = {
+      exportDate: new Date().toISOString(),
+      settings,
+      members,
+      attendance
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename=club_attendance_backup.json');
+    res.send(JSON.stringify(backupData, null, 2));
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error backing up database');
+  }
+});
+
+
+// ==========================================
+// ROUTES: SEPARATE SCANNER PORTAL (/scanner)
+// ==========================================
+
+app.get('/scanner', async (req, res) => {
+  try {
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+    res.render('scanner', { settings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading scanner portal');
+  }
+});
+
+// API Endpoint processing QR attendance scan events from smartphone camera
+app.post('/api/scan', async (req, res) => {
+  const { token, mode } = req.body; // mode: 'Time In' or 'Time Out'
+  if (!token) return res.json({ success: false, message: 'Invalid QR Token payload.' });
+
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [token]);
+    if (memberRes.rows.length === 0) {
+      return res.json({ success: false, errorType: 'INVALID', message: '✕ INVALID QR CODE: Not registered in system.' });
+    }
+
+    const member = memberRes.rows[0];
+    if (member.status !== 'Active') {
+      return res.json({ success: false, errorType: 'INACTIVE', message: 'MEMBER INACTIVE: Attendance denied.' });
+    }
+
+    const todayDateStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const currentTimeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+    const attCheck = await pool.query('SELECT * FROM attendance WHERE member_id = $1 AND date = $2', [member.member_id, todayDateStr]);
+    
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+
+    if (mode === 'Time In') {
+      if (attCheck.rows.length > 0 && attCheck.rows[0].time_in) {
+        return res.json({ success: false, errorType: 'DUPLICATE_IN', message: `ALREADY TIMED IN at ${attCheck.rows[0].time_in}` });
+      }
+
+      // Calculate attendance status based on config start time & grace period
+      let attStatus = 'Present';
+      if (settings && settings.attendance_start) {
+        const [startHour, startMin] = settings.attendance_start.split(':').map(Number);
+        const now = new Date();
+        const totalStartMins = startHour * 60 + startMin + (settings.grace_period || 15);
+        const currentTotalMins = now.getHours() * 60 + now.getMinutes();
+        if (currentTotalMins > totalStartMins) {
+          attStatus = 'Late';
+        }
+      }
+
+      if (attCheck.rows.length > 0) {
+        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [currentTimeStr, attStatus, attCheck.rows[0].id]);
+      } else {
+        await pool.query('INSERT INTO attendance (member_id, date, time_in, status) VALUES ($1, $2, $3, $4)', [member.member_id, todayDateStr, currentTimeStr, attStatus]);
+      }
+
+      return res.json({
+        success: true,
+        mode: 'Time In',
+        message: 'TIME IN SUCCESSFUL',
+        member: {
+          name: member.full_name,
+          position: member.position,
+          member_id: member.member_id,
+          photo: member.photo || 'https://via.placeholder.com/150',
+          time: currentTimeStr,
+          date: todayDateStr,
+          status: attStatus
+        }
+      });
+
+    } else if (mode === 'Time Out') {
+      if (attCheck.rows.length === 0 || !attCheck.rows[0].time_in) {
+        return res.json({ success: false, errorType: 'NO_TIME_IN', message: 'NO TIME-IN RECORD FOUND for today.' });
+      }
+      if (attCheck.rows[0].time_out) {
+        return res.json({ success: false, errorType: 'DUPLICATE_OUT', message: `ALREADY TIMED OUT at ${attCheck.rows[0].time_out}` });
+      }
+
+      await pool.query('UPDATE attendance SET time_out = $1 WHERE id = $2', [currentTimeStr, attCheck.rows[0].id]);
+
+      return res.json({
+        success: true,
+        mode: 'Time Out',
+        message: 'TIME OUT SUCCESSFUL',
+        member: {
+          name: member.full_name,
+          position: member.position,
+          member_id: member.member_id,
+          photo: member.photo || 'https://via.placeholder.com/150',
+          time: currentTimeStr,
+          date: todayDateStr,
+          status: attCheck.rows[0].status
+        }
+      });
+    }
+
+    res.json({ success: false, message: 'Invalid attendance scan mode selected.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server database scan error' });
+  }
+});
+
+
+// ==========================================
+// ROUTES: MEMBER PORTAL (/member)
+// ==========================================
+
+app.get('/member/login', (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Member Portal Login</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family:sans-serif; background:#8e44ad; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
+        <div style="background:white; padding:40px; border-radius:8px; width:100%; max-width:400px; box-shadow:0 4px 15px rgba(0,0,0,0.2);">
+          <h2 style="margin-top:0; color:#8e44ad; text-align:center;">Member Portal</h2>
+          <form method="POST" action="/member/login">
+            <div style="margin-bottom:15px;">
+              <label style="font-size:13px; font-weight:bold; display:block; margin-bottom:5px;">Username</label>
+              <input type="text" name="username" required placeholder="e.g. CLUB-2026-001" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;">
             </div>
+            <div style="margin-bottom:20px;">
+              <label style="font-size:13px; font-weight:bold; display:block; margin-bottom:5px;">Password</label>
+              <input type="password" name="password" required style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;">
+            </div>
+            <button type="submit" style="width:100%; padding:12px; background:#9b59b6; color:white; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Member Login</button>
+          </form>
+          <p style="text-align:center; font-size:12px; color:#666; margin-top:15px;">Contact club admin if you forgot your credentials.</p>
         </div>
-        </body></html>
-    `);
+      </body>
+    </html>
+  `);
 });
 
 app.post('/member/login', async (req, res) => {
-    const { username, password } = req.body;
-    try {
-        const memberRes = await pool.query(`SELECT * FROM members WHERE username = $1`, [username]);
-        const member = memberRes.rows[0];
-        if (member && await bcrypt.compare(password, member.password_hash)) {
-            req.session.memberId = member.id;
-            if (member.temporary_password_status === 1) res.redirect('/member/change-password');
-            else res.redirect('/member/dashboard');
-        } else {
-            res.send(`<script>alert('Invalid credentials'); window.location='/member';</script>`);
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query('SELECT * FROM members WHERE username = $1', [username]);
+    if (result.rows.length > 0) {
+      const member = result.rows[0];
+      const match = await bcrypt.compare(password, member.password_hash);
+      if (match) {
+        req.session.isMember = true;
+        req.session.memberId = member.member_id;
+        req.session.mustChangePassword = member.temporary_password_status;
+        
+        if (member.temporary_password_status) {
+          return res.redirect('/member/change-password');
         }
-    } catch(e) { res.redirect('/member'); }
+        return res.redirect('/member');
+      }
+    }
+    res.send("<script>alert('Invalid username or password!'); window.location='/member/login';</script>");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server login error');
+  }
 });
 
-app.get('/member/change-password', (req, res) => {
-    if (!req.session.memberId) return res.redirect('/member');
-    res.send(`
-        ${layoutHead('Change Password')}
-        <div class="flex items-center justify-center min-h-screen p-4"><div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border"><h2 class="text-xl font-bold mb-2">Change Password Required</h2><form action="/member/change-password" method="POST" class="space-y-4 mt-4"><div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">New Password</label><input type="password" name="password" required class="w-full px-4 py-2 border rounded-lg outline-none"></div><button type="submit" class="w-full bg-amber-600 text-white py-2.5 rounded-lg font-semibold">Update Password</button></form></div></div>
-        </body></html>
-    `);
-});
-
-app.post('/member/change-password', async (req, res) => {
-    if (!req.session.memberId) return res.redirect('/member');
-    const { password } = req.body;
-    try {
-        const hash = await bcrypt.hash(password, 10);
-        await pool.query(`UPDATE members SET password_hash = $1, temporary_password_status = 0 WHERE id = $2`, [hash, req.session.memberId]);
-        res.redirect('/member/dashboard');
-    } catch(e) { res.redirect('/member'); }
-});
-
-app.get('/member/dashboard', async (req, res) => {
-    if (!req.session.memberId) return res.redirect('/member');
-    try {
-        const memRes = await pool.query(`SELECT * FROM members WHERE id = $1`, [req.session.memberId]);
-        const member = memRes.rows[0];
-        if (!member) return res.redirect('/member');
-
-        const recRes = await pool.query(`SELECT * FROM attendance WHERE member_id = $1 ORDER BY id DESC`, [member.member_id]);
-        const qrDataUrl = await QRCode.toDataURL(member.qr_token);
-
-        res.send(`
-            ${layoutHead('Member Dashboard')}
-            <div class="min-h-screen bg-slate-50 flex flex-col">
-                <header class="bg-white border-b h-16 flex items-center justify-between px-6 shadow-sm"><h1 class="text-xl font-bold text-slate-800">Member Portal</h1><a href="/member/logout" class="text-xs font-semibold text-rose-600">Logout</a></header>
-                <main class="p-6 max-w-4xl mx-auto w-full space-y-6">
-                    <div class="bg-white p-6 rounded-xl border shadow-sm flex flex-col md:flex-row items-center gap-6"><img src="${member.photo}" class="w-24 h-24 rounded-full object-cover border-2 border-amber-500"><div class="flex-1 text-center md:text-left"><h2 class="text-xl font-bold text-slate-900">${member.full_name}</h2><p class="text-sm text-slate-600">${member.position} • <span class="font-mono">${member.member_id}</span></p><p class="text-xs text-slate-500 mt-1">${member.course} - Section ${member.section}</p></div><div class="bg-white p-2 border rounded-xl shadow-inner"><img src="${qrDataUrl}" class="w-24 h-24"></div></div>
-                    <div class="bg-white rounded-xl border shadow-sm p-6"><h3 class="font-bold text-slate-800 mb-4">My Attendance History</h3><table class="w-full text-left text-sm"><thead class="border-b text-xs text-slate-500 uppercase"><tr><th class="pb-2">Date</th><th class="pb-2">Time In</th><th class="pb-2">Time Out</th><th class="pb-2">Status</th></tr></thead><tbody class="divide-y">${recRes.rows.map(r => `<tr><td class="py-2">${r.date}</td><td class="py-2">${r.time_in || '-'}</td><td class="py-2">${r.time_out || '-'}</td><td class="py-2"><span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">${r.status}</span></td></tr>`).join('') || '<tr><td colspan="4" class="py-3 text-center text-slate-400">No attendance history</td></tr>'}</tbody></table></div>
-                </main>
+app.get('/member/change-password', requireMember, (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Change Password</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family:sans-serif; background:#f4f7f6; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
+        <div style="background:white; padding:30px; border-radius:8px; width:100%; max-width:400px; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
+          <h3 style="color:#d9534f; margin-top:0;">Password Change Required</h3>
+          <p style="font-size:13px; color:#555;">Your account is currently using a temporary password. You must set a new personal password before accessing your member portal.</p>
+          <form method="POST" action="/member/change-password">
+            <div style="margin-bottom:20px;">
+              <label style="font-size:13px; font-weight:bold; display:block; margin-bottom:5px;">New Password</label>
+              <input type="password" name="new_password" required minlength="6" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;">
             </div>
-            </body></html>
-        `);
-    } catch(e) { res.redirect('/member'); }
+            <button type="submit" style="width:100%; padding:12px; background:#2ecc71; color:white; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Update Password & Continue</button>
+          </form>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+app.post('/member/change-password', requireMember, async (req, res) => {
+  try {
+    const { new_password } = req.body;
+    if (!new_password || new_password.length < 6) {
+      return res.send("<script>alert('Password must be at least 6 characters long.'); window.history.back();</script>");
+    }
+
+    const hash = await bcrypt.hash(new_password, 10);
+    await pool.query('UPDATE members SET password_hash = $1, temporary_password_status = FALSE WHERE member_id = $2', [hash, req.session.memberId]);
+    req.session.mustChangePassword = false;
+
+    res.redirect('/member');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error updating password');
+  }
 });
 
 app.get('/member/logout', (req, res) => {
-    req.session.destroy(() => res.redirect('/member'));
+  req.session.destroy(() => {
+    res.redirect('/member/login');
+  });
 });
 
-// Start Server
-app.listen(PORT, () => {
-    console.log(`School Club QR Attendance System running on port ${PORT}`);
+app.get('/member', requireMember, async (req, res) => {
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE member_id = $1', [req.session.memberId]);
+    const member = memberRes.rows[0];
+
+    const attendance = await pool.query('SELECT * FROM attendance WHERE member_id = $1 ORDER BY id DESC', [member.member_id]);
+    const announcements = await pool.query("SELECT * FROM announcements WHERE status = 'Active' ORDER BY id DESC LIMIT 5");
+    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+
+    const totalPresent = attendance.rows.filter(r => r.status === 'Present').length;
+    const totalLate = attendance.rows.filter(r => r.status === 'Late').length;
+    const totalAbsent = attendance.rows.filter(r => r.status === 'Absent').length;
+
+    res.render('member_dashboard', {
+      member, attendance: attendance.rows, announcements: announcements.rows, settings,
+      totalPresent, totalLate, totalAbsent
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading member portal');
+  }
+});
+
+
+// ==========================================
+// EMBEDDED EJS TEMPLATES VIEWS ENGINE
+// ==========================================
+
+const ejsTemplates = {
+  'admin_dashboard.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Admin Dashboard - <%= settings.organization_name %></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f4f7f6; display: flex; }
+    .sidebar { width: 250px; background: #2c3e50; color: white; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { font-size: 18px; margin-bottom: 30px; color: #1abc9c; text-align: center; }
+    .sidebar a { display: block; color: #ecf0f1; text-decoration: none; padding: 12px 15px; margin-bottom: 8px; border-radius: 4px; transition: 0.2s; }
+    .sidebar a:hover, .sidebar a.active { background: #34495e; color: #1abc9c; }
+    .main-content { flex: 1; padding: 30px; box-sizing: border-box; overflow-y: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); border-left: 4px solid #3498db; }
+    .card h3 { margin: 0 0 10px 0; font-size: 14px; color: #7f8c8d; }
+    .card .val { font-size: 26px; font-weight: bold; color: #2c3e50; }
+    .card.green { border-left-color: #2ecc71; }
+    .card.orange { border-left-color: #e67e22; }
+    .card.purple { border-left-color: #9b59b6; }
+    .table-container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 25px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 14px; }
+    th { background: #f8f9fa; color: #333; }
+    .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+    .badge-present { background: #d4edda; color: #155724; }
+    .badge-late { background: #fff3cd; color: #856404; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2><%= settings.organization_name %></h2>
+    <a href="/admin" class="active">📊 Dashboard</a>
+    <a href="/admin/members">👥 Member Management</a>
+    <a href="/admin/attendance">📋 Attendance Records</a>
+    <a href="/admin/reports">📈 Reports & Analytics</a>
+    <a href="/admin/announcements">📢 Announcements</a>
+    <a href="/admin/settings">⚙️ Settings & Logs</a>
+    <a href="/admin/logout" style="color:#e74c3c; margin-top:40px;">🚪 Logout</a>
+  </div>
+  <div class="main-content">
+    <div class="header">
+      <h2>Dashboard Overview</h2>
+      <div>Logged in as: <strong><%= adminUser %></strong></div>
+    </div>
+
+    <div class="cards-grid">
+      <div class="card">
+        <h3>TOTAL MEMBERS</h3>
+        <div class="val"><%= totalMembers %></div>
+      </div>
+      <div class="card green">
+        <h3>ACTIVE MEMBERS</h3>
+        <div class="val"><%= activeMembers %></div>
+      </div>
+      <div class="card orange">
+        <h3>PRESENT TODAY</h3>
+        <div class="val"><%= presentToday %></div>
+      </div>
+      <div class="card purple">
+        <h3>ATTENDANCE RATE</h3>
+        <div class="val"><%= attendanceRate %>%</div>
+      </div>
+    </div>
+
+    <div class="table-container">
+      <h3>Recent Scans Today</h3>
+      <table>
+        <thead>
+          <tr><th>Member ID</th><th>Name</th><th>Position</th><th>Time In</th><th>Time Out</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <% if (recentScans.length === 0) { %>
+            <tr><td colspan="6" style="text-align:center; color:#777;">No scans recorded yet today.</td></tr>
+          <% } else { %>
+            <% recentScans.forEach(scan => { %>
+              <tr>
+                <td><%= scan.member_id %></td>
+                <td><strong><%= scan.full_name %></strong></td>
+                <td><%= scan.position %></td>
+                <td><%= scan.time_in || '-' %></td>
+                <td><%= scan.time_out || '-' %></td>
+                <td><span class="badge <%= scan.status==='Present'?'badge-present':'badge-late' %>"><%= scan.status %></span></td>
+              </tr>
+            <% }) %>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
+  `,
+
+  'admin_members.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Member Management</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f4f7f6; display: flex; }
+    .sidebar { width: 250px; background: #2c3e50; color: white; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { font-size: 18px; margin-bottom: 30px; color: #1abc9c; text-align: center; }
+    .sidebar a { display: block; color: #ecf0f1; text-decoration: none; padding: 12px 15px; margin-bottom: 8px; border-radius: 4px; }
+    .sidebar a:hover, .sidebar a.active { background: #34495e; color: #1abc9c; }
+    .main-content { flex: 1; padding: 30px; box-sizing: border-box; overflow-y: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .btn { background: #3498db; color: white; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; font-weight: bold; text-decoration: none; }
+    .btn-green { background: #2ecc71; }
+    .table-box { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+    th { background: #f8f9fa; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
+    .modal-content { background: white; padding: 30px; border-radius: 8px; width: 100%; max-width: 550px; max-height: 90vh; overflow-y: auto; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 5px; }
+    .form-group input, .form-group select { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2><%= settings.organization_name %></h2>
+    <a href="/admin">📊 Dashboard</a>
+    <a href="/admin/members" class="active">👥 Member Management</a>
+    <a href="/admin/attendance">📋 Attendance Records</a>
+    <a href="/admin/reports">📈 Reports & Analytics</a>
+    <a href="/admin/announcements">📢 Announcements</a>
+    <a href="/admin/settings">⚙️ Settings & Logs</a>
+    <a href="/admin/logout" style="color:#e74c3c; margin-top:40px;">🚪 Logout</a>
+  </div>
+  <div class="main-content">
+    <div class="header">
+      <h2>Club Members Directory</h2>
+      <button class="btn btn-green" onclick="openModal()">+ Add New Member</button>
+    </div>
+
+    <div class="table-box">
+      <form method="GET" action="/admin/members" style="margin-bottom:15px; display:flex; gap:10px;">
+        <input type="text" name="search" placeholder="Search by name, ID, username..." value="<%= search %>" style="flex:1; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        <select name="status" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
+          <option value="">All Status</option>
+          <option value="Active" <%= statusFilter==='Active'?'selected':'' %>>Active</option>
+          <option value="Inactive" <%= statusFilter==='Inactive'?'selected':'' %>>Inactive</option>
+        </select>
+        <button type="submit" class="btn">Filter</button>
+      </form>
+
+      <table>
+        <thead>
+          <tr><th>Member ID</th><th>Full Name</th><th>Position</th><th>Course/Year</th><th>Username</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          <% if (members.length === 0) { %>
+            <tr><td colspan="7" style="text-align:center; color:#777;">No registered members found.</td></tr>
+          <% } else { %>
+            <% members.forEach(m => { %>
+              <tr>
+                <td><%= m.member_id %></td>
+                <td><strong><%= m.full_name %></strong></td>
+                <td><%= m.position %></td>
+                <td><%= m.course %> (<%= m.year_level %>)</td>
+                <td><code><%= m.username %></code></td>
+                <td><span style="color:<%= m.status==='Active'?'#2ecc71':'#e74c3c' %>; font-weight:bold;"><%= m.status %></span></td>
+                <td>
+                  <a href="/admin/members/id/<%= m.member_id %>" target="_blank" class="btn" style="padding:5px 10px; font-size:11px;">View ID</a>
+                  <form action="/admin/members/reset-password/<%= m.id %>" method="POST" style="display:inline;" onsubmit="return confirm('Reset temporary password for this member?');">
+                    <button type="submit" class="btn" style="background:#e67e22; padding:5px 10px; font-size:11px;">Reset Pass</button>
+                  </form>
+                  <form action="/admin/members/regenerate-qr/<%= m.id %>" method="POST" style="display:inline;" onsubmit="return confirm('Regenerate unique QR code token?');">
+                    <button type="submit" class="btn" style="background:#9b59b6; padding:5px 10px; font-size:11px;">New QR</button>
+                  </form>
+                  <form action="/admin/members/delete/<%= m.id %>" method="POST" style="display:inline;" onsubmit="return confirm('Permanently delete this member?');">
+                    <button type="submit" class="btn" style="background:#e74c3c; padding:5px 10px; font-size:11px;">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            <% }) %>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Add Member Modal -->
+  <div id="addModal" class="modal">
+    <div class="modal-content">
+      <h3>Register New Club Member</h3>
+      <form method="POST" action="/admin/members/add">
+        <div class="form-group"><label>Full Name</label><input type="text" name="full_name" required></div>
+        <div class="form-group"><label>Position</label><input type="text" name="position" value="Member" required></div>
+        <div class="form-group"><label>Club / Organization</label><input type="text" name="club" value="<%= settings.organization_name %>" required></div>
+        <div class="form-group"><label>Year Level</label><input type="text" name="year_level" placeholder="e.g. Grade 12" required></div>
+        <div class="form-group"><label>Course / Section</label><input type="text" name="course" placeholder="e.g. STEM / Section A" required></div>
+        <div class="form-group"><label>Contact Number</label><input type="text" name="contact"></div>
+        <div class="form-group"><label>Email Address</label><input type="email" name="email"></div>
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
+          <button type="button" class="btn" style="background:#95a5a6;" onclick="closeModal()">Cancel</button>
+          <button type="submit" class="btn btn-green">Save & Generate Credentials</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    function openModal() { document.getElementById('addModal').style.display = 'flex'; }
+    function closeModal() { document.getElementById('addModal').style.display = 'none'; }
+  </script>
+</body>
+</html>
+  `,
+
+  'member_id_card.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Membership ID Card - <%= member.full_name %></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Google Chart API for crisp vector QR code rendering -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #eef2f3; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    /* Standard CR80 PVC card aspect ratio simulation & precise print scale */
+    .id-card { width: 450px; height: 280px; background: white; border-radius: 12px; box-shadow: 0 8px 25px rgba(0,0,0,0.15); box-sizing: border-box; padding: 20px; position: relative; overflow: hidden; border: 2px solid #2c3e50; display: flex; flex-direction: column; justify-content: space-between; }
+    .id-header { display: flex; align-items: center; border-bottom: 2px solid #3498db; padding-bottom: 8px; }
+    .id-logo { width: 40px; height: 40px; background: #3498db; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px; margin-right: 12px; }
+    .id-org-title { font-size: 13px; font-weight: bold; color: #2c3e50; text-transform: uppercase; }
+    .id-school { font-size: 10px; color: #7f8c8d; }
+    .id-body { display: flex; align-items: center; margin-top: 10px; }
+    .avatar-box { width: 90px; height: 110px; background: #ddd; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #666; font-weight: bold; overflow: hidden; margin-right: 15px; border: 1px solid #bbb; }
+    .info-box { flex: 1; font-size: 12px; color: #333; }
+    .info-box h3 { margin: 0 0 4px 0; font-size: 16px; color: #2c3e50; }
+    .info-box p { margin: 2px 0; }
+    .qr-container { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    #qrcode canvas, #qrcode img { width: 75px !important; height: 75px !important; }
+    .id-footer { background: #2c3e50; color: white; font-size: 9px; text-align: center; padding: 5px; margin: -20px -20px -20px -20px; margin-top: 10px; }
+    .credentials-sheet { background: white; max-width: 450px; width: 100%; margin-top: 25px; padding: 20px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); box-sizing: border-box; }
+    .btn-print { margin-top: 20px; padding: 12px 25px; background: #2ecc71; color: white; border: none; font-weight: bold; border-radius: 5px; cursor: pointer; font-size: 14px; }
+    @media print {
+      body { background: white; justify-content: flex-start; padding: 0; }
+      .credentials-sheet, .btn-print { display: none; }
+      .id-card { box-shadow: none; border: 1px solid #000; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="id-card">
+    <div class="id-header">
+      <div class="id-logo"><%= settings.organization_name.charAt(0) %></div>
+      <div>
+        <div class="id-org-title"><%= settings.organization_name %></div>
+        <div class="id-school"><%= settings.school_name %> (S.Y. <%= schoolYear %>)</div>
+      </div>
+    </div>
+
+    <div class="id-body">
+      <div class="avatar-box">
+        <%= member.full_name.charAt(0) %>
+      </div>
+      <div class="info-box">
+        <h3><%= member.full_name %></h3>
+        <p><strong>Position:</strong> <span style="color:#2980b9;"><%= member.position %></span></p>
+        <p><strong>ID No:</strong> <%= member.member_id %></p>
+        <p><strong>Course/Yr:</strong> <%= member.course %> - <%= member.year_level %></p>
+      </div>
+      <div class="qr-container">
+        <div id="qrcode"></div>
+        <span style="font-size:8px; margin-top:3px; color:#555;">Official QR</span>
+      </div>
+    </div>
+
+    <div class="id-footer">
+      OFFICIAL MEMBERSHIP IDENTIFICATION CARD — VALID FOR ACADEMIC YEAR <%= schoolYear %>
+    </div>
+  </div>
+
+  <div class="credentials-sheet">
+    <h3 style="margin-top:0; color:#c0392b; font-size:15px;">⚠️ Portal Initial Access Credentials</h3>
+    <p style="font-size:12px; color:#555;">Give this slip or card securely to the member for portal login:</p>
+    <p style="font-size:13px; margin:5px 0;"><strong>Username:</strong> <code><%= member.username %></code></p>
+    <p style="font-size:13px; margin:5px 0;"><strong>Temporary Password:</strong> <code style="color:#c0392b; font-weight:bold;"><%= member.password_hash ? '******** (Encrypted)' : '' %></code> (Provided upon creation/reset)</p>
+    <p style="font-size:11px; color:#e67e22; margin-top:10px;">Please change your temporary password immediately after your first login at <code>/member</code>.</p>
+  </div>
+
+  <button class="btn-print" onclick="window.print()">🖨️ Print ID Card</button>
+
+  <script>
+    // Generate secure QR Token visualization
+    new QRCode(document.getElementById("qrcode"), {
+      text: "<%= member.qr_token %>",
+      width: 75,
+      height: 75,
+      colorDark: "#000000",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  </script>
+</body>
+</html>
+  `,
+
+  'scanner.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Entrance QR Scanner - <%= settings.organization_name %></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- HTML5 QR Code Scanner Library -->
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #111; color: white; margin: 0; padding: 15px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; box-sizing: border-box; }
+    .scanner-container { width: 100%; max-width: 450px; background: #222; padding: 20px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); box-sizing: border-box; text-align: center; }
+    h2 { margin-top: 0; color: #2ecc71; font-size: 20px; }
+    .mode-selector { display: flex; gap: 10px; margin-bottom: 20px; }
+    .mode-btn { flex: 1; padding: 12px; border: none; font-weight: bold; border-radius: 6px; cursor: pointer; font-size: 15px; background: #444; color: #ccc; }
+    .mode-btn.active-in { background: #2ecc71; color: white; }
+    .mode-btn.active-out { background: #e74c3c; color: white; }
+    #reader { width: 100% !important; border-radius: 8px; overflow: hidden; border: none !important; }
+    #reader video { width: 100% !important; border-radius: 8px; object-fit: cover; }
+    .result-box { margin-top: 20px; padding: 15px; border-radius: 8px; display: none; text-align: left; }
+    .success-box { background: #1b4d3e; border: 2px solid #2ecc71; }
+    .error-box { background: #5c1d1d; border: 2px solid #e74c3c; }
+    .result-box h3 { margin: 0 0 8px 0; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class="scanner-container">
+    <h2>📱 Entrance Scanner Portal</h2>
+    <div style="font-size:12px; color:#aaa; margin-bottom:15px;"><%= settings.organization_name %></div>
+
+    <div class="mode-selector">
+      <button id="btnIn" class="mode-btn active-in" onclick="setMode('Time In')">TIME IN</button>
+      <button id="btnOut" class="mode-btn" onclick="setMode('Time Out')">TIME OUT</button>
+    </div>
+
+    <div id="reader"></div>
+
+    <div id="scanResult" class="result-box">
+      <h3 id="resHeader">SUCCESS</h3>
+      <p id="resMsg" style="margin:5px 0; font-size:14px;"></p>
+    </div>
+  </div>
+
+  <!-- Audio Synthesizer Beeps via Web Audio API (No external mp3 needed) -->
+  <script>
+    let currentMode = 'Time In';
+
+    function setMode(mode) {
+      currentMode = mode;
+      if (mode === 'Time In') {
+        document.getElementById('btnIn').className = 'mode-btn active-in';
+        document.getElementById('btnOut').className = 'mode-btn';
+      } else {
+        document.getElementById('btnIn').className = 'mode-btn';
+        document.getElementById('btnOut').className = 'mode-btn active-out';
+      }
+    }
+
+    function playBeep(type) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        if (type === 'success') {
+          osc.frequency.setValueAtTime(800, ctx.currentTime);
+          gain.gain.setValueAtTime(0.1, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.15);
+        } else {
+          // Triple beep error
+          osc.frequency.setValueAtTime(300, ctx.currentTime);
+          gain.gain.setValueAtTime(0.2, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.1);
+          setTimeout(() => {
+            const osc2 = ctx.createOscillator();
+            osc2.connect(gain);
+            osc2.frequency.setValueAtTime(300, ctx.currentTime);
+            osc2.start();
+            osc2.stop(ctx.currentTime + 0.1);
+          }, 150);
+        }
+      } catch (e) {
+        console.log('Audio Context suppressed');
+      }
+    }
+
+    let lastScanTime = 0;
+
+    function onScanSuccess(decodedText) {
+      const now = Date.now();
+      if (now - lastScanTime < 3000) return; // 3-second cooldown to prevent duplicate triggers
+      lastScanTime = now;
+
+      fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: decodedText, mode: currentMode })
+      })
+      .then(res => res.json())
+      .then(data => {
+        const box = document.getElementById('scanResult');
+        const header = document.getElementById('resHeader');
+        const msg = document.getElementById('resMsg');
+        box.style.display = 'block';
+
+        if (data.success) {
+          playBeep('success');
+          box.className = 'result-box success-box';
+          header.innerHTML = '✓ ' + data.message;
+          msg.innerHTML = '<strong>' + data.member.name + '</strong><br>' + data.member.position + '<br>Time: ' + data.member.time + ' (' + data.member.status + ')';
+        } else {
+          playBeep('error');
+          box.className = 'result-box error-box';
+          header.innerHTML = '✕ ATTENDANCE ERROR';
+          msg.innerHTML = data.message;
+        }
+
+        setTimeout(() => { box.style.display = 'none'; }, 4000);
+      })
+      .catch(err => {
+        console.error(err);
+      });
+    }
+
+    const html5QrCode = new Html5Qrcode("reader");
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      onScanSuccess
+    ).catch(err => {
+      console.error("Camera permissions denied or unavailable", err);
+    });
+  </script>
+</body>
+</html>
+  `,
+
+  'member_dashboard.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Member Portal - <%= member.full_name %></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; color: #333; }
+    .container { max-width: 800px; margin: 0 auto; }
+    .header-card { background: linear-gradient(135deg, #8e44ad, #3498db); color: white; padding: 25px; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .btn { display: inline-block; padding: 10px 18px; background: #9b59b6; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 13px; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+    th { background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header-card">
+      <div>
+        <h2 style="margin:0 0 5px 0;"><%= member.full_name %></h2>
+        <p style="margin:0; opacity:0.9;"><%= member.position %> | ID: <strong><%= member.member_id %></strong></p>
+      </div>
+      <a href="/member/logout" style="background:#e74c3c; color:white; padding:8px 15px; border-radius:4px; text-decoration:none; font-size:13px; font-weight:bold;">Logout</a>
+    </div>
+
+    <div class="grid">
+      <div class="card" style="text-align:center;">
+        <h3>My Membership QR Token</h3>
+        <div id="qrcode" style="display:inline-block; margin:10px 0;"></div>
+        <p style="font-size:11px; color:#7f8c8d;">Present this QR code at the entrance scanner.</p>
+        <a href="/admin/members/id/<%= member.member_id %>" target="_blank" class="btn">View & Download ID Card</a>
+      </div>
+      <div class="card">
+        <h3>Attendance Summary</h3>
+        <p><strong>Total Present:</strong> <span style="color:#2ecc71;"><%= totalPresent %></span></p>
+        <p><strong>Total Late:</strong> <span style="color:#f39c12;"><%= totalLate %></span></p>
+        <p><strong>Total Absent:</strong> <span style="color:#e74c3c;"><%= totalAbsent %></span></p>
+        <hr style="border:0; border-top:1px solid #eee; margin:15px 0;">
+        <h4 style="margin:0 0 5px 0; font-size:13px;">Latest Club Announcements</h4>
+        <% if (announcements.length === 0) { %>
+          <p style="font-size:12px; color:#777;">No announcements posted.</p>
+        <% } else { %>
+          <% announcements.forEach(a => { %>
+            <div style="font-size:12px; background:#f9f9f9; padding:8px; border-radius:4px; margin-bottom:5px;">
+              <strong><%= a.title %></strong>: <%= a.message %>
+            </div>
+          <% }) %>
+        <% } %>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Attendance History Log</h3>
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <% if (attendance.length === 0) { %>
+            <tr><td colspan="4" style="text-align:center; color:#777;">No attendance history logged yet.</td></tr>
+          <% } else { %>
+            <% attendance.forEach(att => { %>
+              <tr>
+                <td><%= att.date %></td>
+                <td><%= att.time_in || '-' %></td>
+                <td><%= att.time_out || '-' %></td>
+                <td><span style="font-weight:bold; color:<%= att.status==='Present'?'#2ecc71':'#e67e22' %>;"><%= att.status %></span></td>
+              </tr>
+            <% }) %>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    new QRCode(document.getElementById("qrcode"), {
+      text: "<%= member.qr_token %>",
+      width: 120,
+      height: 120
+    });
+  </script>
+</body>
+</html>
+  `,
+
+  'admin_attendance.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Attendance Records</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f4f7f6; display: flex; }
+    .sidebar { width: 250px; background: #2c3e50; color: white; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { font-size: 18px; margin-bottom: 30px; color: #1abc9c; text-align: center; }
+    .sidebar a { display: block; color: #ecf0f1; text-decoration: none; padding: 12px 15px; margin-bottom: 8px; border-radius: 4px; }
+    .sidebar a:hover, .sidebar a.active { background: #34495e; color: #1abc9c; }
+    .main-content { flex: 1; padding: 30px; box-sizing: border-box; overflow-y: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .table-box { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+    th { background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2><%= settings.organization_name %></h2>
+    <a href="/admin">📊 Dashboard</a>
+    <a href="/admin/members">👥 Member Management</a>
+    <a href="/admin/attendance" class="active">📋 Attendance Records</a>
+    <a href="/admin/reports">📈 Reports & Analytics</a>
+    <a href="/admin/announcements">📢 Announcements</a>
+    <a href="/admin/settings">⚙️ Settings & Logs</a>
+    <a href="/admin/logout" style="color:#e74c3c; margin-top:40px;">🚪 Logout</a>
+  </div>
+  <div class="main-content">
+    <div class="header">
+      <h2>Complete Attendance Logs</h2>
+      <button onclick="window.print()" style="background:#3498db; color:white; border:none; padding:10px 15px; border-radius:5px; font-weight:bold; cursor:pointer;">Print / Export PDF</button>
+    </div>
+    <div class="table-box">
+      <form method="GET" action="/admin/attendance" style="margin-bottom:15px; display:flex; gap:10px;">
+        <input type="text" name="search" placeholder="Search member name or ID..." value="<%= queryParams.search || '' %>" style="flex:1; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        <input type="text" name="date" placeholder="Date (e.g. Aug 25, 2026)" value="<%= queryParams.date || '' %>" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
+        <button type="submit" style="padding:8px 15px; background:#3498db; color:white; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Filter</button>
+      </form>
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Member ID</th><th>Name</th><th>Position</th><th>Time In</th><th>Time Out</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <% if (attendance.length === 0) { %>
+            <tr><td colspan="7" style="text-align:center; color:#777;">No attendance records found.</td></tr>
+          <% } else { %>
+            <% attendance.forEach(att => { %>
+              <tr>
+                <td><%= att.date %></td>
+                <td><%= att.member_id %></td>
+                <td><strong><%= att.full_name %></strong></td>
+                <td><%= att.position %></td>
+                <td><%= att.time_in || '-' %></td>
+                <td><%= att.time_out || '-' %></td>
+                <td><span style="font-weight:bold; color:<%= att.status==='Present'?'#2ecc71':'#e67e22' %>;"><%= att.status %></span></td>
+              </tr>
+            <% }) %>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
+  `,
+
+  'admin_reports.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Reports & Analytics</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f4f7f6; display: flex; }
+    .sidebar { width: 250px; background: #2c3e50; color: white; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { font-size: 18px; margin-bottom: 30px; color: #1abc9c; text-align: center; }
+    .sidebar a { display: block; color: #ecf0f1; text-decoration: none; padding: 12px 15px; margin-bottom: 8px; border-radius: 4px; }
+    .sidebar a:hover, .sidebar a.active { background: #34495e; color: #1abc9c; }
+    .main-content { flex: 1; padding: 30px; box-sizing: border-box; overflow-y: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 25px; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .card h3 { margin: 0 0 10px 0; font-size: 13px; color: #7f8c8d; }
+    .card .val { font-size: 24px; font-weight: bold; color: #2c3e50; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2><%= settings.organization_name %></h2>
+    <a href="/admin">📊 Dashboard</a>
+    <a href="/admin/members">👥 Member Management</a>
+    <a href="/admin/attendance">📋 Attendance Records</a>
+    <a href="/admin/reports" class="active">📈 Reports & Analytics</a>
+    <a href="/admin/announcements">📢 Announcements</a>
+    <a href="/admin/settings">⚙️ Settings & Logs</a>
+    <a href="/admin/logout" style="color:#e74c3c; margin-top:40px;">🚪 Logout</a>
+  </div>
+  <div class="main-content">
+    <div class="header">
+      <h2>Attendance Analytics & Reports</h2>
+      <a href="/admin/backup" style="background:#27ae60; color:white; padding:10px 15px; border-radius:5px; text-decoration:none; font-weight:bold; font-size:13px;">📥 Backup Database (JSON)</a>
+    </div>
+
+    <div class="grid">
+      <div class="card"><h3>TOTAL ENROLLED MEMBERS</h3><div class="val"><%= totalMembers %></div></div>
+      <div class="card"><h3>TOTAL ATTENDANCE SCANS</h3><div class="val"><%= totalScans %></div></div>
+      <div class="card"><h3>PRESENT COUNT</h3><div class="val" style="color:#2ecc71;"><%= presentCount %></div></div>
+      <div class="card"><h3>LATE COUNT</h3><div class="val" style="color:#f39c12;"><%= lateCount %></div></div>
+      <div class="card"><h3>OVERALL ATTENDANCE RATE</h3><div class="val" style="color:#3498db;"><%= attendanceRate %>%</div></div>
+    </div>
+  </div>
+</body>
+</html>
+  `,
+
+  'admin_announcements.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Announcements</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f4f7f6; display: flex; }
+    .sidebar { width: 250px; background: #2c3e50; color: white; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { font-size: 18px; margin-bottom: 30px; color: #1abc9c; text-align: center; }
+    .sidebar a { display: block; color: #ecf0f1; text-decoration: none; padding: 12px 15px; margin-bottom: 8px; border-radius: 4px; }
+    .sidebar a:hover, .sidebar a.active { background: #34495e; color: #1abc9c; }
+    .main-content { flex: 1; padding: 30px; box-sizing: border-box; overflow-y: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .box { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 5px; }
+    .form-group input, .form-group textarea { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    .btn { background: #2ecc71; color: white; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2><%= settings.organization_name %></h2>
+    <a href="/admin">📊 Dashboard</a>
+    <a href="/admin/members">👥 Member Management</a>
+    <a href="/admin/attendance">📋 Attendance Records</a>
+    <a href="/admin/reports">📈 Reports & Analytics</a>
+    <a href="/admin/announcements" class="active">📢 Announcements</a>
+    <a href="/admin/settings">⚙️ Settings & Logs</a>
+    <a href="/admin/logout" style="color:#e74c3c; margin-top:40px;">🚪 Logout</a>
+  </div>
+  <div class="main-content">
+    <div class="header"><h2>Club Announcements</h2></div>
+
+    <div class="box">
+      <h3>Post New Announcement</h3>
+      <form method="POST" action="/admin/announcements/add">
+        <div class="form-group"><label>Title</label><input type="text" name="title" required></div>
+        <div class="form-group"><label>Message Content</label><textarea name="message" rows="3" required></textarea></div>
+        <button type="submit" class="btn">Publish Announcement</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h3>Active Announcements</h3>
+      <% if (announcements.length === 0) { %>
+        <p style="color:#777; font-size:13px;">No announcements found.</p>
+      <% } else { %>
+        <% announcements.forEach(a => { %>
+          <div style="border-bottom:1px solid #eee; padding:10px 0;">
+            <h4 style="margin:0 0 5px 0;"><%= a.title %></h4>
+            <p style="margin:0 0 5px 0; font-size:13px; color:#555;"><%= a.message %></p>
+            <form action="/admin/announcements/delete/<%= a.id %>" method="POST" style="display:inline;" onsubmit="return confirm('Delete announcement?');">
+              <button type="submit" style="background:#e74c3c; color:white; border:none; padding:4px 8px; border-radius:3px; font-size:11px; cursor:pointer;">Delete</button>
+            </form>
+          </div>
+        <% }) %>
+      <% } %>
+    </div>
+  </div>
+</body>
+</html>
+  `,
+
+  'admin_settings.ejs': `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Settings & Audit Logs</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f4f7f6; display: flex; }
+    .sidebar { width: 250px; background: #2c3e50; color: white; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { font-size: 18px; margin-bottom: 30px; color: #1abc9c; text-align: center; }
+    .sidebar a { display: block; color: #ecf0f1; text-decoration: none; padding: 12px 15px; margin-bottom: 8px; border-radius: 4px; }
+    .sidebar a:hover, .sidebar a.active { background: #34495e; color: #1abc9c; }
+    .main-content { flex: 1; padding: 30px; box-sizing: border-box; overflow-y: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .box { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 5px; }
+    .form-group input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    .btn { background: #3498db; color: white; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 12px; }
+    th { background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2><%= settings.organization_name %></h2>
+    <a href="/admin">📊 Dashboard</a>
+    <a href="/admin/members">👥 Member Management</a>
+    <a href="/admin/attendance">📋 Attendance Records</a>
+    <a href="/admin/reports">📈 Reports & Analytics</a>
+    <a href="/admin/announcements">📢 Announcements</a>
+    <a href="/admin/settings" class="active">⚙️ Settings & Logs</a>
+    <a href="/admin/logout" style="color:#e74c3c; margin-top:40px;">🚪 Logout</a>
+  </div>
+  <div class="main-content">
+    <div class="header"><h2>System Settings & Audit Logs</h2></div>
+
+    <div class="box">
+      <h3>Organization & Attendance Configuration</h3>
+      <form method="POST" action="/admin/settings">
+        <div class="form-group"><label>Organization Name</label><input type="text" name="organization_name" value="<%= settings.organization_name %>" required></div>
+        <div class="form-group"><label>School Name</label><input type="text" name="school_name" value="<%= settings.school_name %>" required></div>
+        <div class="form-group"><label>Official Time In Start (e.g. 08:00)</label><input type="text" name="attendance_start" value="<%= settings.attendance_start %>" required></div>
+        <div class="form-group"><label>Grace Period (Minutes before marked Late)</label><input type="number" name="grace_period" value="<%= settings.grace_period %>" required></div>
+        <div class="form-group"><label>Change Admin Password (leave blank to keep current)</label><input type="password" name="admin_password"></div>
+        <button type="submit" class="btn">Save Configurations</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h3>Admin Audit Trail Logs</h3>
+      <table>
+        <thead><tr><th>Action Performed</th><th>User / Admin</th><th>Timestamp</th></tr></thead>
+        <tbody>
+          <% if (auditLogs.length === 0) { %>
+            <tr><td colspan="3" style="text-align:center; color:#777;">No audit logs recorded.</td></tr>
+          <% } else { %>
+            <% auditLogs.forEach(log => { %>
+              <tr>
+                <td><%= log.action %></td>
+                <td><strong><%= log.user_name %></strong></td>
+                <td><%= log.date_time %></td>
+              </tr>
+            <% }) %>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
+  `
+};
+
+// Route template helper engine bindings
+app.engine('ejs', (filePath, options, callback) => {
+  const filename = require('path').basename(filePath);
+  if (ejsTemplates[filename]) {
+    try {
+      const rendered = require('ejs').render(ejsTemplates[filename], options);
+      return callback(null, rendered);
+    } catch (err) {
+      return callback(err);
+    }
+  }
+  return callback(new Error('Template not found: ' + filename));
+});
+
+
+// ==========================================
+// BOOTSTRAP APPLICATION LAUNCHER
+// ==========================================
+initializeDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`====================================================`);
+    console.log(`🏫 School Club QR Attendance System running successfully!`);
+    console.log(`🌐 PORT: ${PORT}`);
+    console.log(`🔗 Admin Portal:    http://localhost:${PORT}/admin`);
+    console.log(`📱 Scanner Portal:  http://localhost:${PORT}/scanner`);
+    console.log(`👤 Member Portal:   http://localhost:${PORT}/member`);
+    console.log(`====================================================`);
+  });
 });
