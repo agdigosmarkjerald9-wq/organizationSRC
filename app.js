@@ -114,7 +114,7 @@ async function initializeDatabase() {
     const adminCheck = await client.query('SELECT COUNT(*) FROM admins');
     if (parseInt(adminCheck.rows[0].count) === 0) {
       const defaultUser = 'admin';
-      const rawPassword = 'AdminPassword2026!';
+      const rawPassword = 'admin123!';
       const hash = await bcrypt.hash(rawPassword, 10);
       await client.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', [defaultUser, hash]);
       
