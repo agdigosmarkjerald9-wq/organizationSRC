@@ -1,15 +1,16 @@
 {
-  "name": "club-qr-attendance-system",
+  "name": "school-club-attendance-system",
   "version": "1.0.0",
-  "description": "School Club QR Code Attendance Management System",
+  "description": "QR Code Attendance Management System for School Organizations",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
+    "bcrypt": "^5.1.1",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
-    "pg": "^8.11.3"
+    "pg": "^8.11.3",
+    "qrcode": "^1.5.3"
   }
 }
