@@ -1,73 +1,68 @@
-/**
- * SCHOOL CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM
- * Built for Node.js, Express, and PostgreSQL.
- * Admin Login: username 'admin', password 'password123'
- */
+/*************************************************************
+ * SCHOOL CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM (app.js)
+ * Stack: Node.js, Express, PostgreSQL 18, Embedded Views / HTML5
+ *************************************************************/
 
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { Pool } = require('pg');
 const crypto = require('crypto');
-const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL Database Connection Pool
-// Automatically reads process.env.DATABASE_URL if available (e.g. on Render), otherwise local fallback
+// PostgreSQL Connection Pool Setup
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/school_attendance',
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+  connectionString: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/school_club_db',
 });
 
-// Middleware Setup
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-app.use(session({
-  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // 24 hours
-}));
+// Middleware Configuration
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || 'club_attendance_secret_key_2026',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours session expiry
+  })
+);
 
-// --- DATABASE INITIALIZATION & MIGRATIONS ---
-async function initDB() {
-  const client = await pool.connect();
+// Set View Engine to embedded HTML templates via EJS lightweight rendering
+app.set('view engine', 'ejs');
+app.engine('ejs', require('ejs').renderFile);
+
+// ---------------------------------------------------------
+// DATABASE INITIALIZATION & MIGRATIONS ON STARTUP
+// ---------------------------------------------------------
+async function initializeDatabase() {
   try {
+    const client = await pool.connect();
+    
+    // Create tables if they do not exist
     await client.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        id SERIAL PRIMARY KEY,
-        organization_name VARCHAR(255) DEFAULT 'Elite Coding & Robotics Club',
-        school_name VARCHAR(255) DEFAULT 'National Science High School',
-        logo VARCHAR(255) DEFAULT '',
-        school_year VARCHAR(50) DEFAULT '2025-2026',
-        attendance_start TIME DEFAULT '08:00:00',
-        grace_period INT DEFAULT 15,
-        scanner_pin VARCHAR(50) DEFAULT '1234'
-      );
-
       CREATE TABLE IF NOT EXISTS admins (
         id SERIAL PRIMARY KEY,
         username VARCHAR(100) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
+        password_hash TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS members (
         id SERIAL PRIMARY KEY,
         member_id VARCHAR(50) UNIQUE NOT NULL,
-        full_name VARCHAR(255) NOT NULL,
+        full_name VARCHAR(150) NOT NULL,
         position VARCHAR(100) DEFAULT 'Member',
-        club VARCHAR(150) DEFAULT 'Coding Club',
-        year_level VARCHAR(50) DEFAULT 'Grade 11',
-        course VARCHAR(150) DEFAULT 'STEM',
-        section VARCHAR(50) DEFAULT 'Section A',
-        contact VARCHAR(50) DEFAULT '',
-        email VARCHAR(150) DEFAULT '',
-        photo TEXT DEFAULT '',
+        club VARCHAR(150) DEFAULT 'School Organization',
+        year_level VARCHAR(50),
+        course VARCHAR(100),
+        section VARCHAR(50),
+        contact VARCHAR(50),
+        email VARCHAR(150),
+        photo TEXT,
         username VARCHAR(100) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
+        password_hash TEXT NOT NULL,
         temporary_password_status BOOLEAN DEFAULT TRUE,
         qr_token VARCHAR(255) UNIQUE NOT NULL,
         status VARCHAR(20) DEFAULT 'Active',
@@ -78,90 +73,82 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS attendance (
         id SERIAL PRIMARY KEY,
         member_id VARCHAR(50) NOT NULL,
-        date DATE NOT NULL,
-        time_in TIME,
-        time_out TIME,
-        status VARCHAR(50) DEFAULT 'Present',
-        remarks TEXT DEFAULT '',
+        date VARCHAR(20) NOT NULL,
+        time_in VARCHAR(20),
+        time_out VARCHAR(20),
+        status VARCHAR(30) DEFAULT 'Present',
+        remarks TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS announcements (
         id SERIAL PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
+        title VARCHAR(200) NOT NULL,
         message TEXT NOT NULL,
         status VARCHAR(20) DEFAULT 'Published',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS settings (
+        id SERIAL PRIMARY KEY,
+        organization_name VARCHAR(150) DEFAULT 'Supreme Student Council & Clubs',
+        school_name VARCHAR(150) DEFAULT 'National High School / University',
+        logo TEXT DEFAULT '',
+        attendance_start VARCHAR(10) DEFAULT '08:00',
+        grace_period INT DEFAULT 15,
+        school_year VARCHAR(50) DEFAULT '2026-2027'
+      );
+
       CREATE TABLE IF NOT EXISTS audit_logs (
         id SERIAL PRIMARY KEY,
-        action VARCHAR(255) NOT NULL,
+        action TEXT NOT NULL,
         actor VARCHAR(100) NOT NULL,
-        details TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    // Seed default settings if empty
-    const settingsRes = await client.query('SELECT * FROM settings WHERE id = 1');
-    if (settingsRes.rows.length === 0) {
-      await client.query(`INSERT INTO settings (id, organization_name, school_name, school_year, attendance_start, grace_period, scanner_pin) 
-                          VALUES (1, 'Elite Coding & Robotics Club', 'National Science High School', '2025-2026', '08:00:00', 15, '1234')`);
-    }
-
-    // Seed default admin account (username: admin, password: password123)
-    const adminRes = await client.query('SELECT * FROM admins WHERE username = $1', ['admin']);
-    if (adminRes.rows.length === 0) {
-      const hash = await bcrypt.hash('password123', 10);
+    // Ensure Default Admin Account exists: username: admin, password: password123
+    const adminCheck = await client.query('SELECT * FROM admins WHERE username = $1', ['admin']);
+    if (adminCheck.rows.length === 0) {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash('password123', salt);
       await client.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', ['admin', hash]);
-      console.log('Default Admin Account Created -> Username: admin | Password: password123');
+      console.log('=> Default admin account created: username "admin" / password "password123"');
     }
 
-    console.log('PostgreSQL Database initialized successfully.');
+    // Ensure Default Settings row exists
+    const settingsCheck = await client.query('SELECT * FROM settings WHERE id = 1');
+    if (settingsCheck.rows.length === 0) {
+      await client.query(`INSERT INTO settings (id, organization_name, school_name, attendance_start, grace_period, school_year) VALUES (1, 'Supreme Student Council & Clubs', 'National High School / University', '08:00', 15, '2026-2027')`);
+    }
+
+    client.release();
+    console.log('=> PostgreSQL Database initialized successfully.');
   } catch (err) {
     console.error('Database initialization error:', err);
-  } finally {
-    client.release();
   }
 }
 
-initDB();
+initializeDatabase();
 
-// --- HELPER FUNCTIONS ---
-async function logAudit(action, actor, details) {
+// ---------------------------------------------------------
+// HELPER FUNCTIONS
+// ---------------------------------------------------------
+function generateRandomPassword() {
+  return crypto.randomBytes(4).toString('hex').toUpperCase(); // 8-char hex code
+}
+
+async function logAudit(action, actor) {
   try {
-    await pool.query('INSERT INTO audit_logs (action, actor, details) VALUES ($1, $2, $3)', [action, actor, details]);
-  } catch (err) {
-    console.error('Audit log error:', err);
+    await pool.query('INSERT INTO audit_logs (action, actor) VALUES ($1, $2)', [action, actor]);
+  } catch (e) {
+    console.error('Audit log error:', e);
   }
 }
 
-function generateRandomString(length) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-  let result = '';
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
-
-// --- AUTHENTICATION MIDDLEWARES ---
-function requireAdmin(req, res, next) {
-  if (req.session && req.session.isAdmin) {
-    return next();
-  }
-  res.redirect('/admin/login');
-}
-
-function requireMember(req, res, next) {
-  if (req.session && req.session.isMember) {
-    return next();
-  }
-  res.redirect('/member/login');
-}
-
-// --- PUBLIC ROUTES ---
+// ---------------------------------------------------------
+// ROUTES: HOME & PORTALS REDIRECTS
+// ---------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -169,99 +156,71 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>School Club Attendance System</title>
+      <title>School Club QR Attendance System</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
-    <body class="bg-slate-900 text-white min-h-screen flex items-center justify-center p-6">
-      <div class="max-w-4xl w-full bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl p-8 md:p-12 text-center">
-        <div class="inline-block p-4 bg-indigo-600/20 text-indigo-400 rounded-2xl mb-6 text-4xl">🎓</div>
-        <h1 class="text-3xl md:text-5xl font-extrabold tracking-tight mb-4">School Club QR Attendance System</h1>
-        <p class="text-slate-400 text-lg mb-8 max-w-2xl mx-auto">Automated organization management, instant CR80 membership ID generation, and real-time smartphone QR code scanning.</p>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <a href="/admin/login" class="p-6 bg-slate-700/50 hover:bg-slate-700 border border-slate-600 rounded-xl transition group text-left">
-            <div class="text-2xl mb-2 group-hover:scale-110 transition">🛡️</div>
-            <h2 class="text-xl font-bold mb-1 text-indigo-400">Admin Portal</h2>
-            <p class="text-sm text-slate-400">Manage members, view reports, configure schedules, and oversee records.</p>
+    <body class="bg-slate-900 text-slate-100 font-sans min-h-screen flex flex-col justify-between">
+      <div class="max-w-4xl mx-auto px-6 py-16 text-center my-auto">
+        <span class="bg-indigo-500/20 text-indigo-400 text-xs font-semibold px-3 py-1 rounded-full uppercase tracking-wider">PostgreSQL Powered</span>
+        <h1 class="text-4xl md:text-5xl font-extrabold mt-4 tracking-tight text-white">School Club QR Attendance & Management System</h1>
+        <p class="text-slate-400 mt-4 max-w-xl mx-auto">Seamless automated attendance tracking, instant digital ID generation, and multi-portal role separation for school organizations.</p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-10">
+          <a href="/admin/login" class="bg-slate-800 hover:bg-indigo-600 border border-slate-700 hover:border-indigo-500 p-6 rounded-2xl transition shadow-xl group block">
+            <div class="text-indigo-400 group-hover:text-white text-2xl font-bold mb-2">Admin Portal</div>
+            <p class="text-slate-400 group-hover:text-slate-100 text-sm">Manage members, view reports, configure settings, and oversee operations.</p>
           </a>
-          <a href="/scanner" class="p-6 bg-slate-700/50 hover:bg-slate-700 border border-slate-600 rounded-xl transition group text-left">
-            <div class="text-2xl mb-2 group-hover:scale-110 transition">📷</div>
-            <h2 class="text-xl font-bold mb-1 text-emerald-400">Scanner Portal</h2>
-            <p class="text-sm text-slate-400">Optimized smartphone camera portal for instantaneous Time In & Time Out.</p>
+          <a href="/scanner" class="bg-slate-800 hover:bg-emerald-600 border border-slate-700 hover:border-emerald-500 p-6 rounded-2xl transition shadow-xl group block">
+            <div class="text-emerald-400 group-hover:text-white text-2xl font-bold mb-2">Scanner Portal</div>
+            <p class="text-slate-400 group-hover:text-slate-100 text-sm">Smartphone entrance camera scanner for Time-In and Time-Out tracking.</p>
           </a>
-          <a href="/member/login" class="p-6 bg-slate-700/50 hover:bg-slate-700 border border-slate-600 rounded-xl transition group text-left">
-            <div class="text-2xl mb-2 group-hover:scale-110 transition">👤</div>
-            <h2 class="text-xl font-bold mb-1 text-sky-400">Member Portal</h2>
-            <p class="text-sm text-slate-400">Personal dashboard to track attendance records, digital ID, and announcements.</p>
+          <a href="/member/login" class="bg-slate-800 hover:bg-sky-600 border border-slate-700 hover:border-sky-500 p-6 rounded-2xl transition shadow-xl group block">
+            <div class="text-sky-400 group-hover:text-white text-2xl font-bold mb-2">Member Portal</div>
+            <p class="text-slate-400 group-hover:text-slate-100 text-sm">Member dashboard to view digital ID card, attendance history, and announcements.</p>
           </a>
         </div>
       </div>
+      <footer class="py-6 text-center text-slate-500 text-xs border-t border-slate-800">
+        School Club Attendance System &bull; Secure PostgreSQL 18 Backend
+      </footer>
     </body>
     </html>
   `);
 });
 
-// ==========================================
-// ADMIN PORTAL ROUTES
-// ==========================================
-
+// ---------------------------------------------------------
+// 1. ADMIN PORTAL & AUTHENTICATION
+// ---------------------------------------------------------
 app.get('/admin/login', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Admin Login - School Club Attendance</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen p-4">
-      <div class="max-w-md w-full bg-slate-800 border border-slate-700 rounded-2xl shadow-xl p-8">
-        <div class="text-center mb-6">
-          <div class="inline-flex p-3 bg-indigo-600 text-white rounded-xl text-2xl font-bold mb-2">🛡️</div>
-          <h1 class="text-2xl font-bold">Admin Portal Login</h1>
-          <p class="text-sm text-slate-400">Sign in with administrator credentials</p>
-        </div>
-        ${req.query.error ? `<div class="mb-4 p-3 bg-rose-500/20 border border-rose-500 text-rose-300 rounded-lg text-sm">${req.query.error}</div>` : ''}
-        <form action="/admin/login" method="POST" class="space-y-4">
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Username</label>
-            <input type="text" name="username" required class="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 text-white" placeholder="admin">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Password</label>
-            <input type="password" name="password" required class="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 text-white" placeholder="password123">
-          </div>
-          <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 font-bold rounded-lg transition shadow-lg shadow-indigo-600/30">Sign In to Dashboard</button>
-        </form>
-        <div class="mt-6 text-center text-xs text-slate-500">
-          Default Credentials: username: <span class="text-slate-300 font-mono">admin</span> | password: <span class="text-slate-300 font-mono">password123</span>
-        </div>
-      </div>
-    </body>
-    </html>
-  `);
+  res.render('admin_login', { error: null });
 });
 
 app.post('/admin/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
-    if (result.rows.length > 0) {
-      const admin = result.rows[0];
-      const match = await bcrypt.compare(password, admin.password_hash);
-      if (match) {
-        req.session.isAdmin = true;
-        req.session.adminUser = admin.username;
-        await logAudit('Admin Login Successful', admin.username, 'Admin logged in');
-        return res.redirect('/admin');
-      }
+    if (result.rows.length === 0) {
+      return res.render('admin_login', { error: 'Invalid username or password' });
     }
-    res.redirect('/admin/login?error=Invalid username or password');
+    const admin = result.rows[0];
+    const match = await bcrypt.compare(password, admin.password_hash);
+    if (!match) {
+      return res.render('admin_login', { error: 'Invalid username or password' });
+    }
+    req.session.adminId = admin.id;
+    req.session.adminUser = admin.username;
+    res.redirect('/admin/dashboard');
   } catch (err) {
     console.error(err);
-    res.redirect('/admin/login?error=Database error occurred');
+    res.render('admin_login', { error: 'Server database error' });
   }
 });
+
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.adminId) {
+    return next();
+  }
+  res.redirect('/admin/login');
+}
 
 app.get('/admin/logout', (req, res) => {
   req.session.destroy(() => {
@@ -270,1245 +229,501 @@ app.get('/admin/logout', (req, res) => {
 });
 
 // Admin Dashboard
-app.get('/admin', requireAdmin, async (req, res) => {
+app.get('/admin/dashboard', requireAdmin, async (req, res) => {
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const totalMembers = parseInt((await pool.query('SELECT COUNT(*) FROM members')).rows[0].count);
-    const activeMembers = parseInt((await pool.query('SELECT COUNT(*) FROM members WHERE status = $1', ['Active'])).rows[0].count);
-    const inactiveMembers = parseInt((await pool.query('SELECT COUNT(*) FROM members WHERE status = $1', ['Inactive'])).rows[0].count);
-    
     const today = new Date().toISOString().split('T')[0];
-    const todayStats = await pool.query('SELECT status, COUNT(*) FROM attendance WHERE date = $1 GROUP BY status', [today]);
-    let presentToday = 0, lateToday = 0, absentToday = 0;
-    todayStats.rows.forEach(row => {
-      if (row.status === 'Present') presentToday = parseInt(row.count);
-      if (row.status === 'Late') lateToday = parseInt(row.count);
-      if (row.status === 'Absent') absentToday = parseInt(row.count);
-    });
+    const membersRes = await pool.query('SELECT * FROM members');
+    const members = membersRes.rows;
+    
+    const totalMembers = members.length;
+    const activeMembers = members.filter(m => m.status === 'Active').length;
+    const inactiveMembers = members.filter(m => m.status === 'Inactive').length;
+
+    const attendanceRes = await pool.query('SELECT * FROM attendance WHERE date = $1', [today]);
+    const todayAttendance = attendanceRes.rows;
+
+    const presentToday = todayAttendance.filter(a => a.status === 'Present').length;
+    const lateToday = todayAttendance.filter(a => a.status === 'Late').length;
     const totalAttendanceToday = presentToday + lateToday;
-    const attendancePercentage = activeMembers > 0 ? Math.round((totalAttendanceToday / activeMembers) * 100) : 0;
+    const absentToday = Math.max(0, activeMembers - totalAttendanceToday);
+    const attendancePercentage = activeMembers > 0 ? ((totalAttendanceToday / activeMembers) * 100).toFixed(1) : 0;
 
-    const recentScans = (await pool.query(`
-      SELECT a.*, m.full_name, m.position, m.photo FROM attendance a 
-      JOIN members m ON a.member_id = m.member_id 
-      ORDER BY a.created_at DESC LIMIT 5
-    `)).rows;
+    const recentScans = await pool.query('SELECT a.*, m.full_name, m.position FROM attendance a JOIN members m ON a.member_id = m.member_id ORDER BY a.created_at DESC LIMIT 5');
+    const recentRegs = await pool.query('SELECT * FROM members ORDER BY created_at DESC LIMIT 5');
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
 
-    const recentMembers = (await pool.query('SELECT * FROM members ORDER BY created_at DESC LIMIT 5')).rows;
-
-    res.send(renderAdminLayout('Dashboard', req.session.adminUser, settings, `
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-          <div class="text-slate-400 text-sm font-medium mb-1">Total Members</div>
-          <div class="text-3xl font-extrabold text-white">${totalMembers}</div>
-          <div class="text-xs text-indigo-400 mt-2">${activeMembers} Active, ${inactiveMembers} Inactive</div>
-        </div>
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-          <div class="text-slate-400 text-sm font-medium mb-1">Attendance Today</div>
-          <div class="text-3xl font-extrabold text-emerald-400">${totalAttendanceToday}</div>
-          <div class="text-xs text-slate-400 mt-2">${presentToday} Present, ${lateToday} Late</div>
-        </div>
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-          <div class="text-slate-400 text-sm font-medium mb-1">Attendance Rate</div>
-          <div class="text-3xl font-extrabold text-sky-400">${attendancePercentage}%</div>
-          <div class="text-xs text-slate-400 mt-2">Based on active members</div>
-        </div>
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-          <div class="text-slate-400 text-sm font-medium mb-1">Absent Today</div>
-          <div class="text-3xl font-extrabold text-rose-400">${absentToday}</div>
-          <div class="text-xs text-slate-400 mt-2">Unchecked members</div>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-          <h2 class="text-lg font-bold mb-4 flex items-center justify-between">
-            <span>Recent Scans</span>
-            <a href="/admin/attendance" class="text-xs text-indigo-400 hover:underline">View All</a>
-          </h2>
-          <div class="space-y-3">
-            ${recentScans.length === 0 ? '<p class="text-sm text-slate-500">No attendance scans recorded today.</p>' : recentScans.map(s => `
-              <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg border border-slate-700/50">
-                <div class="flex items-center space-x-3">
-                  <div class="w-10 h-10 rounded-full bg-slate-700 overflow-hidden flex items-center justify-center text-xs font-bold">
-                    ${s.photo ? `<img src="${s.photo}" class="w-full h-full object-cover">` : s.full_name.charAt(0)}
-                  </div>
-                  <div>
-                    <div class="font-bold text-sm text-white">${s.full_name}</div>
-                    <div class="text-xs text-slate-400">${s.position} • Time In: ${s.time_in || 'N/A'}</div>
-                  </div>
-                </div>
-                <span class="px-2.5 py-1 text-xs rounded-full font-semibold ${s.status === 'Present' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}">${s.status}</span>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-          <h2 class="text-lg font-bold mb-4 flex items-center justify-between">
-            <span>Recent Registrations</span>
-            <a href="/admin/members" class="text-xs text-indigo-400 hover:underline">Manage Members</a>
-          </h2>
-          <div class="space-y-3">
-            ${recentMembers.length === 0 ? '<p class="text-sm text-slate-500">No members registered yet.</p>' : recentMembers.map(m => `
-              <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg border border-slate-700/50">
-                <div class="flex items-center space-x-3">
-                  <div class="w-10 h-10 rounded-full bg-slate-700 overflow-hidden flex items-center justify-center text-xs font-bold">
-                    ${m.photo ? `<img src="${m.photo}" class="w-full h-full object-cover">` : m.full_name.charAt(0)}
-                  </div>
-                  <div>
-                    <div class="font-bold text-sm text-white">${m.full_name}</div>
-                    <div class="text-xs text-slate-400">${m.member_id} • ${m.course}</div>
-                  </div>
-                </div>
-                <a href="/admin/member/id/${m.id}" target="_blank" class="px-3 py-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 text-xs rounded font-semibold transition">View ID</a>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-    `));
+    res.render('admin_dashboard', {
+      adminUser: req.session.adminUser,
+      totalMembers,
+      activeMembers,
+      inactiveMembers,
+      presentToday,
+      absentToday,
+      lateToday,
+      totalAttendanceToday,
+      attendancePercentage,
+      recentScans: recentScans.rows,
+      recentRegs: recentRegs.rows,
+      settings: settingsRes.rows[0]
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Database error loading dashboard');
   }
 });
 
-// Admin Members Management Page
+// Members Management Page
 app.get('/admin/members', requireAdmin, async (req, res) => {
+  const { search, status } = req.query;
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const search = req.query.search || '';
-    const statusFilter = req.query.status || '';
-    
-    let query = 'SELECT * FROM members WHERE (full_name ILIKE $1 OR member_id ILIKE $1 OR username ILIKE $1)';
-    let params = [`%${search}%`];
-    
-    if (statusFilter) {
-      query += ' AND status = $2';
-      params.push(statusFilter);
+    let query = 'SELECT * FROM members WHERE 1=1';
+    let params = [];
+    if (search) {
+      params.push(`%${search}%`);
+      query += ` AND (full_name ILIKE $${params.length} OR member_id ILIKE $${params.length} OR username ILIKE $${params.length})`;
+    }
+    if (status) {
+      params.push(status);
+      query += ` AND status = $${params.length}`;
     }
     query += ' ORDER BY created_at DESC';
-
-    const members = (await pool.query(query, params)).rows;
-
-    res.send(renderAdminLayout('Members Management', req.session.adminUser, settings, `
-      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <form method="GET" action="/admin/members" class="flex flex-wrap items-center gap-3 flex-1">
-          <input type="text" name="search" value="${search}" placeholder="Search name, ID, username..." class="px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500 flex-1 min-w-[220px]">
-          <select name="status" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-            <option value="">All Status</option>
-            <option value="Active" ${statusFilter === 'Active' ? 'selected' : ''}>Active</option>
-            <option value="Inactive" ${statusFilter === 'Inactive' ? 'selected' : ''}>Inactive</option>
-          </select>
-          <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold transition">Filter</button>
-          ${search || statusFilter ? '<a href="/admin/members" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">Reset</a>' : ''}
-        </form>
-        <button onclick="openAddModal()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-semibold transition flex items-center justify-center space-x-2 shadow-lg shadow-emerald-600/20">
-          <span>+ Add Member</span>
-        </button>
-      </div>
-
-      <div class="bg-slate-800 border border-slate-700 rounded-xl shadow-lg overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse">
-            <thead>
-              <tr class="bg-slate-900/60 border-b border-slate-700 text-xs uppercase tracking-wider text-slate-400">
-                <th class="p-4">Member</th>
-                <th class="p-4">Member ID</th>
-                <th class="p-4">Position</th>
-                <th class="p-4">Course / Section</th>
-                <th class="p-4">Status</th>
-                <th class="p-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-700/60 text-sm">
-              ${members.length === 0 ? `<tr><td colspan="6" class="p-8 text-center text-slate-500">No members found.</td></tr>` : members.map(m => `
-                <tr class="hover:bg-slate-700/30 transition">
-                  <td class="p-4 flex items-center space-x-3">
-                    <div class="w-10 h-10 rounded-full bg-slate-700 overflow-hidden flex items-center justify-center font-bold text-xs shrink-0">
-                      ${m.photo ? `<img src="${m.photo}" class="w-full h-full object-cover">` : m.full_name.charAt(0)}
-                    </div>
-                    <div>
-                      <div class="font-bold text-white">${m.full_name}</div>
-                      <div class="text-xs text-slate-400">@${m.username}</div>
-                    </div>
-                  </td>
-                  <td class="p-4 font-mono text-indigo-300">${m.member_id}</td>
-                  <td class="p-4 text-slate-300">${m.position}</td>
-                  <td class="p-4 text-slate-300">${m.course} • ${m.section}</td>
-                  <td class="p-4">
-                    <span class="px-2.5 py-1 text-xs rounded-full font-semibold ${m.status === 'Active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${m.status}</span>
-                  </td>
-                  <td class="p-4 text-right space-x-2">
-                    <a href="/admin/member/id/${m.id}" target="_blank" class="px-2.5 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 rounded text-xs font-semibold inline-block">ID Card</a>
-                    <a href="/admin/member/edit/${m.id}" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-xs font-semibold inline-block">Edit</a>
-                    <form action="/admin/member/delete/${m.id}" method="POST" class="inline" onsubmit="return confirm('Delete this member?');">
-                      <button type="submit" class="px-2.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 rounded text-xs font-semibold">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Add Member Modal -->
-      <div id="addModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
-        <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
-          <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-700">
-            <h3 class="text-xl font-bold text-white">Register New Club Member</h3>
-            <button onclick="closeAddModal()" class="text-slate-400 hover:text-white">&times;</button>
-          </div>
-          <form action="/admin/member/add" method="POST" class="space-y-4">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Full Name *</label>
-                <input type="text" name="full_name" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="e.g. Juan Dela Cruz">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Position</label>
-                <input type="text" name="position" value="Member" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Club / Organization</label>
-                <input type="text" name="club" value="${settings.organization_name}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Year Level</label>
-                <input type="text" name="year_level" value="Grade 11" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Course / Strand</label>
-                <input type="text" name="course" value="STEM" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Section</label>
-                <input type="text" name="section" value="Section A" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Contact Number</label>
-                <input type="text" name="contact" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="09123456789">
-              </div>
-              <div>
-                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Email Address</label>
-                <input type="email" name="email" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="juan@email.com">
-              </div>
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Profile Photo URL (Optional)</label>
-              <input type="url" name="photo" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="https://example.com/photo.jpg">
-            </div>
-            <div class="p-3 bg-indigo-950/40 border border-indigo-800/50 rounded-lg text-xs text-indigo-300">
-              ℹ️ Username, secure temporary password, unique Member ID, and attendance QR code will be generated automatically.
-            </div>
-            <div class="flex justify-end space-x-3 pt-4 border-t border-slate-700">
-              <button type="button" onclick="closeAddModal()" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-semibold">Cancel</button>
-              <button type="submit" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-semibold shadow-lg shadow-emerald-600/30">Register Member & Generate ID</button>
-            </div>
-          </form>
-        </div>
-      </div>
-      <script>
-        function openAddModal() { document.getElementById('addModal').classList.remove('hidden'); document.getElementById('addModal').classList.add('flex'); }
-        function closeAddModal() { document.getElementById('addModal').classList.remove('flex'); document.getElementById('addModal').classList.add('hidden'); }
-      </script>
-    `));
+    const result = await pool.query(query, params);
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('admin_members', { members: result.rows, search: search || '', status: status || '', settings: settingsRes.rows[0], adminUser: req.session.adminUser });
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error loading members');
   }
 });
 
-// Process Add Member
-app.post('/admin/member/add', requireAdmin, async (req, res) => {
+// Add Member Action
+app.post('/admin/members/add', requireAdmin, async (req, res) => {
+  const { full_name, position, club, year_level, course, section, contact, email, photo } = req.body;
   try {
-    const { full_name, position, club, year_level, course, section, contact, email, photo } = req.body;
-    
-    // Generate unique member ID and username
+    // Auto-generate Unique Member ID and Username format e.g. CLUB-2026-00X
     const countRes = await pool.query('SELECT COUNT(*) FROM members');
-    const seq = parseInt(countRes.rows[0].count) + 1;
+    const nextNum = parseInt(countRes.rows[0].count) + 1;
     const year = new Date().getFullYear();
-    const member_id = `CLUB-${year}-${String(seq).padStart(3, '0')}`;
-    const username = `club-${year}-${String(seq).padStart(3, '0')}`;
-    
-    // Generate random temporary password
-    const tempPassword = generateRandomString(8);
-    const password_hash = await bcrypt.hash(tempPassword, 10);
-    
-    // Generate secure QR token
-    const qr_token = `TOKEN-${crypto.randomBytes(16).toString('hex')}`;
+    const member_id = `MEM-${year}-${String(nextNum).padStart(3, '0')}`;
+    const username = `CLUB-${year}-${String(nextNum).padStart(3, '0')}`;
+    const tempPassword = generateRandomPassword();
 
-    await pool.query(`
-      INSERT INTO members (member_id, full_name, position, club, year_level, course, section, contact, email, photo, username, password_hash, temporary_password_status, qr_token, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, TRUE, $13, 'Active')
-    `, [member_id, full_name, position, club, year_level, course, section, contact, email, photo, username, password_hash, qr_token]);
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(tempPassword, salt);
+    const qr_token = crypto.randomBytes(16).toString('hex');
 
-    await logAudit('Member Created', req.session.adminUser, `Created member ${full_name} (${member_id})`);
+    await pool.query(
+      `INSERT INTO members (member_id, full_name, position, club, year_level, course, section, contact, email, photo, username, password_hash, temporary_password_status, qr_token, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, TRUE, $13, 'Active')`,
+      [member_id, full_name, position || 'Member', club || 'School Club', year_level, course, section, contact, email, photo || '', username, password_hash, qr_token]
+    );
 
-    // Retrieve inserted ID
-    const newMember = (await pool.query('SELECT id FROM members WHERE member_id = $1', [member_id])).rows[0];
+    await logAudit(`Created member ${full_name} (${member_id})`, req.session.adminUser);
 
-    // Show success modal page displaying credentials clearly
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Member Created Successfully</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-      </head>
-      <body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen p-4">
-        <div class="max-w-lg w-full bg-slate-800 border border-slate-700 rounded-2xl p-8 shadow-2xl text-center">
-          <div class="w-16 h-16 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center text-3xl mx-auto mb-4">✓</div>
-          <h1 class="text-2xl font-bold mb-2">Member Created Successfully!</h1>
-          <p class="text-slate-400 text-sm mb-6">Generated portal credentials and membership ID card.</p>
-
-          <div class="bg-slate-900 border border-slate-700 rounded-xl p-4 text-left space-y-3 mb-6 font-mono text-sm">
-            <div class="flex justify-between border-b border-slate-800 pb-2">
-              <span class="text-slate-400">Full Name:</span>
-              <span class="text-white font-bold">${full_name}</span>
-            </div>
-            <div class="flex justify-between border-b border-slate-800 pb-2">
-              <span class="text-slate-400">Member ID:</span>
-              <span class="text-indigo-400 font-bold">${member_id}</span>
-            </div>
-            <div class="flex justify-between border-b border-slate-800 pb-2">
-              <span class="text-slate-400">Temporary Username:</span>
-              <span class="text-emerald-400 font-bold">${username}</span>
-            </div>
-            <div class="flex justify-between">
-              <span class="text-slate-400">TEMPORARY PASSWORD:</span>
-              <span class="text-amber-400 font-bold bg-amber-500/10 px-2 py-0.5 rounded">${tempPassword}</span>
-            </div>
-          </div>
-          <div class="p-3 bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-lg text-xs mb-6 text-left">
-            ⚠️ <strong>IMPORTANT:</strong> Give these temporary credentials to the member. The member must change this password upon their first login.
-          </div>
-          <div class="flex flex-col sm:flex-row gap-3 justify-center">
-            <a href="/admin/member/id/${newMember.id}" target="_blank" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-indigo-600/30 transition">View & Print ID Card</a>
-            <a href="/admin/members" class="px-5 py-2.5 bg-slate-700 hover:bg-slate-650 text-slate-200 rounded-lg text-sm font-bold transition">Back to Members</a>
-          </div>
-        </div>
-      </body>
-      </html>
-    `);
+    // Pass temporary credentials to success render modal or redirect
+    res.redirect(`/admin/members?success=1&new_id=${member_id}&new_user=${username}&new_pass=${tempPassword}`);
   } catch (err) {
     console.error(err);
-    res.status(500).send('Database error during member creation.');
+    res.status(500).send('Error adding member: ' + err.message);
   }
 });
 
-// Member Edit Form
-app.get('/admin/member/edit/:id', requireAdmin, async (req, res) => {
+// Edit Member
+app.post('/admin/members/edit/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { full_name, position, club, year_level, course, section, contact, email, status } = req.body;
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const member = (await pool.query('SELECT * FROM members WHERE id = $1', [req.params.id])).rows[0];
-    if (!member) return res.status(404).send('Member not found');
-
-    res.send(renderAdminLayout('Edit Member', req.session.adminUser, settings, `
-      <div class="max-w-2xl mx-auto bg-slate-800 border border-slate-700 rounded-xl p-8 shadow-lg">
-        <h2 class="text-xl font-bold mb-6 text-white pb-3 border-b border-slate-700">Edit Member: ${member.full_name}</h2>
-        <form action="/admin/member/edit/${member.id}" method="POST" class="space-y-4">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Full Name</label>
-              <input type="text" name="full_name" value="${member.full_name}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Position</label>
-              <input type="text" name="position" value="${member.position}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Club</label>
-              <input type="text" name="club" value="${member.club}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Year Level</label>
-              <input type="text" name="year_level" value="${member.year_level}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Course / Strand</label>
-              <input type="text" name="course" value="${member.course}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Section</label>
-              <input type="text" name="section" value="${member.section}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Contact Number</label>
-              <input type="text" name="contact" value="${member.contact}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Email</label>
-              <input type="email" name="email" value="${member.email}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Profile Photo URL</label>
-            <input type="url" name="photo" value="${member.photo}" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Status</label>
-            <select name="status" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-              <option value="Active" ${member.status === 'Active' ? 'selected' : ''}>Active</option>
-              <option value="Inactive" ${member.status === 'Inactive' ? 'selected' : ''}>Inactive</option>
-            </select>
-          </div>
-          <div class="flex justify-end space-x-3 pt-4 border-t border-slate-700">
-            <a href="/admin/members" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-semibold">Cancel</a>
-            <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold">Save Changes</button>
-          </div>
-        </form>
-      </div>
-    `));
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Server Error');
-  }
-});
-
-app.post('/admin/member/edit/:id', requireAdmin, async (req, res) => {
-  try {
-    const { full_name, position, club, year_level, course, section, contact, email, photo, status } = req.body;
-    await pool.query(`
-      UPDATE members SET full_name = $1, position = $2, club = $3, year_level = $4, course = $5, section = $6, contact = $7, email = $8, photo = $9, status = $10
-      WHERE id = $11
-    `, [full_name, position, club, year_level, course, section, contact, email, photo, status, req.params.id]);
-
-    await logAudit('Member Updated', req.session.adminUser, `Updated member ${full_name}`);
+    await pool.query(
+      `UPDATE members SET full_name = $1, position = $2, club = $3, year_level = $4, course = $5, section = $6, contact = $7, email = $8, status = $9 WHERE id = $10`,
+      [full_name, position, club, year_level, course, section, contact, email, status, id]
+    );
+    await logAudit(`Updated member ID ${id}`, req.session.adminUser);
     res.redirect('/admin/members');
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error updating member');
   }
 });
 
-app.post('/admin/member/delete/:id', requireAdmin, async (req, res) => {
+// Delete Member
+app.get('/admin/members/delete/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
   try {
-    const member = (await pool.query('SELECT full_name FROM members WHERE id = $1', [req.params.id])).rows[0];
-    await pool.query('DELETE FROM members WHERE id = $1', [req.params.id]);
-    await logAudit('Member Deleted', req.session.adminUser, `Deleted member ID ${req.params.id}`);
+    await pool.query('DELETE FROM members WHERE id = $1', [id]);
+    await logAudit(`Deleted member record ID ${id}`, req.session.adminUser);
     res.redirect('/admin/members');
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error deleting member');
   }
 });
 
-// CR80 Printable Member ID Card Route
-app.get('/admin/member/id/:id', requireAdmin, async (req, res) => {
+// Reset Password
+app.get('/admin/members/reset-pass/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const member = (await pool.query('SELECT * FROM members WHERE id = $1', [req.params.id])).rows[0];
-    if (!member) return res.status(404).send('Member not found');
+    const tempPassword = generateRandomPassword();
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(tempPassword, salt);
 
-    // Generate QR code data URL from member qr_token
-    const qrDataUrl = await QRCode.toDataURL(member.qr_token, { width: 300, margin: 1 });
+    const memberRes = await pool.query('UPDATE members SET password_hash = $1, temporary_password_status = TRUE WHERE id = $2 RETURNING full_name, member_id, username', [password_hash, id]);
+    const m = memberRes.rows[0];
+    await logAudit(`Reset password for ${m.full_name}`, req.session.adminUser);
 
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <title>Membership ID - ${member.full_name}</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-          @media print {
-            body { background: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-            .no-print { display: none !important; }
-            .id-card-container { box-shadow: none !important; border: 1px solid #cbd5e1 !important; }
-          }
-          /* CR80 Standard Proportional Size: 85.60 mm x 53.98 mm (~ 3.37 inch x 2.125 inch) */
-          .cr80-card {
-            width: 380px;
-            height: 240px;
-          }
-        </style>
-      </head>
-      <body class="bg-slate-900 min-h-screen flex flex-col items-center justify-center p-4">
-        <div class="no-print mb-6 flex gap-4">
-          <button onclick="window.print()" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold shadow-lg transition">🖨️ Print ID Card</button>
-          <a href="/admin/members" class="px-5 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg font-bold transition">Back to Members</a>
-        </div>
-
-        <div class="flex flex-col gap-8 items-center">
-          <!-- FRONT ID CARD -->
-          <div class="cr80-card bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border-2 border-indigo-500/50 rounded-xl shadow-2xl p-4 flex flex-col justify-between relative overflow-hidden id-card-container text-white">
-            <div class="absolute -right-12 -top-12 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl"></div>
-            <div class="flex items-center justify-between border-b border-indigo-500/30 pb-2">
-              <div class="flex items-center space-x-2">
-                <div class="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center font-bold text-xs">🎓</div>
-                <div>
-                  <div class="text-[10px] uppercase font-semibold text-indigo-300 tracking-wider">${settings.school_name}</div>
-                  <div class="text-xs font-bold text-white truncate max-w-[180px]">${settings.organization_name}</div>
-                </div>
-              </div>
-              <div class="text-[10px] font-mono bg-indigo-500/20 px-2 py-0.5 rounded text-indigo-300">SY ${settings.school_year}</div>
-            </div>
-
-            <div class="flex items-center space-x-4 my-auto">
-              <div class="w-20 h-24 rounded-lg bg-slate-800 border-2 border-indigo-400/50 overflow-hidden shrink-0 flex items-center justify-center font-bold text-slate-500">
-                ${member.photo ? `<img src="${member.photo}" class="w-full h-full object-cover">` : member.full_name.charAt(0)}
-              </div>
-              <div class="overflow-hidden flex-1">
-                <div class="text-[10px] uppercase font-semibold text-slate-400">Official Member</div>
-                <div class="text-base font-extrabold text-white truncate">${member.full_name}</div>
-                <div class="text-xs font-semibold text-indigo-400 mb-1">${member.position}</div>
-                <div class="text-[11px] text-slate-300">${member.course} - ${member.section}</div>
-                <div class="text-[11px] font-mono text-emerald-400 font-bold mt-1">${member.member_id}</div>
-              </div>
-            </div>
-
-            <div class="flex items-center justify-between pt-2 border-t border-indigo-500/30 text-[9px] text-slate-400">
-              <div>Scan QR Code at Attendance Portal</div>
-              <div class="font-bold text-indigo-300 uppercase">${member.status}</div>
-            </div>
-          </div>
-
-          <!-- BACK ID CARD (QR & Credentials) -->
-          <div class="cr80-card bg-slate-900 border-2 border-slate-700 rounded-xl shadow-2xl p-4 flex flex-col justify-between relative overflow-hidden id-card-container text-white">
-            <div class="text-center border-b border-slate-800 pb-1">
-              <div class="text-xs font-bold text-indigo-400">PORTAL ACCESS CREDENTIALS</div>
-              <div class="text-[9px] text-slate-400">Member Portal: /member</div>
-            </div>
-            
-            <div class="flex items-center justify-between my-auto">
-              <div class="space-y-1 font-mono text-[10px] flex-1 pr-2">
-                <div>
-                  <span class="text-slate-400 block text-[9px]">TEMPORARY USERNAME:</span>
-                  <span class="text-emerald-400 font-bold">${member.username}</span>
-                </div>
-                <div>
-                  <span class="text-slate-400 block text-[9px]">TEMPORARY PASSWORD:</span>
-                  <span class="text-amber-400 font-bold bg-amber-500/10 px-1 py-0.5 rounded">Check Admin Record</span>
-                </div>
-                <div class="text-[9px] text-slate-400 italic mt-1">Change password upon first login.</div>
-              </div>
-              <div class="w-20 h-20 bg-white p-1 rounded-lg shrink-0 flex items-center justify-center">
-                <img src="${qrDataUrl}" class="w-full h-full">
-              </div>
-            </div>
-
-            <div class="text-[8px] text-center text-slate-500 border-t border-slate-800 pt-1">
-              If found, please return to ${settings.organization_name} office.
-            </div>
-          </div>
-        </div>
-      </body>
-      </html>
-    `);
+    res.redirect(`/admin/members?reset_user=${m.username}&reset_pass=${tempPassword}`);
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error resetting password');
   }
 });
 
-// Admin Attendance Records Page
+// Regenerate QR Code
+app.get('/admin/members/regen-qr/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const new_token = crypto.randomBytes(16).toString('hex');
+    await pool.query('UPDATE members SET qr_token = $1 WHERE id = $2', [new_token, id]);
+    await logAudit(`Regenerated QR code for member ID ${id}`, req.session.adminUser);
+    res.redirect('/admin/members');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error regenerating QR');
+  }
+});
+
+// View ID Card Modal Route
+app.get('/admin/members/id-card/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE id = $1', [id]);
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    if (memberRes.rows.length === 0) return res.status(404).send('Member not found');
+    res.render('admin_id_card', { member: memberRes.rows[0], settings: settingsRes.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading ID card');
+  }
+});
+
+// Attendance Records View
 app.get('/admin/attendance', requireAdmin, async (req, res) => {
+  const { date, status, search } = req.query;
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const dateQuery = req.query.date || '';
-    const statusQuery = req.query.status || '';
-    const search = req.query.search || '';
-
-    let query = `
-      SELECT a.*, m.full_name, m.position, m.course FROM attendance a
-      JOIN members m ON a.member_id = m.member_id
-      WHERE (m.full_name ILIKE $1 OR m.member_id ILIKE $1)
-    `;
-    let params = [`%${search}%`];
-    let paramIndex = 2;
-
-    if (dateQuery) {
-      query += ` AND a.date = $${paramIndex++}`;
-      params.push(dateQuery);
+    let query = 'SELECT a.*, m.full_name, m.position, m.club FROM attendance a JOIN members m ON a.member_id = m.member_id WHERE 1=1';
+    let params = [];
+    if (date) {
+      params.push(date);
+      query += ` AND a.date = $${params.length}`;
     }
-    if (statusQuery) {
-      query += ` AND a.status = $${paramIndex++}`;
-      params.push(statusQuery);
+    if (status) {
+      params.push(status);
+      query += ` AND a.status = $${params.length}`;
     }
-
-    query += ' ORDER BY a.date DESC, a.time_in DESC';
-    const records = (await pool.query(query, params)).rows;
-
-    res.send(renderAdminLayout('Attendance Records', req.session.adminUser, settings, `
-      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg mb-6">
-        <form method="GET" action="/admin/attendance" class="flex flex-wrap items-center gap-3">
-          <input type="text" name="search" value="${search}" placeholder="Search name or ID..." class="px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500 flex-1 min-w-[200px]">
-          <input type="date" name="date" value="${dateQuery}" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-          <select name="status" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-indigo-500">
-            <option value="">All Status</option>
-            <option value="Present" ${statusQuery === 'Present' ? 'selected' : ''}>Present</option>
-            <option value="Late" ${statusQuery === 'Late' ? 'selected' : ''}>Late</option>
-            <option value="Absent" ${statusQuery === 'Absent' ? 'selected' : ''}>Absent</option>
-          </select>
-          <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold transition">Filter</button>
-          <button type="button" onclick="window.print()" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-semibold">Print Report</button>
-        </form>
-      </div>
-
-      <div class="bg-slate-800 border border-slate-700 rounded-xl shadow-lg overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse">
-            <thead>
-              <tr class="bg-slate-900/60 border-b border-slate-700 text-xs uppercase tracking-wider text-slate-400">
-                <th class="p-4">Date</th>
-                <th class="p-4">Member ID</th>
-                <th class="p-4">Name</th>
-                <th class="p-4">Position</th>
-                <th class="p-4">Time In</th>
-                <th class="p-4">Time Out</th>
-                <th class="p-4">Status</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-700/60 text-sm">
-              ${records.length === 0 ? `<tr><td colspan="7" class="p-8 text-center text-slate-500">No attendance records found.</td></tr>` : records.map(r => `
-                <tr class="hover:bg-slate-700/30 transition">
-                  <td class="p-4 text-slate-300 font-mono text-xs">${r.date}</td>
-                  <td class="p-4 text-indigo-300 font-mono">${r.member_id}</td>
-                  <td class="p-4 font-bold text-white">${r.full_name}</td>
-                  <td class="p-4 text-slate-300">${r.position}</td>
-                  <td class="p-4 text-emerald-400 font-mono">${r.time_in || '—'}</td>
-                  <td class="p-4 text-amber-400 font-mono">${r.time_out || '—'}</td>
-                  <td class="p-4"><span class="px-2.5 py-1 text-xs rounded-full font-semibold ${r.status === 'Present' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}">${r.status}</span></td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `));
+    if (search) {
+      params.push(`%${search}%`);
+      query += ` AND (m.full_name ILIKE $${params.length} OR m.member_id ILIKE $${params.length})`;
+    }
+    query += ' ORDER BY a.created_at DESC';
+    const result = await pool.query(query, params);
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('admin_attendance', { attendance: result.rows, date: date || '', status: status || '', search: search || '', settings: settingsRes.rows[0], adminUser: req.session.adminUser });
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error loading attendance');
   }
 });
 
-// Admin Announcements Page
+// Reports Page
+app.get('/admin/reports', requireAdmin, async (req, res) => {
+  try {
+    const statsRes = await pool.query(`
+      SELECT status, COUNT(*) as count FROM attendance GROUP BY status
+    `);
+    const totalScans = await pool.query('SELECT COUNT(*) FROM attendance');
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('admin_reports', { stats: statsRes.rows, totalScans: totalScans.rows[0].count, settings: settingsRes.rows[0], adminUser: req.session.adminUser });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading reports');
+  }
+});
+
+// Announcements Management
 app.get('/admin/announcements', requireAdmin, async (req, res) => {
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const announcements = (await pool.query('SELECT * FROM announcements ORDER BY created_at DESC')).rows;
-
-    res.send(renderAdminLayout('Announcements', req.session.adminUser, settings, `
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg lg:col-span-1 h-fit">
-          <h2 class="text-lg font-bold mb-4 text-white">Post Announcement</h2>
-          <form action="/admin/announcements" method="POST" class="space-y-4">
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Title</label>
-              <input type="text" name="title" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Message</label>
-              <textarea name="message" rows="4" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm"></textarea>
-            </div>
-            <button type="submit" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold transition">Publish Announcement</button>
-          </form>
-        </div>
-
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg lg:col-span-2">
-          <h2 class="text-lg font-bold mb-4 text-white">Active Announcements</h2>
-          <div class="space-y-4">
-            ${announcements.length === 0 ? '<p class="text-sm text-slate-500">No announcements posted.</p>' : announcements.map(a => `
-              <div class="p-4 bg-slate-900/50 rounded-xl border border-slate-700/60">
-                <div class="flex items-center justify-between mb-2">
-                  <h3 class="font-bold text-white">${a.title}</h3>
-                  <span class="text-xs font-mono text-slate-400">${new Date(a.created_at).toLocaleDateString()}</span>
-                </div>
-                <p class="text-sm text-slate-300 whitespace-pre-line">${a.message}</p>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-    `));
+    const result = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC');
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('admin_announcements', { announcements: result.rows, settings: settingsRes.rows[0], adminUser: req.session.adminUser });
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error loading announcements');
   }
 });
 
-app.post('/admin/announcements', requireAdmin, async (req, res) => {
+app.post('/admin/announcements/add', requireAdmin, async (req, res) => {
+  const { title, message } = req.body;
   try {
-    const { title, message } = req.body;
-    await pool.query('INSERT INTO announcements (title, message, status) VALUES ($1, $2, $3)', [title, message, 'Published']);
-    await logAudit('Announcement Created', req.session.adminUser, `Posted announcement: ${title}`);
+    await pool.query('INSERT INTO announcements (title, message) VALUES ($1, $2)', [title, message]);
+    await logAudit(`Created announcement: ${title}`, req.session.adminUser);
     res.redirect('/admin/announcements');
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error saving announcement');
   }
 });
 
-// Admin Settings Page
-app.get('/admin/settings', requireAdmin, async (req, res) => {
+app.get('/admin/announcements/delete/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    res.send(renderAdminLayout('System Settings', req.session.adminUser, settings, `
-      <div class="max-w-2xl mx-auto bg-slate-800 border border-slate-700 rounded-xl p-8 shadow-lg">
-        <h2 class="text-xl font-bold mb-6 text-white pb-3 border-b border-slate-700">Organization & Attendance Settings</h2>
-        ${req.query.success ? '<div class="mb-4 p-3 bg-emerald-500/20 border border-emerald-500 text-emerald-300 rounded-lg text-sm">Settings updated successfully!</div>' : ''}
-        <form action="/admin/settings" method="POST" class="space-y-4">
-          <div>
-            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Organization Name</label>
-            <input type="text" name="organization_name" value="${settings.organization_name}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">School Name</label>
-            <input type="text" name="school_name" value="${settings.school_name}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">School Year</label>
-            <input type="text" name="school_year" value="${settings.school_year}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-          </div>
-          <div class="grid grid-cols-2 gap-4">
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Regular Time In Start</label>
-              <input type="time" name="attendance_start" value="${settings.attendance_start}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Grace Period (Minutes)</label>
-              <input type="number" name="grace_period" value="${settings.grace_period}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-            </div>
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Scanner PIN Code</label>
-            <input type="text" name="scanner_pin" value="${settings.scanner_pin}" required class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm">
-          </div>
-          <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold text-sm shadow-lg shadow-indigo-600/30 transition">Save System Settings</button>
-        </form>
-      </div>
-    `));
+    await pool.query('DELETE FROM announcements WHERE id = $1', [id]);
+    res.redirect('/admin/announcements');
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error deleting announcement');
+  }
+});
+
+// Admin Settings
+app.get('/admin/settings', requireAdmin, async (req, res) => {
+  try {
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('admin_settings', { settings: settingsRes.rows[0], adminUser: req.session.adminUser, success: req.query.success });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading settings');
   }
 });
 
 app.post('/admin/settings', requireAdmin, async (req, res) => {
+  const { organization_name, school_name, logo, attendance_start, grace_period, school_year, new_password } = req.body;
   try {
-    const { organization_name, school_name, school_year, attendance_start, grace_period, scanner_pin } = req.body;
-    await pool.query(`
-      UPDATE settings SET organization_name = $1, school_name = $2, school_year = $3, attendance_start = $4, grace_period = $5, scanner_pin = $6 WHERE id = 1
-    `, [organization_name, school_name, school_year, attendance_start, grace_period, scanner_pin]);
+    await pool.query(
+      `UPDATE settings SET organization_name = $1, school_name = $2, logo = $3, attendance_start = $4, grace_period = $5, school_year = $6 WHERE id = 1`,
+      [organization_name, school_name, logo, attendance_start, grace_period, school_year]
+    );
 
-    await logAudit('Settings Updated', req.session.adminUser, 'Updated club settings');
+    if (new_password && new_password.trim() !== '') {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash(new_password, salt);
+      await pool.query('UPDATE admins SET password_hash = $1 WHERE username = $2', [hash, req.session.adminUser]);
+    }
+
+    await logAudit('Updated system settings', req.session.adminUser);
     res.redirect('/admin/settings?success=1');
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error updating settings');
   }
 });
 
-// Admin Layout Helper
-fnRenderAdminLayout = function(title, username, settings, content) {
-  return `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>${title} - Admin Portal</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-900 text-slate-100 min-h-screen flex">
-      <!-- Sidebar -->
-      <aside class="w-64 bg-slate-800 border-r border-slate-700 hidden lg:flex flex-col justify-between shrink-0">
-        <div>
-          <div class="p-6 border-b border-slate-700">
-            <div class="text-xs uppercase text-indigo-400 font-bold tracking-wider">${settings.school_name}</div>
-            <div class="text-lg font-extrabold text-white truncate">${settings.organization_name}</div>
-          </div>
-          <nav class="p-4 space-y-1">
-            <a href="/admin" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition ${title === 'Dashboard' ? 'bg-indigo-600 text-white' : 'text-slate-300'}"><span>📊</span><span>Dashboard</span></a>
-            <a href="/admin/members" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition ${title === 'Members Management' ? 'bg-indigo-600 text-white' : 'text-slate-300'}"><span>👥</span><span>Members</span></a>
-            <a href="/admin/attendance" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition ${title === 'Attendance Records' ? 'bg-indigo-600 text-white' : 'text-slate-300'}"><span>📋</span><span>Attendance</span></a>
-            <a href="/admin/announcements" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition ${title === 'Announcements' ? 'bg-indigo-600 text-white' : 'text-slate-300'}"><span>📢</span><span>Announcements</span></a>
-            <a href="/admin/settings" class="flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition ${title === 'System Settings' ? 'bg-indigo-600 text-white' : 'text-slate-300'}"><span>⚙️</span><span>Settings</span></a>
-          </nav>
-        </div>
-        <div class="p-4 border-t border-slate-700">
-          <div class="flex items-center justify-between">
-            <div class="text-xs text-slate-400 truncate">Logged in as <strong class="text-white">${username}</strong></div>
-            <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
-          </div>
-        </div>
-      </aside>
-
-      <!-- Main Content -->
-      <div class="flex-1 flex flex-col min-w-0">
-        <header class="bg-slate-800 border-b border-slate-700 h-16 px-6 flex items-center justify-between lg:justify-end">
-          <div class="lg:hidden font-bold text-sm text-indigo-400">${settings.organization_name}</div>
-          <div class="flex items-center space-x-4">
-            <a href="/scanner" target="_blank" class="px-3 py-1.5 bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 rounded-lg text-xs font-semibold transition">📷 Open Scanner</a>
-            <a href="/admin/logout" class="text-xs text-rose-400 hover:underline lg:hidden">Logout</a>
-          </div>
-        </header>
-        <main class="p-6 md:p-8 flex-1 overflow-y-auto">
-          <div class="mb-6">
-            <h1 class="text-2xl font-bold text-white">${title}</h1>
-          </div>
-          ${content}
-        </main>
-      </div>
-    </body>
-    </html>
-  `;
-};
-function renderAdminLayout(title, username, settings, content) {
-  return fnRenderAdminLayout(title, username, settings, content);
-}
-
-
-// ==========================================
-// SEPARATE SCANNER PORTAL ROUTES
-// ==========================================
-
-app.get('/scanner', async (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Smartphone QR Scanner Portal</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-      <script src="https://unpkg.com/html5-qrcode"></script>
-    </head>
-    <body class="bg-slate-950 text-white min-h-screen flex flex-col">
-      <!-- Top Bar -->
-      <header class="bg-slate-900 border-b border-slate-800 p-4 flex items-center justify-between shadow-md">
-        <div class="flex items-center space-x-2">
-          <span class="text-xl">📷</span>
-          <h1 class="font-bold text-sm tracking-wide">Attendance Scanner</h1>
-        </div>
-        <div id="connectionStatus" class="flex items-center space-x-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span>Online</span>
-        </div>
-      </header>
-
-      <!-- Main Scanner Container -->
-      <main class="flex-1 max-w-md w-full mx-auto p-4 flex flex-col justify-between">
-        <div class="space-y-4">
-          <!-- PIN Modal / Overlay if locked -->
-          <div id="pinOverlay" class="hidden fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4">
-            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-sm text-center">
-              <div class="text-3xl mb-2">🔒</div>
-              <h2 class="text-lg font-bold mb-1">Scanner PIN Required</h2>
-              <p class="text-xs text-slate-400 mb-4">Enter club security PIN to enable scanner.</p>
-              <input type="password" id="pinInput" placeholder="Enter PIN (Default 1234)" class="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-lg text-center text-lg tracking-widest mb-4 focus:outline-none focus:border-indigo-500">
-              <button onclick="verifyPin()" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 font-bold rounded-lg transition">Unlock Scanner</button>
-            </div>
-          </div>
-
-          <!-- Mode Selector -->
-          <div class="grid grid-cols-2 gap-3 bg-slate-900 p-1.5 rounded-xl border border-slate-800">
-            <button onclick="setMode('IN')" id="btnIn" class="py-2.5 rounded-lg text-sm font-bold transition bg-indigo-600 text-white shadow">TIME IN</button>
-            <button onclick="setMode('OUT')" id="btnOut" class="py-2.5 rounded-lg text-sm font-bold transition text-slate-400 hover:text-white">TIME OUT</button>
-          </div>
-
-          <!-- Camera Box -->
-          <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl relative">
-            <div id="reader" class="w-full aspect-square bg-black"></div>
-            <div id="scanOverlay" class="absolute inset-0 pointer-events-none border-4 border-indigo-500/40 rounded-2xl flex items-center justify-center">
-              <div class="w-48 h-48 border-2 border-dashed border-indigo-400/60 rounded-xl"></div>
-            </div>
-          </div>
-
-          <!-- Result Card -->
-          <div id="resultCard" class="hidden p-4 rounded-xl border transition shadow-xl text-center">
-            <div id="resultIcon" class="text-3xl mb-1">✓</div>
-            <div id="resultTitle" class="font-extrabold text-lg mb-1">SUCCESS</div>
-            <div id="resultMessage" class="text-xs text-slate-300">Member attendance recorded successfully.</div>
-          </div>
-        </div>
-
-        <!-- Recent Scans Bar -->
-        <div class="mt-4 bg-slate-900 border border-slate-800 rounded-xl p-3">
-          <div class="text-xs font-bold uppercase text-slate-400 mb-2">Recent Scans Today</div>
-          <div id="recentScansList" class="space-y-1.5 max-h-32 overflow-y-auto text-xs">
-            <div class="text-slate-500 text-center py-1">No scans yet</div>
-          </div>
-        </div>
-      </main>
-
-      <!-- Audio Synthesizer for Beeps -->
-      <script>
-        let currentMode = 'IN';
-        let scannerUnlocked = false;
-        let isProcessing = false;
-
-        function playSound(type) {
-          try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            
-            if (type === 'success') {
-              osc.frequency.setValueAtTime(880, ctx.currentTime); // A5
-              gain.gain.setValueAtTime(0.1, ctx.currentTime);
-              osc.start();
-              osc.stop(ctx.currentTime + 0.15);
-            } else {
-              // Error beep-beep-beep
-              osc.frequency.setValueAtTime(300, ctx.currentTime);
-              gain.gain.setValueAtTime(0.1, ctx.currentTime);
-              osc.start();
-              osc.stop(ctx.currentTime + 0.1);
-              setTimeout(() => {
-                const osc2 = ctx.createOscillator();
-                osc2.connect(gain);
-                osc2.frequency.setValueAtTime(300, ctx.currentTime);
-                osc2.start();
-                osc2.stop(ctx.currentTime + 0.1);
-              }, 150);
-            }
-          } catch(e) {}
-        }
-
-        function setMode(mode) {
-          currentMode = mode;
-          if (mode === 'IN') {
-            document.getElementById('btnIn').className = 'py-2.5 rounded-lg text-sm font-bold transition bg-indigo-600 text-white shadow';
-            document.getElementById('btnOut').className = 'py-2.5 rounded-lg text-sm font-bold transition text-slate-400 hover:text-white';
-          } else {
-            document.getElementById('btnOut').className = 'py-2.5 rounded-lg text-sm font-bold transition bg-indigo-600 text-white shadow';
-            document.getElementById('btnIn').className = 'py-2.5 rounded-lg text-sm font-bold transition text-slate-400 hover:text-white';
-          }
-        }
-
-        function verifyPin() {
-          const pin = document.getElementById('pinInput').value;
-          fetch('/scanner/verify-pin', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ pin })
-          }).then(res => res.json()).then(data => {
-            if (data.success) {
-              document.getElementById('pinOverlay').classList.add('hidden');
-              scannerUnlocked = true;
-              initScanner();
-            } else {
-              alert('Incorrect PIN');
-            }
-          });
-        }
-
-        function initScanner() {
-          const html5QrCode = new Html5Qrcode("reader");
-          html5QrCode.start(
-            { facingMode: "environment" },
-            { fps: 10, qrbox: { width: 220, height: 220 } },
-            onScanSuccess,
-            onScanFailure
-          ).catch(err => {
-            console.error("Camera error:", err);
-          });
-        }
-
-        async function onScanSuccess(decodedText) {
-          if (isProcessing) return;
-          isProcessing = true;
-
-          try {
-            const res = await fetch('/scanner/record', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ token: decodedText, type: currentMode })
-            });
-            const data = await res.json();
-            
-            const card = document.getElementById('resultCard');
-            card.classList.remove('hidden');
-
-            if (data.success) {
-              playSound('success');
-              card.className = 'p-4 rounded-xl border bg-emerald-500/20 border-emerald-500 text-emerald-300 shadow-xl text-center';
-              document.getElementById('resultIcon').innerText = '✓';
-              document.getElementById('resultTitle').innerText = data.title;
-              document.getElementById('resultMessage').innerText = data.message;
-            } else {
-              playSound('error');
-              card.className = 'p-4 rounded-xl border bg-rose-500/20 border-rose-500 text-rose-300 shadow-xl text-center';
-              document.getElementById('resultIcon').innerText = '✕';
-              document.getElementById('resultTitle').innerText = data.title;
-              document.getElementById('resultMessage').innerText = data.message;
-            }
-
-            loadRecentScans();
-          } catch(err) {
-            console.error(err);
-          } finally {
-            setTimeout(() => { isProcessing = false; }, 3000); // 3-second cooldown
-          }
-        }
-
-        function onScanFailure(error) {
-          // Ignore frequent scanning misses
-        }
-
-        async function loadRecentScans() {
-          try {
-            const res = await fetch('/scanner/recent');
-            const scans = await res.json();
-            const list = document.getElementById('recentScansList');
-            if (scans.length === 0) {
-              list.innerHTML = '<div class="text-slate-500 text-center py-1">No scans yet</div>';
-              return;
-            }
-            list.innerHTML = scans.map(s => \`
-              <div class="flex items-center justify-between bg-slate-950/50 px-2.5 py-1.5 rounded border border-slate-800">
-                <span class="font-bold text-white truncate max-w-[140px]">\${s.full_name}</span>
-                <span class="text-[10px] text-indigo-300">\${s.time_in ? 'IN: ' + s.time_in : 'OUT: ' + s.time_out}</span>
-              </div>
-            \`).join('');
-          } catch(e) {}
-        }
-
-        // On load, check if PIN is verified or required
-        window.onload = () => {
-          fetch('/scanner/check-pin').then(res => res.json()).then(data => {
-            if (data.required) {
-              document.getElementById('pinOverlay').classList.remove('hidden');
-            } else {
-              initScanner();
-            }
-          });
-          loadRecentScans();
-        };
-      </script>
-    </body>
-    </html>
-  `);
-});
-
-app.post('/scanner/verify-pin', async (req, res) => {
-  const { pin } = req.body;
-  const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-  if (pin === settings.scanner_pin) {
-    req.session.scannerAuthorized = true;
-    res.json({ success: true });
-  } else {
-    res.json({ success: false });
-  }
-});
-
-app.get('/scanner/check-pin', (req, res) => {
-  // Always permit or check session
-  res.json({ required: false });
-});
-
-app.get('/scanner/recent', async (req, res) => {
+// Audit Logs
+app.get('/admin/audit-logs', requireAdmin, async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const scans = (await pool.query(`
-      SELECT a.*, m.full_name FROM attendance a 
-      JOIN members m ON a.member_id = m.member_id 
-      WHERE a.date = $1 ORDER BY a.created_at DESC LIMIT 5
-    `, [today])).rows;
-    res.json(scans);
+    const logs = await pool.query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100');
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('admin_audit', { logs: logs.rows, settings: settingsRes.rows[0], adminUser: req.session.adminUser });
   } catch (err) {
-    res.json([]);
+    console.error(err);
+    res.status(500).send('Error loading audit logs');
   }
 });
 
-// Process QR Code Scan
-app.post('/scanner/record', async (req, res) => {
-  const { token, type } = req.body; // type: 'IN' or 'OUT'
+// Database Backup Route
+app.get('/admin/backup', requireAdmin, async (req, res) => {
   try {
-    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [token]);
+    const members = await pool.query('SELECT * FROM members');
+    const attendance = await pool.query('SELECT * FROM attendance');
+    const announcements = await pool.query('SELECT * FROM announcements');
+    const settings = await pool.query('SELECT * FROM settings');
+
+    const backupData = {
+      export_date: new Date().toISOString(),
+      members: members.rows,
+      attendance: attendance.rows,
+      announcements: announcements.rows,
+      settings: settings.rows
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename=school_club_backup.json');
+    res.send(JSON.stringify(backupData, null, 2));
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error generating backup');
+  }
+});
+
+
+// ---------------------------------------------------------
+// 2. SEPARATE SCANNER PORTAL
+// ---------------------------------------------------------
+app.get('/scanner', async (req, res) => {
+  try {
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('scanner', { settings: settingsRes.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading scanner portal');
+  }
+});
+
+// Scanner API endpoint to process QR scan
+app.post('/api/scan', async (req, res) => {
+  const { qr_token, mode } = req.body; // mode: 'TIME_IN' or 'TIME_OUT'
+  try {
+    if (!qr_token) {
+      return res.status(400).json({ success: false, message: 'INVALID QR CODE', reason: 'empty_token' });
+    }
+
+    const memberRes = await pool.query('SELECT * FROM members WHERE qr_token = $1', [qr_token]);
     if (memberRes.rows.length === 0) {
-      return res.json({ success: false, title: 'INVALID QR CODE', message: 'This QR code is not registered in the system.' });
+      return res.status(404).json({ success: false, message: 'INVALID QR CODE', reason: 'not_registered' });
     }
 
     const member = memberRes.rows[0];
     if (member.status !== 'Active') {
-      return res.json({ success: false, title: 'MEMBER INACTIVE', message: `Member ${member.full_name} is currently inactive.` });
+      return res.status(403).json({ success: false, message: 'MEMBER INACTIVE', reason: 'inactive' });
     }
 
     const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toTimeString().split(' ')[0]; // HH:MM:SS
+    const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+    
+    // Check settings for attendance time & grace period calculation
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    const settings = settingsRes.rows[0];
 
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-
-    // Check existing attendance today
     const attRes = await pool.query('SELECT * FROM attendance WHERE member_id = $1 AND date = $2', [member.member_id, today]);
-
-    if (type === 'IN') {
+    
+    if (mode === 'TIME_IN') {
       if (attRes.rows.length > 0 && attRes.rows[0].time_in) {
-        return res.json({ success: false, title: 'ALREADY TIMED IN', message: `${member.full_name} already timed in at ${attRes.rows[0].time_in}.` });
+        return res.json({
+          success: false,
+          message: 'ALREADY TIMED IN',
+          subtext: `Previous Time-In at ${attRes.rows[0].time_in}`,
+          member
+        });
       }
 
-      // Calculate if Late
-      const startTime = settings.attendance_start; // e.g. '08:00:00'
-      const gracePeriod = settings.grace_period || 15; // minutes
+      // Calculate if Late or Present
+      const [startHour, startMin] = settings.attendance_start.split(':').map(Number);
+      const now = new Date();
+      const currentTotalMins = now.getHours() * 60 + now.getMinutes();
+      const startTotalMins = startHour * 60 + startMin + (settings.grace_period || 15);
 
-      // Parse times into minutes
-      const [startH, startM] = startTime.split(':').map(Number);
-      const startTotalMins = startH * 60 + startM + gracePeriod;
-
-      const [nowH, nowM] = nowTime.split(':').map(Number);
-      const nowTotalMins = nowH * 60 + nowM;
-
-      const attStatus = nowTotalMins > startTotalMins ? 'Late' : 'Present';
+      const status = currentTotalMins > startTotalMins ? 'Late' : 'Present';
 
       if (attRes.rows.length > 0) {
-        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE member_id = $3 AND date = $4', [nowTime, attStatus, member.member_id, today]);
+        await pool.query('UPDATE attendance SET time_in = $1, status = $2 WHERE id = $3', [timeNow, status, attRes.rows[0].id]);
       } else {
-        await pool.query('INSERT INTO attendance (member_id, date, time_in, status) VALUES ($1, $2, $3, $4)', [member.member_id, today, nowTime, attStatus]);
+        await pool.query('INSERT INTO attendance (member_id, date, time_in, status) VALUES ($1, $2, $3, $4)', [member.member_id, today, timeNow, status]);
       }
 
       return res.json({
         success: true,
-        title: `TIME IN SUCCESSFUL (${attStatus})`,
-        message: `${member.full_name} (${member.position}) timed in at ${nowTime}`
+        action: 'TIME_IN',
+        message: 'TIME IN SUCCESSFUL',
+        time: timeNow,
+        date: today,
+        status,
+        member
       });
-
-    } else {
-      // TIME OUT
+    } 
+    else if (mode === 'TIME_OUT') {
       if (attRes.rows.length === 0 || !attRes.rows[0].time_in) {
-        return res.json({ success: false, title: 'NO TIME-IN RECORD FOUND', message: `${member.full_name} has not timed in today.` });
+        return res.json({
+          success: false,
+          message: 'NO TIME-IN RECORD FOUND',
+          subtext: 'Please Time-In first before timing out.',
+          member
+        });
       }
-
       if (attRes.rows[0].time_out) {
-        return res.json({ success: false, title: 'ALREADY TIMED OUT', message: `${member.full_name} already timed out today at ${attRes.rows[0].time_out}.` });
+        return res.json({
+          success: false,
+          message: 'ALREADY TIMED OUT',
+          subtext: `Timed out at ${attRes.rows[0].time_out}`,
+          member
+        });
       }
 
-      await pool.query('UPDATE attendance SET time_out = $1 WHERE member_id = $2 AND date = $3', [nowTime, member.member_id, today]);
-
+      await pool.query('UPDATE attendance SET time_out = $1 WHERE id = $2', [timeNow, attRes.rows[0].id]);
       return res.json({
         success: true,
-        title: 'TIME OUT SUCCESSFUL',
-        message: `${member.full_name} timed out at ${nowTime}`
+        action: 'TIME_OUT',
+        message: 'TIME OUT SUCCESSFUL',
+        time: timeNow,
+        date: today,
+        member
       });
     }
 
+    res.status(400).json({ success: false, message: 'Invalid scan mode' });
   } catch (err) {
     console.error(err);
-    res.json({ success: false, title: 'SERVER ERROR', message: 'An error occurred recording attendance.' });
+    res.status(500).json({ success: false, message: 'Server error processing scan' });
   }
 });
 
 
-// ==========================================
-// MEMBER PORTAL ROUTES
-// ==========================================
-
+// ---------------------------------------------------------
+// 3. MEMBER PORTAL & AUTHENTICATION
+// ---------------------------------------------------------
 app.get('/member/login', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Member Portal Login</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen p-4">
-      <div class="max-w-md w-full bg-slate-800 border border-slate-700 rounded-2xl shadow-xl p-8">
-        <div class="text-center mb-6">
-          <div class="inline-flex p-3 bg-sky-600 text-white rounded-xl text-2xl font-bold mb-2">👤</div>
-          <h1 class="text-2xl font-bold">Member Portal</h1>
-          <p class="text-sm text-slate-400">Log in with your temporary username & password</p>
-        </div>
-        ${req.query.error ? `<div class="mb-4 p-3 bg-rose-500/20 border border-rose-500 text-rose-300 rounded-lg text-sm">${req.query.error}</div>` : ''}
-        <form action="/member/login" method="POST" class="space-y-4">
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Username</label>
-            <input type="text" name="username" required class="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-sky-500 text-white" placeholder="club-2026-001">
-          </div>
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Password</label>
-            <input type="password" name="password" required class="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-sky-500 text-white" placeholder="Temporary password">
-          </div>
-          <button type="submit" class="w-full py-3 bg-sky-600 hover:bg-sky-500 font-bold rounded-lg transition shadow-lg shadow-sky-600/30">Member Sign In</button>
-        </form>
-        <div class="mt-6 text-center text-xs text-slate-500">
-          Contact club administrator if you lost your credentials.
-        </div>
-      </div>
-    </body>
-    </html>
-  `);
+  res.render('member_login', { error: null });
 });
 
 app.post('/member/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM members WHERE username = $1', [username]);
-    if (result.rows.length > 0) {
-      const member = result.rows[0];
-      const match = await bcrypt.compare(password, member.password_hash);
-      if (match) {
-        req.session.isMember = true;
-        req.session.memberId = member.member_id;
-
-        // Check if temporary password needs change
-        if (member.temporary_password_status) {
-          return res.redirect('/member/change-password');
-        }
-
-        return res.redirect('/member');
-      }
+    if (result.rows.length === 0) {
+      return res.render('member_login', { error: 'Invalid username or password' });
     }
-    res.redirect('/member/login?error=Invalid username or password');
+    const member = result.rows[0];
+    const match = await bcrypt.compare(password, member.password_hash);
+    if (!match) {
+      return res.render('member_login', { error: 'Invalid username or password' });
+    }
+
+    req.session.memberId = member.member_id;
+    req.session.memberDbId = member.id;
+
+    if (member.temporary_password_status) {
+      return res.redirect('/member/change-password');
+    }
+
+    res.redirect('/member/dashboard');
   } catch (err) {
     console.error(err);
-    res.redirect('/member/login?error=Database error occurred');
+    res.render('member_login', { error: 'Server database error' });
   }
 });
 
-// Force Password Change Route
+function requireMember(req, res, next) {
+  if (req.session && req.session.memberId) {
+    return next();
+  }
+  res.redirect('/member/login');
+}
+
 app.get('/member/change-password', requireMember, (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Change Temporary Password</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen p-4">
-      <div class="max-w-md w-full bg-slate-800 border border-slate-700 rounded-2xl shadow-xl p-8">
-        <div class="text-center mb-6">
-          <div class="inline-flex p-3 bg-amber-500/20 text-amber-400 rounded-xl text-2xl font-bold mb-2">🔒</div>
-          <h1 class="text-xl font-bold">Password Change Required</h1>
-          <p class="text-xs text-slate-400 mt-1">Your password is temporary. Please create a new secure password before continuing.</p>
-        </div>
-        ${req.query.error ? `<div class="mb-4 p-3 bg-rose-500/20 border border-rose-500 text-rose-300 rounded-lg text-sm">${req.query.error}</div>` : ''}
-        <form action="/member/change-password" method="POST" class="space-y-4">
-          <div>
-            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">New Password</label>
-            <input type="password" name="new_password" required minlength="6" class="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-sky-500 text-white" placeholder="At least 6 characters">
-          </div>
-          <button type="submit" class="w-full py-3 bg-sky-600 hover:bg-sky-500 font-bold rounded-lg transition">Update Password & Continue</button>
-        </form>
-      </div>
-    </body>
-    </html>
-  `);
+  res.render('member_change_password', { error: null });
 });
 
 app.post('/member/change-password', requireMember, async (req, res) => {
   const { new_password } = req.body;
-  if (!new_password || new_password.length < 6) {
-    return res.redirect('/member/change-password?error=Password must be at least 6 characters long');
-  }
   try {
-    const hash = await bcrypt.hash(new_password, 10);
-    await pool.query('UPDATE members SET password_hash = $1, temporary_password_status = FALSE WHERE member_id = $2', [hash, req.session.memberId]);
-    res.redirect('/member');
+    if (!new_password || new_password.length < 6) {
+      return res.render('member_change_password', { error: 'Password must be at least 6 characters long.' });
+    }
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(new_password, salt);
+
+    await pool.query('UPDATE members SET password_hash = $1, temporary_password_status = FALSE WHERE member_id = $2', [password_hash, req.session.memberId]);
+    res.redirect('/member/dashboard');
   } catch (err) {
     console.error(err);
-    res.redirect('/member/change-password?error=Database error');
+    res.status(500).send('Error updating password');
   }
 });
 
@@ -1519,119 +734,1329 @@ app.get('/member/logout', (req, res) => {
 });
 
 // Member Dashboard
-app.get('/member', requireMember, async (req, res) => {
+app.get('/member/dashboard', requireMember, async (req, res) => {
   try {
-    const settings = (await pool.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-    const member = (await pool.query('SELECT * FROM members WHERE member_id = $1', [req.session.memberId])).rows[0];
-    if (!member) return res.redirect('/member/login');
+    const memberRes = await pool.query('SELECT * FROM members WHERE member_id = $1', [req.session.memberId]);
+    const member = memberRes.rows[0];
 
-    if (member.temporary_password_status) {
-      return res.redirect('/member/change-password');
-    }
+    const attRes = await pool.query('SELECT * FROM attendance WHERE member_id = $1 ORDER BY date DESC', [member.member_id]);
+    const attendance = attRes.rows;
 
-    const attendance = (await pool.query('SELECT * FROM attendance WHERE member_id = $1 ORDER BY date DESC LIMIT 10', [member.member_id])).rows;
-    const announcements = (await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5')).rows;
+    const totalPresent = attendance.filter(a => a.status === 'Present').length;
+    const totalLate = attendance.filter(a => a.status === 'Late').length;
+    const totalAbsent = attendance.filter(a => a.status === 'Absent').length;
+    const totalScans = totalPresent + totalLate;
+    const attendancePercentage = attendance.length > 0 ? ((totalScans / attendance.length) * 100).toFixed(1) : 0;
 
-    // Attendance stats
-    const totalAtt = (await pool.query('SELECT COUNT(*) FROM attendance WHERE member_id = $1', [member.member_id])).rows[0].count;
-    const presentAtt = (await pool.query("SELECT COUNT(*) FROM attendance WHERE member_id = $1 AND status = 'Present'", [member.member_id])).rows[0].count;
-    const lateAtt = (await pool.query("SELECT COUNT(*) FROM attendance WHERE member_id = $1 AND status = 'Late'", [member.member_id])).rows[0].count;
+    const announcementsRes = await pool.query('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 5');
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
 
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Member Dashboard - ${member.full_name}</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-      </head>
-      <body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col">
-        <header class="bg-slate-800 border-b border-slate-700 p-4 flex items-center justify-between">
-          <div class="flex items-center space-x-3">
-            <div class="w-9 h-9 rounded-full bg-sky-600 flex items-center justify-center font-bold text-sm">👤</div>
-            <div>
-              <div class="font-bold text-sm text-white">${member.full_name}</div>
-              <div class="text-xs text-sky-400">${member.member_id} • ${member.position}</div>
-            </div>
-          </div>
-          <a href="/member/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
-        </header>
-
-        <main class="max-w-5xl w-full mx-auto p-6 flex-1 space-y-6">
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg flex flex-col justify-between">
-              <div>
-                <div class="text-xs uppercase text-slate-400 font-semibold mb-1">My Membership ID</div>
-                <div class="text-xl font-bold text-white mb-2">${member.member_id}</div>
-                <p class="text-xs text-slate-400 mb-4">View or print your official membership ID card.</p>
-              </div>
-              <a href="/admin/member/id/${member.id}" target="_blank" class="w-full py-2 bg-sky-600 hover:bg-sky-500 text-center rounded-lg text-sm font-bold transition">View My ID Card</a>
-            </div>
-            
-            <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg md:col-span-2 flex flex-col justify-between">
-              <div>
-                <div class="text-xs uppercase text-slate-400 font-semibold mb-1">Attendance Summary</div>
-                <div class="grid grid-cols-3 gap-4 my-3 text-center">
-                  <div class="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
-                    <div class="text-2xl font-extrabold text-emerald-400">${presentAtt}</div>
-                    <div class="text-xs text-slate-400">Present</div>
-                  </div>
-                  <div class="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
-                    <div class="text-2xl font-extrabold text-amber-400">${lateAtt}</div>
-                    <div class="text-xs text-slate-400">Late</div>
-                  </div>
-                  <div class="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
-                    <div class="text-2xl font-extrabold text-indigo-400">${totalAtt}</div>
-                    <div class="text-xs text-slate-400">Total Scans</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-              <h2 class="text-lg font-bold mb-4 text-white">Recent Attendance Logs</h2>
-              <div class="space-y-3">
-                ${attendance.length === 0 ? '<p class="text-sm text-slate-500">No attendance records found.</p>' : attendance.map(a => `
-                  <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg border border-slate-700/50 text-sm">
-                    <div>
-                      <div class="font-mono text-xs text-indigo-300">${a.date}</div>
-                      <div class="text-xs text-slate-400">In: ${a.time_in || '—'} | Out: ${a.time_out || '—'}</div>
-                    </div>
-                    <span class="px-2.5 py-1 text-xs rounded-full font-semibold ${a.status === 'Present' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}">${a.status}</span>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-
-            <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-              <h2 class="text-lg font-bold mb-4 text-white">Club Announcements</h2>
-              <div class="space-y-3">
-                ${announcements.length === 0 ? '<p class="text-sm text-slate-500">No announcements posted.</p>' : announcements.map(an => `
-                  <div class="p-3 bg-slate-900/50 rounded-lg border border-slate-700/50">
-                    <div class="flex justify-between items-center mb-1">
-                      <h3 class="font-bold text-sm text-white">${an.title}</h3>
-                      <span class="text-[10px] font-mono text-slate-400">${new Date(an.created_at).toLocaleDateString()}</span>
-                    </div>
-                    <p class="text-xs text-slate-300">${an.message}</p>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          </div>
-        </main>
-      </body>
-      </html>
-    `);
+    res.render('member_dashboard', {
+      member,
+      attendance,
+      totalPresent,
+      totalLate,
+      totalAbsent,
+      attendancePercentage,
+      announcements: announcementsRes.rows,
+      settings: settingsRes.rows[0]
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).send('Error loading member dashboard');
   }
+});
+
+// Member ID Card View
+app.get('/member/id-card', requireMember, async (req, res) => {
+  try {
+    const memberRes = await pool.query('SELECT * FROM members WHERE member_id = $1', [req.session.memberId]);
+    const settingsRes = await pool.query('SELECT * FROM settings WHERE id = 1');
+    res.render('member_id_card', { member: memberRes.rows[0], settings: settingsRes.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading member ID card');
+  }
+});
+
+
+// ---------------------------------------------------------
+// EJS VIEW TEMPLATES EMBEDDED DYNAMICALLY
+// ---------------------------------------------------------
+const views = {
+  // 1. ADMIN LOGIN
+  'admin_login.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Admin Portal Login</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen">
+  <div class="bg-slate-800 p-8 rounded-2xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="text-center mb-6">
+      <span class="bg-indigo-500/20 text-indigo-400 text-xs px-3 py-1 rounded-full uppercase font-semibold">Administrator Access</span>
+      <h1 class="text-2xl font-bold mt-2 text-white">Admin Portal</h1>
+      <p class="text-slate-400 text-xs mt-1">Sign in with default credentials or updated password</p>
+    </div>
+    <% if (error) { %>
+      <div class="bg-rose-500/20 border border-rose-500 text-rose-300 text-xs p-3 rounded-lg mb-4 text-center"><%= error %></div>
+    <% } %>
+    <form action="/admin/login" method="POST" class="space-y-4">
+      <div>
+        <label class="block text-xs font-medium text-slate-300 mb-1">Username</label>
+        <input type="text" name="username" required value="admin" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-slate-300 mb-1">Password</label>
+        <input type="password" name="password" required value="password123" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+      </div>
+      <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg transition text-sm shadow-lg">Sign In to Dashboard</button>
+    </form>
+    <div class="mt-6 text-center text-xs text-slate-500">
+      Default Credentials: <span class="text-indigo-400 font-mono">admin</span> / <span class="text-indigo-400 font-mono">password123</span>
+      <div class="mt-2"><a href="/" class="text-slate-400 hover:underline">&larr; Back to Portal Home</a></div>
+    </div>
+  </div>
+</body>
+</html>`,
+
+  // 2. ADMIN DASHBOARD
+  'admin_dashboard.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Admin Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <!-- Sidebar -->
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <header class="bg-slate-950 border-b border-slate-800 px-6 py-4 flex justify-between items-center md:hidden">
+      <span class="font-bold text-indigo-400"><%= settings.organization_name %></span>
+      <a href="/admin/logout" class="text-xs text-rose-400">Logout</a>
+    </header>
+
+    <div class="p-8 max-w-7xl w-full mx-auto space-y-8">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h1 class="text-3xl font-extrabold text-white">Dashboard Overview</h1>
+          <p class="text-slate-400 text-xs mt-1">Real-time attendance statistics and system overview for <%= settings.school_year %></p>
+        </div>
+        <div class="flex gap-3">
+          <a href="/scanner" target="_blank" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-4 py-2.5 rounded-lg font-medium transition shadow">Open Scanner Portal &rarr;</a>
+          <a href="/admin/backup" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs px-4 py-2.5 rounded-lg font-medium transition">Download DB Backup</a>
+        </div>
+      </div>
+
+      <!-- Statistics Grid -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow">
+          <span class="text-xs font-semibold text-slate-400 uppercase">Total Members</span>
+          <div class="text-3xl font-black mt-2 text-white"><%= totalMembers %></div>
+          <div class="text-xs text-indigo-400 mt-1"><%= activeMembers %> Active, <%= inactiveMembers %> Inactive</div>
+        </div>
+        <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow">
+          <span class="text-xs font-semibold text-slate-400 uppercase">Present Today</span>
+          <div class="text-3xl font-black mt-2 text-emerald-400"><%= presentToday %></div>
+          <div class="text-xs text-slate-400 mt-1"><%= lateToday %> Late arrivals</div>
+        </div>
+        <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow">
+          <span class="text-xs font-semibold text-slate-400 uppercase">Absent Today</span>
+          <div class="text-3xl font-black mt-2 text-rose-400"><%= absentToday %></div>
+          <div class="text-xs text-slate-400 mt-1">Unrecorded active members</div>
+        </div>
+        <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow">
+          <span class="text-xs font-semibold text-slate-400 uppercase">Attendance Rate</span>
+          <div class="text-3xl font-black mt-2 text-sky-400"><%= attendancePercentage %>%</div>
+          <div class="text-xs text-slate-400 mt-1"><%= totalAttendanceToday %> Total Scans Today</div>
+        </div>
+      </div>
+
+      <!-- Recent Activity Tables -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <!-- Recent Scans -->
+        <div class="bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow">
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="font-bold text-white text-sm">Recent Attendance Scans</h3>
+            <a href="/admin/attendance" class="text-xs text-indigo-400 hover:underline">View All</a>
+          </div>
+          <div class="space-y-3">
+            <% if (recentScans.length === 0) { %>
+              <p class="text-xs text-slate-500 py-4 text-center">No attendance scans recorded today.</p>
+            <% } else { %>
+              <% recentScans.forEach(scan => { %>
+                <div class="flex justify-between items-center bg-slate-900/50 p-3 rounded-xl border border-slate-700/50 text-xs">
+                  <div>
+                    <span class="font-bold text-white"><%= scan.full_name %></span>
+                    <span class="text-slate-400 block"><%= scan.position %> &bull; In: <%= scan.time_in || 'N/A' %></span>
+                  </div>
+                  <span class="px-2.5 py-1 rounded-full font-semibold <%= scan.status === 'Present' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400' %>"><%= scan.status %></span>
+                </div>
+              <% }) %>
+            <% } %>
+          </div>
+        </div>
+
+        <!-- Recent Registrations -->
+        <div class="bg-slate-800 rounded-2xl border border-slate-700 p-6 shadow">
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="font-bold text-white text-sm">Recently Registered Members</h3>
+            <a href="/admin/members" class="text-xs text-indigo-400 hover:underline">View All</a>
+          </div>
+          <div class="space-y-3">
+            <% if (recentRegs.length === 0) { %>
+              <p class="text-xs text-slate-500 py-4 text-center">No members registered yet.</p>
+            <% } else { %>
+              <% recentRegs.forEach(m => { %>
+                <div class="flex justify-between items-center bg-slate-900/50 p-3 rounded-xl border border-slate-700/50 text-xs">
+                  <div>
+                    <span class="font-bold text-white"><%= m.full_name %></span>
+                    <span class="text-slate-400 block"><%= m.member_id %> &bull; Username: <code class="text-indigo-300"><%= m.username %></code></span>
+                  </div>
+                  <span class="px-2.5 py-1 rounded-full font-semibold bg-indigo-500/20 text-indigo-400"><%= m.status %></span>
+                </div>
+              <% }) %>
+            <% } %>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>`,
+
+  // 3. ADMIN MEMBERS MANAGEMENT
+  'admin_members.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Members Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <!-- Sidebar -->
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <div class="p-8 max-w-7xl w-full mx-auto space-y-6">
+      
+      <!-- Notifications / URL Alerts -->
+      <% const urlParams = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : ''); %>
+      <!-- We handle parameter rendering via server-injected variables or simple query check -->
+      
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h1 class="text-3xl font-extrabold text-white">Members Directory</h1>
+          <p class="text-slate-400 text-xs mt-1">Register new club members, inspect credentials, or view digital ID badges.</p>
+        </div>
+        <button onclick="openAddModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2.5 rounded-lg font-semibold transition shadow">+ Add New Member</button>
+      </div>
+
+      <!-- Search & Filters -->
+      <form action="/admin/members" method="GET" class="bg-slate-800 p-4 rounded-2xl border border-slate-700 flex flex-wrap gap-4 items-center">
+        <input type="text" name="search" value="<%= search %>" placeholder="Search by name, ID, username..." class="bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-xs text-white flex-1 focus:outline-none focus:border-indigo-500">
+        <select name="status" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500">
+          <option value="">All Status</option>
+          <option value="Active" <%= status === 'Active' ? 'selected' : '' %>>Active</option>
+          <option value="Inactive" <%= status === 'Inactive' ? 'selected' : '' %>>Inactive</option>
+        </select>
+        <button type="submit" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-4 py-2 rounded-lg font-medium transition">Filter</button>
+        <a href="/admin/members" class="text-xs text-slate-400 hover:underline">Reset</a>
+      </form>
+
+      <!-- Members Table -->
+      <div class="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-[10px] tracking-wider">
+              <tr>
+                <th class="p-4">Member</th>
+                <th class="p-4">ID / Username</th>
+                <th class="p-4">Position / Course</th>
+                <th class="p-4">Contact</th>
+                <th class="p-4">Status</th>
+                <th class="p-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-700/50">
+              <% if (members.length === 0) { %>
+                <tr><td colspan="6" class="p-8 text-center text-slate-500">No members found matching criteria.</td></tr>
+              <% } else { %>
+                <% members.forEach(m => { %>
+                  <tr class="hover:bg-slate-750 transition">
+                    <td class="p-4 flex items-center gap-3">
+                      <div class="w-9 h-9 rounded-full bg-slate-900 overflow-hidden border border-slate-700 flex items-center justify-center font-bold text-indigo-400">
+                        <% if (m.photo) { %>
+                          <img src="<%= m.photo %>" class="w-full h-full object-cover">
+                        <% } else { %>
+                          <%= m.full_name.charAt(0) %>
+                        <% } %>
+                      </div>
+                      <div>
+                        <div class="font-bold text-white"><%= m.full_name %></div>
+                        <div class="text-[10px] text-slate-400"><%= m.email || 'No email' %></div>
+                      </div>
+                    </td>
+                    <td class="p-4 font-mono">
+                      <div class="text-indigo-400"><%= m.member_id %></div>
+                      <div class="text-[10px] text-slate-400">User: <%= m.username %></div>
+                    </td>
+                    <td class="p-4">
+                      <div class="text-white"><%= m.position %></div>
+                      <div class="text-[10px] text-slate-400"><%= m.course || 'N/A' %> &bull; Year <%= m.year_level || '1' %></div>
+                    </td>
+                    <td class="p-4 text-slate-300"><%= m.contact || 'N/A' %></td>
+                    <td class="p-4">
+                      <span class="px-2.5 py-1 rounded-full font-semibold text-[10px] <%= m.status === 'Active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400' %>"><%= m.status %></span>
+                    </td>
+                    <td class="p-4 text-right space-x-2">
+                      <a href="/admin/members/id-card/<%= m.id %>" target="_blank" class="text-indigo-400 hover:underline font-medium">ID Card</a>
+                      <a href="/admin/members/reset-pass/<%= m.id %>" onclick="return confirm('Generate a new temporary password for this member?')" class="text-amber-400 hover:underline font-medium">Reset Pass</a>
+                      <a href="/admin/members/regen-qr/<%= m.id %>" onclick="return confirm('Regenerate QR Code? Old QR code will be invalidated.')" class="text-sky-400 hover:underline font-medium">New QR</a>
+                      <a href="/admin/members/delete/<%= m.id %>" onclick="return confirm('Delete this member permanently?')" class="text-rose-400 hover:underline font-medium">Delete</a>
+                    </td>
+                  </tr>
+                <% }) %>
+              <% } %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Add Member Modal -->
+  <div id="addModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+    <div class="bg-slate-900 border border-slate-700 w-full max-w-xl rounded-2xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-lg font-bold text-white">Register New Club Member</h3>
+        <button onclick="closeAddModal()" class="text-slate-400 hover:text-white">&times;</button>
+      </div>
+      <p class="text-slate-400 text-xs mb-4">System will automatically generate unique member ID, login credentials, and QR code token.</p>
+      
+      <form action="/admin/members/add" method="POST" class="space-y-4 text-xs">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Full Name *</label>
+            <input type="text" name="full_name" required class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Position in Club</label>
+            <input type="text" name="position" value="Member" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Club / Org</label>
+            <input type="text" name="club" value="<%= settings.organization_name %>" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Year Level</label>
+            <input type="text" name="year_level" placeholder="e.g. 3rd Year" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Course / Section</label>
+            <input type="text" name="course" placeholder="BSIT 3-A" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Contact Number</label>
+            <input type="text" name="contact" placeholder="09123456789" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Email Address</label>
+            <input type="email" name="email" placeholder="student@school.edu" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+          </div>
+        </div>
+        <div>
+          <label class="block text-slate-300 font-medium mb-1">Profile Photo URL (Optional)</label>
+          <input type="url" name="photo" placeholder="https://example.com/photo.jpg" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500">
+        </div>
+        <div class="flex justify-end gap-3 pt-4 border-t border-slate-800">
+          <button type="button" onclick="closeAddModal()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg font-medium">Cancel</button>
+          <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg font-semibold shadow">Create Member & Generate ID</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    function openAddModal() { document.getElementById('addModal').classList.remove('hidden'); document.getElementById('addModal').classList.add('flex'); }
+    function closeAddModal() { document.getElementById('addModal').classList.remove('flex'); document.getElementById('addModal').classList.add('hidden'); }
+  </script>
+</body>
+</html>`,
+
+  // 4. ADMIN ID CARD GENERATOR (CR80 PVC aspect ratio + Print rules)
+  'admin_id_card.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>ID Card - <%= member.full_name %></title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    @media print {
+      body { background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .no-print { display: none !important; }
+      .id-card-box { border: 1px solid #cbd5e1 !important; box-shadow: none !important; }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 flex flex-col items-center justify-center min-h-screen p-6">
+  
+  <div class="no-print mb-6 flex gap-3">
+    <button onclick="window.print()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl font-semibold text-xs shadow-lg transition">Print ID Card</button>
+    <button onclick="window.close()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-5 py-2.5 rounded-xl font-semibold text-xs transition">Close Window</button>
+  </div>
+
+  <!-- Standard CR80 PVC ID Dimensions container (85.6mm x 53.98mm aspect ratio representation) -->
+  <div class="id-card-box bg-slate-950 border border-slate-800 w-[420px] rounded-2xl overflow-hidden shadow-2xl flex flex-col relative text-slate-100">
+    
+    <!-- Header -->
+    <div class="bg-indigo-950 border-b border-indigo-900/50 p-4 text-center">
+      <div class="text-[10px] tracking-widest text-indigo-300 font-semibold uppercase"><%= settings.school_name %></div>
+      <div class="text-base font-extrabold text-white"><%= settings.organization_name %></div>
+    </div>
+
+    <!-- Body -->
+    <div class="p-6 flex gap-5 items-center">
+      <!-- Member Photo -->
+      <div class="w-28 h-32 rounded-xl bg-slate-900 border-2 border-indigo-500/50 overflow-hidden flex items-center justify-center font-bold text-2xl text-indigo-400 shrink-0 shadow">
+        <% if (member.photo) { %>
+          <img src="<%= member.photo %>" class="w-full h-full object-cover">
+        <% } else { %>
+          <%= member.full_name.charAt(0) %>
+        <% } %>
+      </div>
+
+      <!-- Info -->
+      <div class="space-y-1.5 flex-1 min-w-0">
+        <div>
+          <h2 class="text-lg font-black text-white truncate"><%= member.full_name %></h2>
+          <p class="text-xs font-semibold text-indigo-400"><%= member.position %></p>
+        </div>
+        <div class="text-[11px] text-slate-300 space-y-0.5 pt-1">
+          <div><strong class="text-slate-400">ID No:</strong> <span class="font-mono text-white"><%= member.member_id %></span></div>
+          <div><strong class="text-slate-400">Course:</strong> <%= member.course || 'N/A' %></div>
+          <div><strong class="text-slate-400">Year:</strong> <%= member.year_level || 'N/A' %></div>
+          <div><strong class="text-slate-400">S.Y.:</strong> <%= settings.school_year %></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- QR Code & Credentials section -->
+    <div class="bg-slate-900/80 border-t border-slate-800 p-4 flex justify-between items-center">
+      <div class="space-y-1">
+        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Portal Credentials</div>
+        <div class="text-[11px]">User: <code class="text-indigo-300 font-bold"><%= member.username %></code></div>
+        <div class="text-[11px]">Temp Pass: <code class="text-amber-400 font-bold"><%= member.temporary_password_status ? 'Active Temp' : 'Custom' %></code></div>
+        <div class="text-[9px] text-slate-500 max-w-[180px]">Change password upon first login at /member</div>
+      </div>
+      <div class="bg-white p-2 rounded-xl shadow shrink-0">
+        <div id="qrcode" class="w-20 h-20 flex items-center justify-center"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Generate QR code safely client-side
+    new QRCode(document.getElementById("qrcode"), {
+      text: "<%= member.qr_token %>",
+      width: 80,
+      height: 80,
+      colorDark: "#020617",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  </script>
+</body>
+</html>`,
+
+  // 5. ADMIN ATTENDANCE RECORDS
+  'admin_attendance.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Attendance Records</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <div class="p-8 max-w-7xl w-full mx-auto space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h1 class="text-3xl font-extrabold text-white">Attendance Logs</h1>
+          <p class="text-slate-400 text-xs mt-1">Complete scanned records of time-in and time-out activity.</p>
+        </div>
+        <button onclick="window.print()" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs px-4 py-2.5 rounded-lg font-medium transition">Print Report</button>
+      </div>
+
+      <!-- Filters -->
+      <form action="/admin/attendance" method="GET" class="bg-slate-800 p-4 rounded-2xl border border-slate-700 flex flex-wrap gap-4 items-center">
+        <input type="date" name="date" value="<%= date %>" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none">
+        <input type="text" name="search" value="<%= search %>" placeholder="Search name or ID..." class="bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-xs text-white flex-1 focus:outline-none">
+        <select name="status" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none">
+          <option value="">All Status</option>
+          <option value="Present" <%= status === 'Present' ? 'selected' : '' %>>Present</option>
+          <option value="Late" <%= status === 'Late' ? 'selected' : '' %>>Late</option>
+        </select>
+        <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded-lg font-medium">Filter</button>
+        <a href="/admin/attendance" class="text-xs text-slate-400 hover:underline">Reset</a>
+      </form>
+
+      <!-- Table -->
+      <div class="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-[10px] tracking-wider">
+              <tr>
+                <th class="p-4">Date</th>
+                <th class="p-4">Member ID & Name</th>
+                <th class="p-4">Position</th>
+                <th class="p-4">Time In</th>
+                <th class="p-4">Time Out</th>
+                <th class="p-4">Status</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-700/50">
+              <% if (attendance.length === 0) { %>
+                <tr><td colspan="6" class="p-8 text-center text-slate-500">No attendance logs found.</td></tr>
+              <% } else { %>
+                <% attendance.forEach(att => { %>
+                  <tr class="hover:bg-slate-750 transition">
+                    <td class="p-4 font-mono text-slate-400"><%= att.date %></td>
+                    <td class="p-4">
+                      <div class="font-bold text-white"><%= att.full_name %></div>
+                      <div class="text-[10px] text-indigo-400 font-mono"><%= att.member_id %></div>
+                    </td>
+                    <td class="p-4"><%= att.position %></td>
+                    <td class="p-4 font-mono text-emerald-400"><%= att.time_in || '—' %></td>
+                    <td class="p-4 font-mono text-amber-400"><%= att.time_out || '—' %></td>
+                    <td class="p-4">
+                      <span class="px-2.5 py-1 rounded-full font-semibold text-[10px] <%= att.status === 'Present' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400' %>"><%= att.status %></span>
+                    </td>
+                  </tr>
+                <% }) %>
+              <% } %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>`,
+
+  // 6. ADMIN REPORTS & ANALYTICS
+  'admin_reports.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Analytics & Reports</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <div class="p-8 max-w-7xl w-full mx-auto space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h1 class="text-3xl font-extrabold text-white">Attendance Analytics</h1>
+          <p class="text-slate-400 text-xs mt-1">Aggregated statistics and export options.</p>
+        </div>
+        <button onclick="window.print()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2.5 rounded-lg font-semibold shadow">Print Printable Report</button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow">
+          <span class="text-xs font-semibold text-slate-400 uppercase">Total System Scans</span>
+          <div class="text-4xl font-black mt-3 text-white"><%= totalScans %></div>
+          <p class="text-xs text-slate-400 mt-1">Cumulative time-ins logged</p>
+        </div>
+        <% stats.forEach(s => { %>
+          <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow">
+            <span class="text-xs font-semibold text-slate-400 uppercase"><%= s.status %> Count</span>
+            <div class="text-4xl font-black mt-3 <%= s.status === 'Present' ? 'text-emerald-400' : 'text-amber-400' %>"><%= s.count %></div>
+            <p class="text-xs text-slate-400 mt-1">Total categorized as <%= s.status %></p>
+          </div>
+        <% }) %>
+      </div>
+    </div>
+  </main>
+</body>
+</html>`,
+
+  // 7. ADMIN ANNOUNCEMENTS
+  'admin_announcements.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Announcements</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <div class="p-8 max-w-5xl w-full mx-auto space-y-8">
+      <div>
+        <h1 class="text-3xl font-extrabold text-white">Club Announcements</h1>
+        <p class="text-slate-400 text-xs mt-1">Broadcast announcements directly to member dashboards.</p>
+      </div>
+
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow">
+        <h3 class="font-bold text-white text-sm mb-4">Create New Announcement</h3>
+        <form action="/admin/announcements/add" method="POST" class="space-y-4 text-xs">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Title</label>
+            <input type="text" name="title" required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Message Content</label>
+            <textarea name="message" rows="3" required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none"></textarea>
+          </div>
+          <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-5 py-2.5 rounded-lg transition shadow">Publish Announcement</button>
+        </form>
+      </div>
+
+      <div class="space-y-4">
+        <h3 class="font-bold text-white text-sm">Published Announcements</h3>
+        <% if (announcements.length === 0) { %>
+          <p class="text-xs text-slate-500">No announcements posted yet.</p>
+        <% } else { %>
+          <% announcements.forEach(a => { %>
+            <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700 flex justify-between items-start">
+              <div>
+                <h4 class="font-bold text-white text-sm"><%= a.title %></h4>
+                <p class="text-slate-300 text-xs mt-1"><%= a.message %></p>
+                <span class="text-[10px] text-slate-500 mt-2 block"><%= new Date(a.created_at).toLocaleString() %></span>
+              </div>
+              <a href="/admin/announcements/delete/<%= a.id %>" onclick="return confirm('Delete this announcement?')" class="text-rose-400 hover:underline text-xs font-semibold">Delete</a>
+            </div>
+          <% }) %>
+        <% } %>
+      </div>
+    </div>
+  </main>
+</body>
+</html>`,
+
+  // 8. ADMIN SETTINGS
+  'admin_settings.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>System Settings</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <div class="p-8 max-w-4xl w-full mx-auto space-y-6">
+      <div>
+        <h1 class="text-3xl font-extrabold text-white">System Settings</h1>
+        <p class="text-slate-400 text-xs mt-1">Configure organization parameters and administrative password.</p>
+      </div>
+
+      <% if (success) { %>
+        <div class="bg-emerald-500/20 border border-emerald-500 text-emerald-300 text-xs p-3 rounded-xl">Settings updated successfully!</div>
+      <% } %>
+
+      <form action="/admin/settings" method="POST" class="bg-slate-800 p-6 rounded-2xl border border-slate-700 space-y-4 text-xs shadow">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Organization Name</label>
+            <input type="text" name="organization_name" value="<%= settings.organization_name %>" required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">School Name</label>
+            <input type="text" name="school_name" value="<%= settings.school_name %>" required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Attendance Start Time</label>
+            <input type="text" name="attendance_start" value="<%= settings.attendance_start %>" placeholder="08:00" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Grace Period (Minutes)</label>
+            <input type="number" name="grace_period" value="<%= settings.grace_period %>" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">School Year</label>
+            <input type="text" name="school_year" value="<%= settings.school_year %>" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+          </div>
+        </div>
+        <div>
+          <label class="block text-slate-300 font-medium mb-1">Organization Logo URL</label>
+          <input type="url" name="logo" value="<%= settings.logo %>" placeholder="https://..." class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+        </div>
+        <div class="pt-4 border-t border-slate-700">
+          <label class="block text-slate-300 font-medium mb-1">Change Admin Password (Leave blank to keep current)</label>
+          <input type="password" name="new_password" placeholder="New secure password" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none">
+        </div>
+        <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-5 py-2.5 rounded-lg transition shadow">Save Changes</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>`,
+
+  // 9. ADMIN AUDIT LOGS
+  'admin_audit.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Audit Logs</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans flex min-h-screen">
+  <aside class="w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between hidden md:flex">
+    <div>
+      <div class="p-6 border-b border-slate-800">
+        <h2 class="text-lg font-bold text-indigo-400 truncate"><%= settings.organization_name %></h2>
+        <p class="text-xs text-slate-500 mt-1">Admin Control Center</p>
+      </div>
+      <nav class="p-4 space-y-1 text-sm">
+        <a href="/admin/dashboard" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Dashboard</a>
+        <a href="/admin/members" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Members Management</a>
+        <a href="/admin/attendance" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Attendance Records</a>
+        <a href="/admin/reports" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Analytics & Reports</a>
+        <a href="/admin/announcements" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">Announcements</a>
+        <a href="/admin/audit-logs" class="flex items-center gap-3 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium">Audit Logs</a>
+        <a href="/admin/settings" class="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl transition">System Settings</a>
+      </nav>
+    </div>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-slate-400">Logged as <strong class="text-white"><%= adminUser %></strong></span>
+        <a href="/admin/logout" class="text-xs text-rose-400 hover:underline">Logout</a>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
+    <div class="p-8 max-w-6xl w-full mx-auto space-y-6">
+      <div>
+        <h1 class="text-3xl font-extrabold text-white">System Audit Trail</h1>
+        <p class="text-slate-400 text-xs mt-1">Track administrative actions and security events.</p>
+      </div>
+
+      <div class="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-[10px]">
+            <tr>
+              <th class="p-4">Timestamp</th>
+              <th class="p-4">Actor</th>
+              <th class="p-4">Action Performed</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-700/50">
+            <% if (logs.length === 0) { %>
+              <tr><td colspan="3" class="p-8 text-center text-slate-500">No audit logs recorded.</td></tr>
+            <% } else { %>
+              <% logs.forEach(l => { %>
+                <tr class="hover:bg-slate-750">
+                  <td class="p-4 font-mono text-slate-400"><%= new Date(l.created_at).toLocaleString() %></td>
+                  <td class="p-4 font-bold text-indigo-400"><%= l.actor %></td>
+                  <td class="p-4 text-white"><%= l.action %></td>
+                </tr>
+              <% }) %>
+            <% } %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</body>
+</html>`,
+
+  // 10. SEPARATE SMARTPHONE SCANNER PORTAL
+  'scanner.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scanner Portal - <%= settings.organization_name %></title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col justify-between p-4">
+  
+  <header class="text-center py-3 border-b border-slate-800">
+    <span class="bg-emerald-500/20 text-emerald-400 text-[10px] px-3 py-1 rounded-full uppercase font-semibold tracking-widest">Entrance Scanner Portal</span>
+    <h1 class="text-xl font-black text-white mt-1"><%= settings.organization_name %></h1>
+  </header>
+
+  <main class="max-w-md w-full mx-auto my-auto space-y-4 py-4">
+    <!-- Mode Selection -->
+    <div class="grid grid-cols-2 gap-3">
+      <button id="btnTimeIn" onclick="setMode('TIME_IN')" class="py-3 rounded-xl font-bold text-xs bg-emerald-600 text-white shadow-lg transition">TIME IN</button>
+      <button id="btnTimeOut" onclick="setMode('TIME_OUT')" class="py-3 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 transition">TIME OUT</button>
+    </div>
+
+    <!-- Scanner Viewport Area -->
+    <div class="bg-slate-900 border-2 border-slate-800 rounded-3xl overflow-hidden p-3 shadow-2xl relative">
+      <div id="reader" class="w-full rounded-2xl overflow-hidden"></div>
+      <div id="scannerStatus" class="text-center text-xs text-slate-400 mt-2">Point phone camera at member QR code</div>
+    </div>
+
+    <!-- Scan Result Popup / Display Box -->
+    <div id="resultBox" class="hidden rounded-2xl p-5 border text-center shadow-2xl transition-all">
+      <div id="resIcon" class="text-3xl font-black mb-1">✓</div>
+      <h2 id="resTitle" class="text-lg font-black">SUCCESSFUL</h2>
+      <div id="resDetails" class="text-xs text-slate-300 mt-2 space-y-1"></div>
+    </div>
+  </main>
+
+  <footer class="text-center text-[10px] text-slate-600 py-2">
+    Dedicated Smartphone Attendance Terminal &bull; Secure Token Validation
+  </footer>
+
+  <!-- Web Audio API synthesized BEEP / ERROR sounds -->
+  <script>
+    let currentMode = 'TIME_IN';
+    let isProcessing = false;
+
+    function setMode(mode) {
+      currentMode = mode;
+      const btnIn = document.getElementById('btnTimeIn');
+      const btnOut = document.getElementById('btnTimeOut');
+      if (mode === 'TIME_IN') {
+        btnIn.className = "py-3 rounded-xl font-bold text-xs bg-emerald-600 text-white shadow-lg transition";
+        btnOut.className = "py-3 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 transition";
+      } else {
+        btnOut.className = "py-3 rounded-xl font-bold text-xs bg-indigo-600 text-white shadow-lg transition";
+        btnIn.className = "py-3 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 transition";
+      }
+    }
+
+    function playBeep(success = true) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        if (success) {
+          osc.frequency.setValueAtTime(800, ctx.currentTime);
+          gain.gain.setValueAtTime(0.1, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.15);
+        } else {
+          osc.frequency.setValueAtTime(300, ctx.currentTime);
+          gain.gain.setValueAtTime(0.2, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.3);
+        }
+      } catch (e) { console.log(e); }
+    }
+
+    async function onScanSuccess(decodedText) {
+      if (isProcessing) return;
+      isProcessing = true;
+
+      try {
+        const response = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ qr_token: decodedText, mode: currentMode })
+        });
+        const data = await response.json();
+        
+        const box = document.getElementById('resultBox');
+        const icon = document.getElementById('resIcon');
+        const title = document.getElementById('resTitle');
+        const details = document.getElementById('resDetails');
+        
+        box.classList.remove('hidden');
+
+        if (data.success) {
+          playBeep(true);
+          box.className = "rounded-2xl p-5 border bg-emerald-950/90 border-emerald-500 text-emerald-200 text-center shadow-2xl";
+          icon.innerText = "✓";
+          title.innerText = data.message;
+          details.innerHTML = \`
+            <div class="font-bold text-white text-sm">\${data.member.full_name}</div>
+            <div>\${data.member.position} &bull; \${data.member.member_id}</div>
+            <div class="font-mono text-emerald-400 mt-1">Time: \${data.time} (\${data.status})</div>
+          \`;
+        } else {
+          playBeep(false);
+          box.className = "rounded-2xl p-5 border bg-rose-950/90 border-rose-500 text-rose-200 text-center shadow-2xl";
+          icon.innerText = "✕";
+          title.innerText = data.message;
+          details.innerHTML = \`<div class="text-rose-300">\${data.subtext || data.reason || 'Verification failed'}</div>\`;
+        }
+
+        setTimeout(() => {
+          box.classList.add('hidden');
+          isProcessing = false;
+        }, 3000);
+
+      } catch (err) {
+        console.error(err);
+        isProcessing = false;
+      }
+    }
+
+    const html5QrCode = new Html5Qrcode("reader");
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      onScanSuccess
+    ).catch(err => {
+      document.getElementById('scannerStatus').innerText = "Camera permission required for scanning.";
+    });
+  </script>
+</body>
+</html>`,
+
+  // 11. MEMBER LOGIN
+  'member_login.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Member Portal Login</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen">
+  <div class="bg-slate-800 p-8 rounded-2xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="text-center mb-6">
+      <span class="bg-sky-500/20 text-sky-400 text-xs px-3 py-1 rounded-full uppercase font-semibold">Member Portal</span>
+      <h1 class="text-2xl font-bold mt-2 text-white">Member Login</h1>
+      <p class="text-slate-400 text-xs mt-1">Sign in with your system-generated club username & password</p>
+    </div>
+    <% if (error) { %>
+      <div class="bg-rose-500/20 border border-rose-500 text-rose-300 text-xs p-3 rounded-lg mb-4 text-center"><%= error %></div>
+    <% } %>
+    <form action="/member/login" method="POST" class="space-y-4">
+      <div>
+        <label class="block text-xs font-medium text-slate-300 mb-1">Username</label>
+        <input type="text" name="username" required placeholder="CLUB-2026-001" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-sky-500">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-slate-300 mb-1">Password</label>
+        <input type="password" name="password" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-sky-500">
+      </div>
+      <button type="submit" class="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2.5 rounded-lg transition text-sm shadow-lg">Sign In</button>
+    </form>
+    <div class="mt-6 text-center text-xs text-slate-500">
+      <a href="/" class="text-slate-400 hover:underline">&larr; Back to Portal Home</a>
+    </div>
+  </div>
+</body>
+</html>`,
+
+  // 12. MEMBER CHANGE PASSWORD
+  'member_change_password.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Change Temporary Password</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 flex items-center justify-center min-h-screen">
+  <div class="bg-slate-800 p-8 rounded-2xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="text-center mb-6">
+      <span class="bg-amber-500/20 text-amber-400 text-xs px-3 py-1 rounded-full uppercase font-semibold">First Login Security</span>
+      <h1 class="text-xl font-bold mt-2 text-white">Change Temporary Password</h1>
+      <p class="text-slate-400 text-xs mt-1">Your password is temporary. Please create a new secure password before continuing to your dashboard.</p>
+    </div>
+    <% if (error) { %>
+      <div class="bg-rose-500/20 border border-rose-500 text-rose-300 text-xs p-3 rounded-lg mb-4 text-center"><%= error %></div>
+    <% } %>
+    <form action="/member/change-password" method="POST" class="space-y-4">
+      <div>
+        <label class="block text-xs font-medium text-slate-300 mb-1">New Password (Min 6 characters)</label>
+        <input type="password" name="new_password" required minlength="6" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-sky-500">
+      </div>
+      <button type="submit" class="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2.5 rounded-lg transition text-sm shadow-lg">Update Password & Continue</button>
+    </form>
+  </div>
+</body>
+</html>`,
+
+  // 13. MEMBER DASHBOARD
+  'member_dashboard.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>Member Dashboard - <%= member.full_name %></title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen flex flex-col justify-between">
+  
+  <header class="bg-slate-950 border-b border-slate-800 px-8 py-4 flex justify-between items-center">
+    <div>
+      <h1 class="font-bold text-sky-400 text-base"><%= settings.organization_name %></h1>
+      <p class="text-xs text-slate-500">Member Portal</p>
+    </div>
+    <div class="flex items-center gap-4 text-xs">
+      <span class="text-slate-300">Welcome, <strong class="text-white"><%= member.full_name %></strong></span>
+      <a href="/member/logout" class="text-rose-400 hover:underline">Logout</a>
+    </div>
+  </header>
+
+  <main class="max-w-6xl w-full mx-auto p-8 space-y-8 flex-1">
+    
+    <!-- Profile & QR Card Box -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      
+      <!-- Profile Card -->
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow flex flex-col items-center text-center">
+        <div class="w-24 h-24 rounded-full bg-slate-900 border-2 border-sky-500 overflow-hidden flex items-center justify-center font-bold text-2xl text-sky-400 mb-3 shadow">
+          <% if (member.photo) { %>
+            <img src="<%= member.photo %>" class="w-full h-full object-cover">
+          <% } else { %>
+            <%= member.full_name.charAt(0) %>
+          <% } %>
+        </div>
+        <h2 class="text-lg font-bold text-white"><%= member.full_name %></h2>
+        <span class="text-xs text-sky-400 font-semibold"><%= member.position %></span>
+        <div class="text-xs text-slate-400 mt-2 space-y-1 w-full border-t border-slate-700/50 pt-3 text-left">
+          <div><strong class="text-slate-500">Member ID:</strong> <span class="font-mono text-white"><%= member.member_id %></span></div>
+          <div><strong class="text-slate-500">Course:</strong> <%= member.course || 'N/A' %></div>
+          <div><strong class="text-slate-500">Year & Sec:</strong> Year <%= member.year_level || '1' %> (<%= member.section || 'N/A' %>)</div>
+        </div>
+        <a href="/member/id-card" target="_blank" class="w-full mt-4 bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2 rounded-xl text-xs transition shadow">View / Download My ID Card</a>
+      </div>
+
+      <!-- QR Token Display Card -->
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow flex flex-col items-center justify-center text-center">
+        <span class="text-xs font-semibold text-slate-400 uppercase mb-3">My Attendance QR Badge</span>
+        <div class="bg-white p-3 rounded-2xl shadow">
+          <div id="memberQr" class="w-32 h-32 flex items-center justify-center"></div>
+        </div>
+        <p class="text-[10px] text-slate-400 mt-3">Present this QR code at the entrance scanner.</p>
+      </div>
+
+      <!-- Attendance Stats Card -->
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow flex flex-col justify-between">
+        <div>
+          <h3 class="text-xs font-semibold text-slate-400 uppercase">My Attendance Summary</h3>
+          <div class="grid grid-cols-2 gap-4 mt-4">
+            <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50">
+              <span class="text-[10px] text-slate-400">Present</span>
+              <div class="text-2xl font-black text-emerald-400 mt-1"><%= totalPresent %></div>
+            </div>
+            <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50">
+              <span class="text-[10px] text-slate-400">Late</span>
+              <div class="text-2xl font-black text-amber-400 mt-1"><%= totalLate %></div>
+            </div>
+          </div>
+        </div>
+        <div class="mt-4 pt-4 border-t border-slate-700 flex justify-between items-center text-xs">
+          <span class="text-slate-400">Attendance Rate</span>
+          <span class="font-bold text-sky-400 text-sm"><%= attendancePercentage %>%</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Attendance History & Announcements -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      
+      <!-- Attendance History -->
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow">
+        <h3 class="font-bold text-white text-sm mb-4">My Attendance Log</h3>
+        <div class="space-y-3 max-h-64 overflow-y-auto">
+          <% if (attendance.length === 0) { %>
+            <p class="text-xs text-slate-500 py-4 text-center">No attendance records found yet.</p>
+          <% } else { %>
+            <% attendance.forEach(att => { %>
+              <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50 flex justify-between items-center text-xs">
+                <div>
+                  <span class="font-mono text-white"><%= att.date %></span>
+                  <span class="text-[10px] text-slate-400 block">In: <%= att.time_in || '—' %> | Out: <%= att.time_out || '—' %></span>
+                </div>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold <%= att.status === 'Present' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400' %>"><%= att.status %></span>
+              </div>
+            <% }) %>
+          <% } %>
+        </div>
+      </div>
+
+      <!-- Announcements -->
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow">
+        <h3 class="font-bold text-white text-sm mb-4">Club Announcements</h3>
+        <div class="space-y-3 max-h-64 overflow-y-auto">
+          <% if (announcements.length === 0) { %>
+            <p class="text-xs text-slate-500 py-4 text-center">No announcements posted.</p>
+          <% } else { %>
+            <% announcements.forEach(a => { %>
+              <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50 text-xs">
+                <h4 class="font-bold text-white"><%= a.title %></h4>
+                <p class="text-slate-300 mt-1"><%= a.message %></p>
+                <span class="text-[10px] text-slate-500 mt-1 block"><%= new Date(a.created_at).toLocaleDateString() %></span>
+              </div>
+            <% }) %>
+          <% } %>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="py-4 text-center text-xs text-slate-500 border-t border-slate-800">
+    Member Portal &bull; <%= settings.organization_name %>
+  </footer>
+
+  <script>
+    new QRCode(document.getElementById("memberQr"), {
+      text: "<%= member.qr_token %>",
+      width: 128,
+      height: 128,
+      colorDark: "#020617",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  </script>
+</body>
+</html>`,
+
+  // 14. MEMBER ID CARD VIEW
+  'member_id_card.ejs': `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>My Digital ID Card</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 flex flex-col items-center justify-center min-h-screen p-6">
+  
+  <div class="mb-6 flex gap-3">
+    <button onclick="window.print()" class="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2.5 rounded-xl font-semibold text-xs shadow-lg transition">Print ID Card</button>
+    <button onclick="window.close()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-5 py-2.5 rounded-xl font-semibold text-xs transition">Close Window</button>
+  </div>
+
+  <div class="bg-slate-950 border border-slate-800 w-[420px] rounded-2xl overflow-hidden shadow-2xl flex flex-col relative text-slate-100">
+    <div class="bg-sky-950 border-b border-sky-900/50 p-4 text-center">
+      <div class="text-[10px] tracking-widest text-sky-300 font-semibold uppercase"><%= settings.school_name %></div>
+      <div class="text-base font-extrabold text-white"><%= settings.organization_name %></div>
+    </div>
+
+    <div class="p-6 flex gap-5 items-center">
+      <div class="w-28 h-32 rounded-xl bg-slate-900 border-2 border-sky-500/50 overflow-hidden flex items-center justify-center font-bold text-2xl text-sky-400 shrink-0 shadow">
+        <% if (member.photo) { %>
+          <img src="<%= member.photo %>" class="w-full h-full object-cover">
+        <% } else { %>
+          <%= member.full_name.charAt(0) %>
+        <% } %>
+      </div>
+
+      <div class="space-y-1.5 flex-1 min-w-0">
+        <div>
+          <h2 class="text-lg font-black text-white truncate"><%= member.full_name %></h2>
+          <p class="text-xs font-semibold text-sky-400"><%= member.position %></p>
+        </div>
+        <div class="text-[11px] text-slate-300 space-y-0.5 pt-1">
+          <div><strong class="text-slate-400">ID No:</strong> <span class="font-mono text-white"><%= member.member_id %></span></div>
+          <div><strong class="text-slate-400">Course:</strong> <%= member.course || 'N/A' %></div>
+          <div><strong class="text-slate-400">Year:</strong> <%= member.year_level || 'N/A' %></div>
+          <div><strong class="text-slate-400">S.Y.:</strong> <%= settings.school_year %></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-slate-900/80 border-t border-slate-800 p-4 flex justify-between items-center">
+      <div class="space-y-1">
+        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Status</div>
+        <div class="text-[11px] text-emerald-400 font-bold"><%= member.status %> Member</div>
+        <div class="text-[9px] text-slate-500 max-w-[180px]">Official Organization Digital ID Badge</div>
+      </div>
+      <div class="bg-white p-2 rounded-xl shadow shrink-0">
+        <div id="qrcode" class="w-20 h-20 flex items-center justify-center"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    new QRCode(document.getElementById("qrcode"), {
+      text: "<%= member.qr_token %>",
+      width: 80,
+      height: 80,
+      colorDark: "#020617",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  </script>
+</body>
+</html>`
+};
+
+// Register dynamic EJS views directly into Express template cache
+for (const [filename, content] of Object.entries(views)) {
+  app.engine(filename, (filePath, options, callback) => {
+    try {
+      const rendered = require('ejs').render(content, options);
+      return callback(null, rendered);
+    } catch (err) {
+      return callback(err);
+    }
+  });
+}
+
+// Override view lookup name for views in subfolders or direct render calls
+app.use((req, res, next) => {
+  const originalRender = res.render;
+  res.render = function(view, options, callback) {
+    const viewFileName = view + '.ejs';
+    if (views[viewFileName]) {
+      return originalRender.call(this, viewFileName, options, callback);
+    }
+    return originalRender.call(this, view, options, callback);
+  };
+  next();
 });
 
 // Start Server
 app.listen(PORT, () => {
-  console.log(`School Club Attendance System running on port ${PORT}`);
+  console.log(`=> School Club QR Attendance System running on port ${PORT}`);
+  console.log(`=> Access Admin Portal at http://localhost:${PORT}/admin/login`);
+  console.log(`=> Access Scanner Portal at http://localhost:${PORT}/scanner`);
+  console.log(`=> Access Member Portal at http://localhost:${PORT}/member/login`);
 });
