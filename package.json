@@ -2,9 +2,9 @@
   "name": "billiards-business-system",
   "version": "1.0.0",
   "description": "Two-Table Billiards Business Management System",
-  "main": "allapps.js",
+  "main": "app.js",
   "scripts": {
-    "start": "node apps.js"
+    "start": "node app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
