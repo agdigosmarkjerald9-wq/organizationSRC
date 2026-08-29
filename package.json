@@ -1,16 +1,21 @@
 {
-  "name": "school-club-qr-attendance",
+  "name": "billiards-management-system",
   "version": "1.0.0",
-  "description": "School Club QR Code Attendance Management System with PostgreSQL",
+  "description": "Complete 2-Table Billiards Business Management System with Real-time Sync",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "dev": "nodemon app.js"
   },
   "dependencies": {
-    "bcrypt": "^5.1.1",
-    "ejs": "^3.1.10",
+    "bcryptjs": "^2.4.3",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
-    "pg": "^8.11.3"
+    "qrcode": "^1.5.3",
+    "sqlite3": "^5.1.7",
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
