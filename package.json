@@ -4,7 +4,7 @@
   "description": "Two-Table Billiards Business Management System",
   "main": "allapps.js",
   "scripts": {
-    "start": "node allapps.js"
+    "start": "node apps.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
