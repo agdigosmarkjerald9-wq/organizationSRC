@@ -1,6 +1,6 @@
 /**
  * TWO-TABLE BILLIARDS BUSINESS MANAGEMENT SYSTEM (SINGLE-FILE VERSION)
- * Run: npm install && node allapps.js
+ * Run: npm install && node app.js
  */
 
 const express = require('express');
@@ -184,7 +184,7 @@ const defaultSettings = [
   ['billing_type', 'per_hour'],
   ['rounding', 'exact'],
   ['min_charge', '50'],
-  ['points_per_spending', '100'], // Every 100 spent = 1 point
+  ['points_per_spending', '100'],
   ['gcash_number', '09171234567'],
   ['gcash_name', 'Cue Master Billiards']
 ];
@@ -322,7 +322,6 @@ app.get('/', (req, res) => {
     </header>
 
     <main class="flex-1 max-w-6xl w-full mx-auto p-4 md:p-6 flex flex-col gap-8">
-      <!-- Hero Banner -->
       <div class="bg-gradient-to-r from-emerald-900 to-slate-900 border border-emerald-800/50 rounded-2xl p-6 md:p-10 flex flex-col md:flex-row justify-between items-center gap-6 shadow-xl">
         <div class="flex flex-col gap-3 max-w-xl">
           <span class="bg-emerald-500/20 text-emerald-400 text-xs font-semibold px-3 py-1 rounded-full w-fit">Open Daily: ${settings.opening_time} - ${settings.closing_time}</span>
@@ -377,7 +376,6 @@ app.get('/', (req, res) => {
   res.send(html);
 });
 
-// Customer Tables View & QR Code Landing
 app.get('/tables', (req, res) => {
   const tables = db.prepare('SELECT * FROM billiard_tables').all();
   res.send(baseLayout('Tables - Cue Master Billiards', `
@@ -447,7 +445,6 @@ app.get('/table/:id', (req, res) => {
   `));
 });
 
-// Customer Login/Register
 app.get('/customer/login', (req, res) => {
   res.send(baseLayout('Customer Login', `
     <div class="max-w-md mx-auto w-full p-6 my-auto">
@@ -524,14 +521,12 @@ app.get('/customer/logout', (req, res) => {
   res.redirect('/');
 });
 
-// Customer Dashboard
 app.get('/customer/dashboard', (req, res) => {
   if (!req.session.customerId) return res.redirect('/customer/login');
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.session.customerId);
   const reservations = db.prepare('SELECT * FROM reservations WHERE customer_name = ? ORDER BY date DESC').all(customer.name);
   const history = db.prepare('SELECT sessions.*, billiard_tables.name as table_name FROM sessions JOIN billiard_tables ON sessions.table_id = billiard_tables.id WHERE customer_id = ? AND status = ? ORDER BY start_time DESC').all(customer.id, 'Completed');
   const activeSession = db.prepare('SELECT sessions.*, billiard_tables.name as table_name FROM sessions JOIN billiard_tables ON sessions.table_id = billiard_tables.id WHERE customer_id = ? AND sessions.status = ?').get(customer.id, 'Active');
-  const notifications = db.prepare('SELECT * FROM notifications WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5').all(customer.id);
 
   const totalHours = history.reduce((acc, s) => acc + (s.duration_minutes || 0), 0) / 60;
   const totalSpending = history.reduce((acc, s) => acc + (s.amount || 0), 0);
@@ -602,7 +597,6 @@ app.get('/customer/dashboard', (req, res) => {
   `));
 });
 
-// Reservation Form
 app.get('/book', (req, res) => {
   const tables = db.prepare('SELECT * FROM billiard_tables').all();
   const selectedTable = req.query.table || 1;
@@ -656,8 +650,6 @@ app.get('/book', (req, res) => {
 
 app.post('/book', (req, res) => {
   const { customer_name, contact_number, table_id, date, start_time, end_time, num_players, notes } = req.body;
-  
-  // Calculate cost
   const [startH, startM] = start_time.split(':').map(Number);
   const [endH, endM] = end_time.split(':').map(Number);
   const hours = (endH + endM / 60) - (startH + startM / 60);
@@ -691,7 +683,6 @@ app.post('/book', (req, res) => {
   `));
 });
 
-// Customer Call Staff
 app.get('/customer/call-staff', (req, res) => {
   res.send(baseLayout('Call Staff', `
     <div class="max-w-md mx-auto p-6 w-full my-auto">
@@ -752,7 +743,6 @@ app.post('/api/customer/call-staff', (req, res) => {
   res.json({ success: true });
 });
 
-// Customer Rewards
 app.get('/customer/rewards', (req, res) => {
   if (!req.session.customerId) return res.redirect('/customer/login');
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.session.customerId);
@@ -775,23 +765,17 @@ app.get('/customer/rewards', (req, res) => {
               <h3 class="font-bold text-lg">${r.title}</h3>
               <p class="text-amber-400 font-semibold text-sm mt-1">${r.points_required} Points Required</p>
             </div>
-            <button onclick="redeemReward(${r.id})" class="bg-emerald-600 hover:bg-emerald-500 py-2 rounded font-bold text-sm">Redeem Reward</button>
+            <button onclick="showToast('Reward redeemed successfully!')" class="bg-emerald-600 hover:bg-emerald-500 py-2 rounded font-bold text-sm">Redeem Reward</button>
           </div>
         `).join('')}
       </div>
     </div>
-    <script>
-      function redeemReward(id) {
-        showToast('Reward redeemed successfully!');
-      }
-    </script>
   `));
 });
 
 
 // --- OWNER / ADMIN ROUTES ---
 
-// Admin Auth Middleware
 function requireAdmin(req, res, next) {
   if (req.session.adminId) {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.adminId);
@@ -861,7 +845,6 @@ app.post('/admin/change-password', requireAdmin, (req, res) => {
   res.redirect('/admin/dashboard');
 });
 
-// Owner Dashboard Layout Shell
 const adminLayout = (title, activeMenu, content) => {
   const menus = [
     { name: 'Dashboard', icon: 'fa-chart-pie', link: '/admin/dashboard' },
@@ -880,7 +863,6 @@ const adminLayout = (title, activeMenu, content) => {
 
   return baseLayout(title, `
     <div class="flex h-screen overflow-hidden">
-      <!-- Sidebar -->
       <aside class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col hidden lg:flex">
         <div class="p-6 border-b border-slate-800 flex items-center gap-3">
           <div class="bg-emerald-600 p-2 rounded-lg text-white font-bold"><i class="fa-solid fa-circle-dot"></i></div>
@@ -899,8 +881,6 @@ const adminLayout = (title, activeMenu, content) => {
           </a>
         </div>
       </aside>
-
-      <!-- Main Content Area -->
       <div class="flex-1 flex flex-col overflow-hidden">
         <header class="bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center lg:hidden">
           <span class="font-bold">Owner Dashboard</span>
@@ -919,7 +899,6 @@ app.get('/admin/logout', (req, res) => {
   res.redirect('/admin/login');
 });
 
-// Admin Dashboard Main
 app.get('/admin/dashboard', requireAdmin, (req, res) => {
   const tables = db.prepare('SELECT * FROM billiard_tables').all();
   const today = new Date().toISOString().split('T')[0];
@@ -985,7 +964,6 @@ app.get('/admin/dashboard', requireAdmin, (req, res) => {
   `));
 });
 
-// Admin Tables Management & Starting Sessions
 app.get('/admin/tables', requireAdmin, (req, res) => {
   const tables = db.prepare('SELECT * FROM billiard_tables').all();
   const customers = db.prepare('SELECT * FROM customers').all();
@@ -1036,7 +1014,6 @@ app.post('/admin/session/start', requireAdmin, (req, res) => {
   res.redirect('/admin/sessions');
 });
 
-// Admin Active Sessions
 app.get('/admin/sessions', requireAdmin, (req, res) => {
   const activeSessions = db.prepare('SELECT sessions.*, customers.name as customer_name, billiard_tables.name as table_name FROM sessions JOIN customers ON sessions.customer_id = customers.id JOIN billiard_tables ON sessions.table_id = billiard_tables.id WHERE sessions.status = ?').all('Active');
 
@@ -1110,7 +1087,6 @@ app.post('/admin/session/end/:id', requireAdmin, (req, res) => {
   res.redirect(`/admin/payment/${sessionId}`);
 });
 
-// Admin Payment Screen
 app.get('/admin/payment/:sessionId', requireAdmin, (req, res) => {
   const session = db.prepare('SELECT sessions.*, customers.name as customer_name FROM sessions JOIN customers ON sessions.customer_id = customers.id WHERE sessions.id = ?').get(req.params.sessionId);
   res.send(adminLayout('Payment', 'Active Sessions', `
@@ -1152,7 +1128,6 @@ app.post('/admin/payment', requireAdmin, (req, res) => {
     receiptNo, customer_id, table_id, session.amount, amount_paid, change, payment_method
   );
 
-  // Add Loyalty Points (Every 100 spent = 1 point)
   const pointsEarned = Math.floor(session.amount / 100);
   if (pointsEarned > 0) {
     db.prepare('UPDATE customers SET points = points + ? WHERE id = ?').run(pointsEarned, customer_id);
@@ -1161,7 +1136,6 @@ app.post('/admin/payment', requireAdmin, (req, res) => {
   res.redirect(`/admin/receipt/${receiptNo}`);
 });
 
-// Admin Receipt
 app.get('/admin/receipt/:receiptNo', requireAdmin, (req, res) => {
   const receiptNo = req.params.receiptNo;
   const payment = db.prepare('SELECT payments.*, customers.name as customer_name FROM payments JOIN customers ON payments.customer_id = customers.id WHERE receipt_no = ?').get(receiptNo);
@@ -1186,13 +1160,11 @@ app.get('/admin/receipt/:receiptNo', requireAdmin, (req, res) => {
   `));
 });
 
-// Admin Customer Requests Handler
 app.post('/api/admin/request/:id', requireAdmin, (req, res) => {
   db.prepare('UPDATE customer_requests SET status = ? WHERE id = ?').run('Completed', req.params.id);
   res.json({ success: true });
 });
 
-// Admin Settings
 app.get('/admin/settings', requireAdmin, (req, res) => {
   const settings = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map(s => [s.key, s.value]));
   res.send(adminLayout('Settings', 'Settings', `
@@ -1224,7 +1196,6 @@ app.post('/admin/settings', requireAdmin, (req, res) => {
   res.redirect('/admin/settings');
 });
 
-// Placeholders for remaining admin menus to maintain full completeness
 app.get('/admin/reservations', requireAdmin, (req, res) => { res.send(adminLayout('Reservations', 'Reservations', '<h2 class="text-2xl font-bold">Reservations Calendar</h2>')); });
 app.get('/admin/customers', requireAdmin, (req, res) => { res.send(adminLayout('Customers', 'Customers', '<h2 class="text-2xl font-bold">Customer Management</h2>')); });
 app.get('/admin/payments', requireAdmin, (req, res) => { res.send(adminLayout('Payments', 'Payments', '<h2 class="text-2xl font-bold">Payment History</h2>')); });
@@ -1234,7 +1205,6 @@ app.get('/admin/analytics', requireAdmin, (req, res) => { res.send(adminLayout('
 app.get('/admin/requests', requireAdmin, (req, res) => { res.send(adminLayout('Customer Requests', 'Customer Requests', '<h2 class="text-2xl font-bold">Customer Requests</h2>')); });
 app.get('/admin/closing', requireAdmin, (req, res) => { res.send(adminLayout('Daily Closing', 'Daily Closing', '<h2 class="text-2xl font-bold">Daily Cash Closing</h2>')); });
 
-// --- SOCKET.IO & START SERVER ---
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 });
