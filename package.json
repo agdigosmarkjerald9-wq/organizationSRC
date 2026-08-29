@@ -1,7 +1,7 @@
 {
   "name": "billiards-management-system",
   "version": "1.0.0",
-  "description": "Complete 2-Table Billiards Business Management System with Real-time Sync",
+  "description": "Complete 2-Table Billiards Management System with Real-Time WebSockets",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
@@ -9,11 +9,14 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "express-session": "^1.18.0",
     "qrcode": "^1.5.3",
     "sqlite3": "^5.1.7",
     "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
