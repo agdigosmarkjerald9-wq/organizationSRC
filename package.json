@@ -1,23 +1,23 @@
 {
-  "name": "billiards-management-system",
+  "name": "billiards-business-system",
   "version": "1.0.0",
-  "description": "Complete 2-Table Billiards Business Management System",
-  "main": "app.js",
+  "description": "Two-Table Billiards Business Management System",
+  "main": "allapps.js",
   "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js"
+    "start": "node allapps.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.8.1",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.11.3",
-    "qrcode": "^1.5.3",
-    "socket.io": "^4.7.5"
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
