@@ -1,16 +1,16 @@
 {
-  "name": "qr-school-attendance-system",
+  "name": "qr-attendance-system",
   "version": "1.0.0",
-  "description": "Comprehensive Single-File QR Code School Attendance System",
+  "description": "Complete Web-Based QR Code Attendance Management System for Schools",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
-    "multer": "^1.4.5-lts.1",
     "qrcode": "^1.5.3",
     "sqlite3": "^5.1.7"
   },
