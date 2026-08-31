@@ -1,18 +1,15 @@
 {
-  "name": "qr-attendance-system",
+  "name": "qr-code-attendance-system",
   "version": "1.0.0",
-  "description": "Complete School QR Code Attendance System",
+  "description": "Professional Web-based QR Code Attendance System with Event Management and A4 ID Printing",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "ejs": "^3.1.9",
+    "better-sqlite3": "^9.4.3",
     "express": "^4.19.2",
-    "express-session": "^1.18.0",
-    "multer": "^1.4.5-lts.1",
-    "sqlite3": "^5.1.7"
+    "qrcode": "^1.5.3"
   },
   "engines": {
     "node": ">=18.0.0"
