@@ -1,1862 +1,2431 @@
-/******************************************************************************
+/**
  * SCHOOL STUDENT CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM
- * COMPLETE, PRODUCTION-READY NODE.JS / EXPRESS / SQLITE MONOLITHIC APPLICATION
+ * Complete Monolithic Server & Client Application
  * 
- * Includes:
- * - Admin, Scanner, and Student Portals
- * - Full Authentication with bcrypt Password Hashing & Role-based Routing
- * - Customizable Position Management & Position History
- * - Public Student Self-Registration, QR Generation, and Approval Workflow
- * - Digital Student Club ID with A4 Print Sheet (8 IDs per page layout)
- * - Separate Mobile-Optimized QR Scanner Portal with Audio Feedback & Web Speech API
- * - Comprehensive Event Management & Attendance Engine (Present, Late, Absent, Excused)
- * - Advanced Analytics, Audit Logging, Database Backup & Restore, and Printable Reports
- ******************************************************************************/
+ * Target Environment: Node.js with Express, SQLite3, Session Auth, HTML5, CSS3, JS ES6+
+ * Fully-featured Web Application featuring:
+ * - Admin, Scanner, and Student Role Portals
+ * - Fully Customizable Positions (No Committees, No Grade/Year/Section fields)
+ * - Public Mobile-First Student Registration & Admin Approval Queue
+ * - Live Camera QR Code Scanner with HTML5 Web Speech API Voice Announcements
+ * - Dynamic Printable Reports & A4 Printable IDs Grid (8 Cards per Page layout)
+ * - Complete Password Management, Database Backup & Restore, and Audit Logging
+ */
 
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
+const bcrypt = require('bcryptjs');
 const QRCode = require('qrcode');
+const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-const app = express();
 const PORT = process.env.PORT || 3000;
+const app = express();
 
-// ==========================================
-// 1. DATABASE INITIALIZATION & SCHEMA SETUP
-// ==========================================
-const dbFile = path.join(__dirname, 'club_attendance.db');
-const db = new sqlite3.Database(dbFile, (err) => {
-    if (err) {
-        console.error('Database connection error:', err.message);
-    } else {
-        console.log('Connected to SQLite database.');
-        initDatabase();
-    }
+// Ensure required asset directories exist
+const uploadsDir = path.join(__dirname, 'public', 'uploads');
+const backupsDir = path.join(__dirname, 'backups');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
+
+// Multer Storage Configuration for Student Photos
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, 'photo_' + Date.now() + '_' + Math.round(Math.random() * 1E9) + ext);
+  }
+});
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB Limit
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed!'), false);
+  }
 });
 
-function initDatabase() {
-    db.serialize(() => {
-        // System Settings
-        db.run(`CREATE TABLE IF NOT EXISTS settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            school_name TEXT DEFAULT 'ABC National High School',
-            school_logo TEXT DEFAULT '',
-            school_address TEXT DEFAULT '123 Education St., City',
-            school_contact TEXT DEFAULT '555-0192',
-            school_email TEXT DEFAULT 'info@abchs.edu',
-            school_year TEXT DEFAULT '2026-2027',
-            club_name TEXT DEFAULT 'Computer Club',
-            organization_name TEXT DEFAULT 'Student Tech Organization',
-            club_adviser TEXT DEFAULT 'Mr. John Doe',
-            registration_open INTEGER DEFAULT 1,
-            allow_custom_positions INTEGER DEFAULT 0,
-            default_position TEXT DEFAULT 'Member',
-            late_threshold_minutes INTEGER DEFAULT 15,
-            low_participation_threshold REAL DEFAULT 50.0
-        )`);
-
-        // Positions Table
-        db.run(`CREATE TABLE IF NOT EXISTS positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            description TEXT
-        )`);
-
-        // Users / Admins / Scanners
-        db.run(`CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'scanner')),
-            full_name TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        // Students Table (NO Committee, Grade Level, Year Level, Section)
-        db.run(`CREATE TABLE IF NOT EXISTS students (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id TEXT UNIQUE NOT NULL,
-            first_name TEXT NOT NULL,
-            middle_name TEXT DEFAULT '',
-            last_name TEXT NOT NULL,
-            school_email TEXT UNIQUE NOT NULL,
-            contact_number TEXT DEFAULT '',
-            position TEXT NOT NULL DEFAULT 'Member',
-            student_photo TEXT DEFAULT '',
-            qr_token TEXT UNIQUE,
-            qr_enabled INTEGER DEFAULT 1,
-            membership_status TEXT DEFAULT 'Active' CHECK(membership_status IN ('Active', 'Inactive', 'Suspended', 'Alumni', 'Resigned')),
-            date_joined TEXT DEFAULT CURRENT_DATE,
-            expiration_date TEXT DEFAULT '',
-            password TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        // Position History
-        db.run(`CREATE TABLE IF NOT EXISTS position_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id TEXT NOT NULL,
-            position TEXT NOT NULL,
-            school_year TEXT NOT NULL,
-            changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        // Student Registrations (Public workflow)
-        db.run(`CREATE TABLE IF NOT EXISTS student_registrations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id TEXT UNIQUE NOT NULL,
-            first_name TEXT NOT NULL,
-            middle_name TEXT DEFAULT '',
-            last_name TEXT NOT NULL,
-            school_email TEXT UNIQUE NOT NULL,
-            contact_number TEXT DEFAULT '',
-            position TEXT NOT NULL DEFAULT 'Member',
-            student_photo TEXT DEFAULT '',
-            status TEXT DEFAULT 'Pending' CHECK(status IN ('Pending', 'Approved', 'Rejected')),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        // Events Table
-        db.run(`CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_name TEXT NOT NULL,
-            description TEXT,
-            event_type TEXT DEFAULT 'General Meeting',
-            event_date TEXT NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            location TEXT DEFAULT 'School Hall',
-            organizer TEXT DEFAULT 'Club Officers',
-            participant_scope TEXT DEFAULT 'All Students',
-            status TEXT DEFAULT 'Upcoming' CHECK(status IN ('Upcoming', 'Ongoing', 'Completed', 'Cancelled'))
-        )`);
-
-        // Attendance Table
-        db.run(`CREATE TABLE IF NOT EXISTS attendance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_id INTEGER NOT NULL,
-            student_id TEXT NOT NULL,
-            time_in TEXT DEFAULT NULL,
-            time_out TEXT DEFAULT NULL,
-            status TEXT DEFAULT 'Absent' CHECK(status IN ('Present', 'Late', 'Absent', 'Excused')),
-            remarks TEXT DEFAULT '',
-            recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(event_id) REFERENCES events(id),
-            FOREIGN KEY(student_id) REFERENCES students(student_id)
-        )`);
-
-        // Audit Logs
-        db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user TEXT NOT NULL,
-            action TEXT NOT NULL,
-            details TEXT,
-            ip_address TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        // Seed Initial Data
-        setTimeout(() => seedDefaultData(), 500);
-    }
-}
-
-async function seedDefaultData() {
-    // Check settings
-    db.get("SELECT COUNT(*) as count FROM settings", async (err, row) => {
-        if (row && row.count === 0) {
-            db.run(`INSERT INTO settings (school_name, club_name, club_adviser) VALUES ('ABC National High School', 'Computer Club', 'Mr. John Doe')`);
-        }
-    });
-
-    // Check positions
-    const defaultPositions = [
-        'President', 'Vice President', 'Secretary', 'Treasurer', 
-        'Auditor', 'Public Information Officer', 'Peace Officer', 
-        'Sergeant-at-Arms', 'Representative', 'Member'
-    ];
-    db.get("SELECT COUNT(*) as count FROM positions", async (err, row) => {
-        if (row && row.count === 0) {
-            const stmt = db.prepare("INSERT INTO positions (name, description) VALUES (?, ?)");
-            defaultPositions.forEach(pos => stmt.run(pos, `Default ${pos} position`));
-            stmt.finalize();
-        }
-    });
-
-    // Check Users (Admin / Scanner)
-    db.get("SELECT COUNT(*) as count FROM users", async (err, row) => {
-        if (row && row.count === 0) {
-            const hashedAdminPass = await bcrypt.hash('admin123', 10);
-            const hashedScanPass = await bcrypt.hash('scanner123', 10);
-            db.run("INSERT INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)", ['admin', hashedAdminPass, 'admin', 'System Administrator']);
-            db.run("INSERT INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)", ['scanner1', hashedScanPass, 'scanner', 'Officer Scanner']);
-        }
-    });
-
-    // Seed sample student if none
-    db.get("SELECT COUNT(*) as count FROM students", async (err, row) => {
-        if (row && row.count === 0) {
-            const hashedStudentPass = await bcrypt.hash('student123', 10);
-            const sampleQrToken = 'QR-STU-2026-001-' + Math.random().toString(36.substring(2, 9));
-            db.run(`INSERT INTO students (student_id, first_name, middle_name, last_name, school_email, contact_number, position, qr_token, password) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
-                    ['2026-001', 'Juan', 'Santos', 'Dela Cruz', 'juan.delacruz@abchs.edu', '09123456789', 'President', sampleQrToken, hashedStudentPass]);
-        }
-    });
-}
-
-// ==========================================
-// 2. EXPRESS MIDDLEWARE & CONFIGURATION
-// ==========================================
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.json({ limit: '10mb' }));
-
+// Middleware setup
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use('/uploads', express.static(uploadsDir));
 app.use(session({
-    secret: 'club-qr-attendance-super-secret-key-2026',
-    resave: false,
-    saveUninitialized: false,
-    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+  secret: 'school_club_qr_attendance_secret_key_2026',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
 }));
 
-// Template engine setup using simple Custom HTML/EJS response wrapper or EJS if configured
-// For standalone robustness and zero layout engine file dependencies, we build a lightweight rendering engine or use EJS via inline templates.
-// We'll configure view engine to use EJS and create standard views directory or inline render helper.
-app.set('view engine', 'ejs');
+// Initialize SQLite Database
+const dbPath = path.join(__dirname, 'club_attendance.db');
+const db = new sqlite3.Database(dbPath);
 
-// Ensure views directory exists
-const viewsDir = path.join(__dirname, 'views');
-if (!fs.existsSync(viewsDir)) {
-    fs.mkdirSync(viewsDir, { recursive: html => {} });
+// Database Initialization Sequence
+db.serialize(() => {
+  // Foreign keys enforce integrity
+  db.run("PRAGMA foreign_keys = ON");
+
+  // System Settings Table
+  db.run(`CREATE TABLE IF NOT EXISTS settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    school_name TEXT NOT NULL,
+    school_logo TEXT DEFAULT '',
+    school_address TEXT DEFAULT '',
+    school_contact TEXT DEFAULT '',
+    school_email TEXT DEFAULT '',
+    school_year TEXT NOT NULL,
+    club_name TEXT NOT NULL,
+    organization_name TEXT NOT NULL,
+    club_adviser TEXT NOT NULL,
+    registration_enabled INTEGER DEFAULT 1,
+    allow_student_positions INTEGER DEFAULT 0,
+    late_threshold_minutes INTEGER DEFAULT 15,
+    low_participation_threshold INTEGER DEFAULT 50
+  )`);
+
+  // Users Table (Admins, Scanners, Students)
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT CHECK(role IN ('ADMIN', 'SCANNER', 'STUDENT')) NOT NULL,
+    student_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (student_id) REFERENCES students(student_id) ON DELETE CASCADE
+  )`);
+
+  // Positions Table
+  db.run(`CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_name TEXT UNIQUE NOT NULL,
+    description TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Students Table
+  db.run(`CREATE TABLE IF NOT EXISTS students (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id TEXT UNIQUE NOT NULL,
+    first_name TEXT NOT NULL,
+    middle_name TEXT DEFAULT '',
+    last_name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    contact_number TEXT DEFAULT '',
+    position_name TEXT NOT NULL,
+    photo_url TEXT DEFAULT '',
+    qr_code_token TEXT UNIQUE NOT NULL,
+    date_joined DATE NOT NULL,
+    membership_status TEXT CHECK(membership_status IN ('Active', 'Inactive', 'Suspended', 'Alumni', 'Resigned')) DEFAULT 'Active',
+    membership_expiration DATE,
+    approval_status TEXT CHECK(approval_status IN ('Approved', 'Pending', 'Rejected')) DEFAULT 'Approved',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Position History Table
+  db.run(`CREATE TABLE IF NOT EXISTS position_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id TEXT NOT NULL,
+    position_name TEXT NOT NULL,
+    school_year TEXT NOT NULL,
+    assigned_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (student_id) REFERENCES students(student_id) ON DELETE CASCADE
+  )`);
+
+  // Events Table
+  db.run(`CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    event_type TEXT NOT NULL,
+    event_date DATE NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    location TEXT NOT NULL,
+    organizer TEXT NOT NULL,
+    target_audience TEXT CHECK(target_audience IN ('ALL', 'OFFICERS_ONLY', 'SPECIFIC_POSITIONS')) DEFAULT 'ALL',
+    allowed_positions TEXT DEFAULT '', -- Comma-separated position names
+    status TEXT CHECK(status IN ('UPCOMING', 'ACTIVE', 'COMPLETED', 'CANCELLED')) DEFAULT 'UPCOMING',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Attendance Records Table
+  db.run(`CREATE TABLE IF NOT EXISTS attendance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    student_id TEXT NOT NULL,
+    time_in DATETIME,
+    time_out DATETIME,
+    status TEXT CHECK(status IN ('PRESENT', 'LATE', 'ABSENT', 'EXCUSED')) DEFAULT 'ABSENT',
+    notes TEXT DEFAULT '',
+    scanned_by TEXT DEFAULT 'SYSTEM',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (student_id) REFERENCES students(student_id) ON DELETE CASCADE,
+    UNIQUE(event_id, student_id)
+  )`);
+
+  // Audit Logs Table
+  db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    role TEXT NOT NULL,
+    action TEXT NOT NULL,
+    details TEXT DEFAULT '',
+    ip_address TEXT DEFAULT '',
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Initial Seed Data Setup
+  db.get("SELECT COUNT(*) as count FROM settings", (err, row) => {
+    if (row && row.count === 0) {
+      db.run(`INSERT INTO settings (id, school_name, school_logo, school_address, school_contact, school_email, school_year, club_name, organization_name, club_adviser)
+              VALUES (1, 'Apex National High School', '', '123 Education Blvd, Cityville', '+1 (555) 019-2831', 'info@apexnhs.edu', '2026-2027', 'Computer Club', 'Student Technology Association', 'Mr. John Doe')`);
+    }
+  });
+
+  // Seed Default Positions
+  const defaultPositions = [
+    'President', 'Vice President', 'Secretary', 'Treasurer', 'Auditor',
+    'Public Information Officer', 'Peace Officer', 'Sergeant-at-Arms', 'Representative', 'Member'
+  ];
+  defaultPositions.forEach(pos => {
+    db.run(`INSERT OR IGNORE INTO positions (position_name, description) VALUES (?, ?)`, [pos, 'Standard Organization Position']);
+  });
+
+  // Seed Default Super Admin Account
+  db.get("SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN'", (err, row) => {
+    if (row && row.count === 0) {
+      const adminHash = bcrypt.hashSync('Admin@123', 10);
+      db.run(`INSERT INTO users (username, password_hash, role) VALUES ('admin', ?, 'ADMIN')`, [adminHash]);
+      
+      const scannerHash = bcrypt.hashSync('Scanner@123', 10);
+      db.run(`INSERT INTO users (username, password_hash, role) VALUES ('scanner', ?, 'SCANNER')`, [scannerHash]);
+    }
+  });
+});
+
+// Helper Function: Log Audit Trail
+function logAudit(username, role, action, details, req) {
+  const ip = req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '') : 'SYSTEM';
+  db.run(
+    `INSERT INTO audit_logs (username, role, action, details, ip_address) VALUES (?, ?, ?, ?, ?)`,
+    [username || 'SYSTEM', role || 'GUEST', action, details, ip]
+  );
 }
 
-// Helper to write audit log
-function logAction(user, action, details, req) {
-    const ip = req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress) : '127.0.0.1';
-    db.run("INSERT INTO audit_logs (user, action, details, ip_address) VALUES (?, ?, ?, ?)", [user, action, details, ip]);
+// Security Middleware: Authentication Checks
+function requireAuth(req, res, next) {
+  if (req.session && req.session.user) return next();
+  return res.status(401).json({ success: false, message: 'Unauthorized. Please login.' });
+}
+
+function requireRole(roles) {
+  return (req, res, next) => {
+    if (req.session && req.session.user && roles.includes(req.session.user.role)) {
+      return next();
+    }
+    return res.status(403).json({ success: false, message: 'Forbidden. Insufficient permissions.' });
+  };
 }
 
 // ==========================================
-// 3. AUTHENTICATION & ROLE MIDDLEWARE
+// REST API ROUTES
 // ==========================================
-function requireAuth(role) {
-    return (req, res, next) => {
-        if (!req.session.user) {
-            return res.redirect('/login');
+
+// Authentication APIs
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.json({ success: false, message: 'Please provide both username and password.' });
+
+  db.get(`SELECT * FROM users WHERE username = ?`, [username], (err, user) => {
+    if (err || !user) return res.json({ success: false, message: 'Invalid credentials.' });
+
+    if (bcrypt.compareSync(password, user.password_hash)) {
+      req.session.user = { id: user.id, username: user.username, role: user.role, student_id: user.student_id };
+      logAudit(user.username, user.role, 'LOGIN', 'User logged in successfully', req);
+      return res.json({ success: true, role: user.role, username: user.username });
+    } else {
+      logAudit(username, 'UNKNOWN', 'LOGIN_FAILED', 'Incorrect password attempt', req);
+      return res.json({ success: false, message: 'Invalid credentials.' });
+    }
+  });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  if (req.session.user) {
+    logAudit(req.session.user.username, req.session.user.role, 'LOGOUT', 'User logged out', req);
+    req.session.destroy();
+  }
+  res.json({ success: true, message: 'Logged out successfully.' });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  if (req.session && req.session.user) {
+    return res.json({ loggedIn: true, user: req.session.user });
+  }
+  res.json({ loggedIn: false });
+});
+
+app.post('/api/auth/change-password', requireAuth, (req, res) => {
+  const { currentPassword, newPassword, confirmPassword } = req.body;
+  const user = req.session.user;
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    return res.json({ success: false, message: 'All fields are required.' });
+  }
+  if (newPassword !== confirmPassword) {
+    return res.json({ success: false, message: 'New password and confirmation do not match.' });
+  }
+  if (newPassword.length < 8) {
+    return res.json({ success: false, message: 'New password must be at least 8 characters long.' });
+  }
+
+  db.get(`SELECT password_hash FROM users WHERE id = ?`, [user.id], (err, row) => {
+    if (err || !row) return res.json({ success: false, message: 'User not found.' });
+
+    if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
+      return res.json({ success: false, message: 'Current password is incorrect.' });
+    }
+
+    const newHash = bcrypt.hashSync(newPassword, 10);
+    db.run(`UPDATE users SET password_hash = ? WHERE id = ?`, [newHash, user.id], (err) => {
+      if (err) return res.json({ success: false, message: 'Failed to update password.' });
+      logAudit(user.username, user.role, 'CHANGE_PASSWORD', 'Password updated successfully', req);
+      res.json({ success: true, message: 'Password changed successfully.' });
+    });
+  });
+});
+
+// System Settings APIs
+app.get('/api/settings', (req, res) => {
+  db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    res.json({ success: true, settings });
+  });
+});
+
+app.post('/api/settings', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const { school_name, school_address, school_contact, school_email, school_year, club_name, organization_name, club_adviser, registration_enabled, allow_student_positions, late_threshold_minutes, low_participation_threshold } = req.body;
+
+  db.run(`UPDATE settings SET 
+    school_name = ?, school_address = ?, school_contact = ?, school_email = ?, school_year = ?,
+    club_name = ?, organization_name = ?, club_adviser = ?, registration_enabled = ?,
+    allow_student_positions = ?, late_threshold_minutes = ?, low_participation_threshold = ?
+    WHERE id = 1`,
+    [school_name, school_address, school_contact, school_email, school_year, club_name, organization_name, club_adviser, registration_enabled ? 1 : 0, allow_student_positions ? 1 : 0, late_threshold_minutes || 15, low_participation_threshold || 50],
+    function(err) {
+      if (err) return res.json({ success: false, message: 'Failed to update settings.' });
+      logAudit(req.session.user.username, req.session.user.role, 'UPDATE_SETTINGS', 'Updated system settings', req);
+      res.json({ success: true, message: 'Settings saved successfully.' });
+    }
+  );
+});
+
+// Public Self-Registration Route
+app.post('/api/public/register', upload.single('photo'), async (req, res) => {
+  try {
+    const settings = await new Promise((res, rej) => db.get("SELECT * FROM settings WHERE id = 1", (e, r) => e ? rej(e) : res(r)));
+    if (!settings.registration_enabled) {
+      return res.json({ success: false, message: 'Student registration is currently closed by the Adviser.' });
+    }
+
+    const { student_id, first_name, middle_name, last_name, email, contact_number, position_name } = req.body;
+    if (!student_id || !first_name || !last_name || !email) {
+      return res.json({ success: false, message: 'Please complete all required fields.' });
+    }
+
+    // Duplicate Student Check
+    const existing = await new Promise((res, rej) => {
+      db.get("SELECT student_id, email FROM students WHERE student_id = ? OR email = ?", [student_id, email], (e, r) => e ? rej(e) : res(r));
+    });
+
+    if (existing) {
+      if (existing.student_id === student_id) {
+        return res.json({ success: false, message: 'Student ID already registered. Please contact your Club Adviser if you believe this is an error.' });
+      }
+      return res.json({ success: false, message: 'School Email is already registered.' });
+    }
+
+    const assignedPosition = (settings.allow_student_positions && position_name) ? position_name : 'Member';
+    const photo_url = req.file ? '/uploads/' + req.file.filename : '';
+    const qr_token = 'QR_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    const date_joined = new Date().toISOString().split('T')[0];
+
+    db.run(
+      `INSERT INTO students (student_id, first_name, middle_name, last_name, email, contact_number, position_name, photo_url, qr_code_token, date_joined, membership_status, approval_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 'Pending')`,
+      [student_id, first_name, middle_name || '', last_name, email, contact_number || '', assignedPosition, photo_url, qr_token, date_joined],
+      function(err) {
+        if (err) return res.json({ success: false, message: 'Registration failed due to database error.' });
+        
+        logAudit('PUBLIC_USER', 'GUEST', 'REGISTER_SUBMIT', `Registration submitted for Student ID ${student_id}`, req);
+        return res.json({
+          success: true,
+          message: 'Registration submitted successfully!',
+          student: { student_id, first_name, last_name, position_name: assignedPosition }
+        });
+      }
+    );
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Internal Server Error' });
+  }
+});
+
+// Position Management APIs
+app.get('/api/positions', (req, res) => {
+  db.all(`SELECT * FROM positions ORDER BY position_name ASC`, [], (err, rows) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    res.json({ success: true, positions: rows });
+  });
+});
+
+app.post('/api/positions', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const { position_name, description } = req.body;
+  if (!position_name) return res.json({ success: false, message: 'Position name is required.' });
+
+  db.run(`INSERT INTO positions (position_name, description) VALUES (?, ?)`, [position_name.trim(), description || ''], function(err) {
+    if (err) return res.json({ success: false, message: 'Position already exists or invalid data.' });
+    logAudit(req.session.user.username, req.session.user.role, 'CREATE_POSITION', `Created position ${position_name}`, req);
+    res.json({ success: true, message: 'Position added successfully.' });
+  });
+});
+
+app.put('/api/positions/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const { position_name, description } = req.body;
+  const id = req.params.id;
+
+  db.get(`SELECT position_name FROM positions WHERE id = ?`, [id], (err, oldPos) => {
+    if (err || !oldPos) return res.json({ success: false, message: 'Position not found.' });
+
+    const oldName = oldPos.position_name;
+    const newName = position_name.trim();
+
+    db.run(`UPDATE positions SET position_name = ?, description = ? WHERE id = ?`, [newName, description || '', id], function(err) {
+      if (err) return res.json({ success: false, message: 'Failed to update position name.' });
+      
+      // Cascade position rename to students and position history
+      db.run(`UPDATE students SET position_name = ? WHERE position_name = ?`, [newName, oldName]);
+      db.run(`UPDATE position_history SET position_name = ? WHERE position_name = ?`, [newName, oldName]);
+
+      logAudit(req.session.user.username, req.session.user.role, 'UPDATE_POSITION', `Renamed position ${oldName} to ${newName}`, req);
+      res.json({ success: true, message: 'Position updated across system.' });
+    });
+  });
+});
+
+app.delete('/api/positions/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const id = req.params.id;
+  db.get(`SELECT position_name FROM positions WHERE id = ?`, [id], (err, pos) => {
+    if (err || !pos) return res.json({ success: false, message: 'Position not found.' });
+    
+    db.run(`DELETE FROM positions WHERE id = ?`, [id], function(err) {
+      if (err) return res.json({ success: false, message: 'Failed to delete position.' });
+      logAudit(req.session.user.username, req.session.user.role, 'DELETE_POSITION', `Deleted position ${pos.position_name}`, req);
+      res.json({ success: true, message: 'Position deleted successfully.' });
+    });
+  });
+});
+
+// Student Management APIs
+app.get('/api/students', requireAuth, (req, res) => {
+  const { search, position, status, approval } = req.query;
+  let query = `SELECT s.*, (s.first_name || ' ' || s.last_name) as full_name FROM students s WHERE 1=1`;
+  const params = [];
+
+  if (approval) {
+    query += ` AND s.approval_status = ?`;
+    params.push(approval);
+  } else {
+    query += ` AND s.approval_status = 'Approved'`;
+  }
+
+  if (position) {
+    query += ` AND s.position_name = ?`;
+    params.push(position);
+  }
+  if (status) {
+    query += ` AND s.membership_status = ?`;
+    params.push(status);
+  }
+  if (search) {
+    query += ` AND (s.student_id LIKE ? OR s.first_name LIKE ? OR s.last_name LIKE ? OR s.email LIKE ?)`;
+    const sTerm = `%${search}%`;
+    params.push(sTerm, sTerm, sTerm, sTerm);
+  }
+
+  query += ` ORDER BY s.last_name ASC, s.first_name ASC`;
+
+  db.all(query, params, (err, rows) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    res.json({ success: true, students: rows });
+  });
+});
+
+app.post('/api/students', requireAuth, requireRole(['ADMIN']), upload.single('photo'), async (req, res) => {
+  try {
+    const { student_id, first_name, middle_name, last_name, email, contact_number, position_name, date_joined, membership_status, membership_expiration } = req.body;
+    if (!student_id || !first_name || !last_name || !email || !position_name) {
+      return res.json({ success: false, message: 'Missing required student details.' });
+    }
+
+    const photo_url = req.file ? '/uploads/' + req.file.filename : '';
+    const qr_token = 'QR_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    const joinDate = date_joined || new Date().toISOString().split('T')[0];
+
+    db.run(
+      `INSERT INTO students (student_id, first_name, middle_name, last_name, email, contact_number, position_name, photo_url, qr_code_token, date_joined, membership_status, membership_expiration, approval_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Approved')`,
+      [student_id, first_name, middle_name || '', last_name, email, contact_number || '', position_name, photo_url, qr_token, joinDate, membership_status || 'Active', membership_expiration || null],
+      function(err) {
+        if (err) return res.json({ success: false, message: 'Student ID or Email already exists.' });
+
+        // Default Student User Account Creation (Default password: Student ID)
+        const passwordHash = bcrypt.hashSync(student_id, 10);
+        db.run(`INSERT INTO users (username, password_hash, role, student_id) VALUES (?, ?, 'STUDENT', ?)`, [student_id, passwordHash, student_id]);
+
+        // Record Position History
+        db.get(`SELECT school_year FROM settings WHERE id = 1`, (e, s) => {
+          const sy = s ? s.school_year : '2026-2027';
+          db.run(`INSERT INTO position_history (student_id, position_name, school_year) VALUES (?, ?, ?)`, [student_id, position_name, sy]);
+        });
+
+        logAudit(req.session.user.username, req.session.user.role, 'ADD_STUDENT', `Added student ${student_id} (${first_name} ${last_name})`, req);
+        res.json({ success: true, message: 'Student created successfully.' });
+      }
+    );
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Error adding student.' });
+  }
+});
+
+app.put('/api/students/:student_id', requireAuth, requireRole(['ADMIN']), upload.single('photo'), (req, res) => {
+  const targetId = req.params.student_id;
+  const { first_name, middle_name, last_name, email, contact_number, position_name, membership_status, membership_expiration } = req.body;
+
+  db.get(`SELECT * FROM students WHERE student_id = ?`, [targetId], (err, oldStudent) => {
+    if (err || !oldStudent) return res.json({ success: false, message: 'Student record not found.' });
+
+    const photo_url = req.file ? '/uploads/' + req.file.filename : oldStudent.photo_url;
+
+    db.run(
+      `UPDATE students SET first_name = ?, middle_name = ?, last_name = ?, email = ?, contact_number = ?, position_name = ?, photo_url = ?, membership_status = ?, membership_expiration = ?
+       WHERE student_id = ?`,
+      [first_name, middle_name || '', last_name, email, contact_number || '', position_name, photo_url, membership_status, membership_expiration || null, targetId],
+      function(err) {
+        if (err) return res.json({ success: false, message: 'Failed to update student profile.' });
+
+        // Record Position History if Position Changed
+        if (oldStudent.position_name !== position_name) {
+          db.get(`SELECT school_year FROM settings WHERE id = 1`, (e, s) => {
+            const sy = s ? s.school_year : '2026-2027';
+            db.run(`INSERT INTO position_history (student_id, position_name, school_year) VALUES (?, ?, ?)`, [targetId, position_name, sy]);
+          });
         }
-        if (role && req.session.user.role !== role) {
-            return res.status(403).send('Access Denied: Insufficient Privileges');
+
+        logAudit(req.session.user.username, req.session.user.role, 'UPDATE_STUDENT', `Updated student ${targetId}`, req);
+        res.json({ success: true, message: 'Student details updated.' });
+      }
+    );
+  });
+});
+
+app.post('/api/students/:student_id/approve', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const student_id = req.params.student_id;
+  db.get(`SELECT * FROM students WHERE student_id = ?`, [student_id], (err, student) => {
+    if (err || !student) return res.json({ success: false, message: 'Registration record not found.' });
+
+    db.run(`UPDATE students SET approval_status = 'Approved' WHERE student_id = ?`, [student_id], function(err) {
+      if (err) return res.json({ success: false, message: 'Approval failed.' });
+
+      // Create Student Account Login
+      const defaultHash = bcrypt.hashSync(student_id, 10);
+      db.run(`INSERT OR IGNORE INTO users (username, password_hash, role, student_id) VALUES (?, ?, 'STUDENT', ?)`, [student_id, defaultHash, student_id]);
+
+      // Record Position History
+      db.get(`SELECT school_year FROM settings WHERE id = 1`, (e, s) => {
+        const sy = s ? s.school_year : '2026-2027';
+        db.run(`INSERT INTO position_history (student_id, position_name, school_year) VALUES (?, ?, ?)`, [student_id, student.position_name, sy]);
+      });
+
+      logAudit(req.session.user.username, req.session.user.role, 'APPROVE_STUDENT', `Approved student registration ${student_id}`, req);
+      res.json({ success: true, message: 'Student registration approved successfully.' });
+    });
+  });
+});
+
+app.post('/api/students/:student_id/reject', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const student_id = req.params.student_id;
+  db.run(`UPDATE students SET approval_status = 'Rejected' WHERE student_id = ?`, [student_id], function(err) {
+    if (err) return res.json({ success: false, message: 'Rejection failed.' });
+    logAudit(req.session.user.username, req.session.user.role, 'REJECT_STUDENT', `Rejected student registration ${student_id}`, req);
+    res.json({ success: true, message: 'Registration rejected.' });
+  });
+});
+
+app.post('/api/students/:student_id/regenerate-qr', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const student_id = req.params.student_id;
+  const new_token = 'QR_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+
+  db.run(`UPDATE students SET qr_code_token = ? WHERE student_id = ?`, [new_token, student_id], function(err) {
+    if (err) return res.json({ success: false, message: 'Failed to regenerate QR code token.' });
+    logAudit(req.session.user.username, req.session.user.role, 'REGENERATE_QR', `Regenerated QR Token for student ${student_id}`, req);
+    res.json({ success: true, message: 'QR Code regenerated successfully.', token: new_token });
+  });
+});
+
+app.delete('/api/students/:student_id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const student_id = req.params.student_id;
+  db.run(`DELETE FROM students WHERE student_id = ?`, [student_id], function(err) {
+    if (err) return res.json({ success: false, message: 'Failed to delete student.' });
+    db.run(`DELETE FROM users WHERE student_id = ?`, [student_id]);
+    logAudit(req.session.user.username, req.session.user.role, 'DELETE_STUDENT', `Deleted student ${student_id}`, req);
+    res.json({ success: true, message: 'Student deleted successfully.' });
+  });
+});
+
+app.get('/api/students/:student_id/history', requireAuth, (req, res) => {
+  const student_id = req.params.student_id;
+  db.all(`SELECT * FROM position_history WHERE student_id = ? ORDER BY assigned_date DESC`, [student_id], (err, rows) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    res.json({ success: true, history: rows });
+  });
+});
+
+// Event Management APIs
+app.get('/api/events', requireAuth, (req, res) => {
+  db.all(`SELECT * FROM events ORDER BY event_date DESC, start_time DESC`, [], (err, rows) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    res.json({ success: true, events: rows });
+  });
+});
+
+app.post('/api/events', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const { event_name, description, event_type, event_date, start_time, end_time, location, organizer, target_audience, allowed_positions } = req.body;
+  if (!event_name || !event_date || !start_time || !end_time || !location) {
+    return res.json({ success: false, message: 'Please complete required event parameters.' });
+  }
+
+  const positionsStr = Array.isArray(allowed_positions) ? allowed_positions.join(',') : (allowed_positions || '');
+
+  db.run(
+    `INSERT INTO events (event_name, description, event_type, event_date, start_time, end_time, location, organizer, target_audience, allowed_positions, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPCOMING')`,
+    [event_name, description || '', event_type || 'General Club Attendance', event_date, start_time, end_time, location, organizer || 'Club Adviser', target_audience || 'ALL', positionsStr],
+    function(err) {
+      if (err) return res.json({ success: false, message: 'Failed to create event.' });
+      logAudit(req.session.user.username, req.session.user.role, 'CREATE_EVENT', `Created event ${event_name}`, req);
+      res.json({ success: true, message: 'Event created successfully.' });
+    }
+  );
+});
+
+app.put('/api/events/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const id = req.params.id;
+  const { event_name, description, event_type, event_date, start_time, end_time, location, organizer, target_audience, allowed_positions, status } = req.body;
+  const positionsStr = Array.isArray(allowed_positions) ? allowed_positions.join(',') : (allowed_positions || '');
+
+  db.run(
+    `UPDATE events SET event_name = ?, description = ?, event_type = ?, event_date = ?, start_time = ?, end_time = ?, location = ?, organizer = ?, target_audience = ?, allowed_positions = ?, status = ?
+     WHERE id = ?`,
+    [event_name, description || '', event_type, event_date, start_time, end_time, location, organizer, target_audience, positionsStr, status, id],
+    function(err) {
+      if (err) return res.json({ success: false, message: 'Failed to update event.' });
+      logAudit(req.session.user.username, req.session.user.role, 'UPDATE_EVENT', `Updated event ID ${id}`, req);
+      res.json({ success: true, message: 'Event updated.' });
+    }
+  );
+});
+
+app.delete('/api/events/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const id = req.params.id;
+  db.run(`DELETE FROM events WHERE id = ?`, [id], function(err) {
+    if (err) return res.json({ success: false, message: 'Failed to delete event.' });
+    logAudit(req.session.user.username, req.session.user.role, 'DELETE_EVENT', `Deleted event ID ${id}`, req);
+    res.json({ success: true, message: 'Event deleted.' });
+  });
+});
+
+// Automatic Absent Detection Algorithm execution for completed events
+app.post('/api/events/:id/close-and-mark-absent', requireAuth, requireRole(['ADMIN']), async (req, res) => {
+  const eventId = req.params.id;
+  try {
+    const event = await new Promise((res, rej) => db.get("SELECT * FROM events WHERE id = ?", [eventId], (e, r) => e ? rej(e) : res(r)));
+    if (!event) return res.json({ success: false, message: 'Event not found' });
+
+    // Fetch Eligible Students
+    let eligibleQuery = `SELECT student_id FROM students WHERE approval_status = 'Approved' AND membership_status = 'Active'`;
+    if (event.target_audience === 'OFFICERS_ONLY') {
+      eligibleQuery += ` AND position_name != 'Member'`;
+    } else if (event.target_audience === 'SPECIFIC_POSITIONS' && event.allowed_positions) {
+      const allowedArr = event.allowed_positions.split(',').map(p => `'${p.trim()}'`).join(',');
+      eligibleQuery += ` AND position_name IN (${allowedArr})`;
+    }
+
+    const eligibleStudents = await new Promise((res, rej) => db.all(eligibleQuery, [], (e, r) => e ? rej(e) : res(r)));
+    const existingAttendance = await new Promise((res, rej) => db.all("SELECT student_id FROM attendance WHERE event_id = ?", [eventId], (e, r) => e ? rej(e) : res(r)));
+    const attendedSet = new Set(existingAttendance.map(a => a.student_id));
+
+    let absentCount = 0;
+    for (const student of eligibleStudents) {
+      if (!attendedSet.has(student.student_id)) {
+        await new Promise((res, rej) => {
+          db.run(`INSERT OR IGNORE INTO attendance (event_id, student_id, status, notes) VALUES (?, ?, 'ABSENT', 'Automated End-of-Event Record')`, [eventId, student.student_id], (e) => e ? rej(e) : res());
+        });
+        absentCount++;
+      }
+    }
+
+    await new Promise((res, rej) => db.run("UPDATE events SET status = 'COMPLETED' WHERE id = ?", [eventId], (e) => e ? rej(e) : res()));
+    logAudit(req.session.user.username, req.session.user.role, 'MARK_ABSENT', `Closed event ${eventId} and flagged ${absentCount} absent students`, req);
+
+    res.json({ success: true, message: `Event marked as completed. ${absentCount} absent records finalized.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Error closing event' });
+  }
+});
+
+// Attendance & Scanner Processing APIs
+app.post('/api/attendance/scan', requireAuth, requireRole(['ADMIN', 'SCANNER']), async (req, res) => {
+  const { event_id, qr_token, scan_mode } = req.body; // scan_mode: 'TIME_IN' or 'TIME_OUT'
+
+  if (!event_id || !qr_token) {
+    return res.json({ success: false, code: 'INVALID_DATA', message: 'Missing event identifier or QR token.' });
+  }
+
+  try {
+    const event = await new Promise((res, rej) => db.get("SELECT * FROM events WHERE id = ?", [event_id], (e, r) => e ? rej(e) : res(r)));
+    if (!event) return res.json({ success: false, code: 'EVENT_NOT_FOUND', message: 'Selected event does not exist.' });
+
+    const student = await new Promise((res, rej) => db.get("SELECT * FROM students WHERE qr_code_token = ?", [qr_token], (e, r) => e ? rej(e) : res(r)));
+    if (!student || student.approval_status !== 'Approved' || student.membership_status !== 'Active') {
+      return res.json({ success: false, code: 'INVALID_QR', message: 'Invalid or Inactive QR Code.' });
+    }
+
+    // Target Audience Security Verification
+    if (event.target_audience === 'OFFICERS_ONLY' && student.position_name === 'Member') {
+      return res.json({ success: false, code: 'UNAUTHORIZED_EVENT', message: `${student.first_name} ${student.last_name} is not authorized for Officer-only events.` });
+    }
+    if (event.target_audience === 'SPECIFIC_POSITIONS' && event.allowed_positions) {
+      const allowedArr = event.allowed_positions.split(',').map(p => p.trim());
+      if (!allowedArr.includes(student.position_name)) {
+        return res.json({ success: false, code: 'UNAUTHORIZED_EVENT', message: `Position '${student.position_name}' is not authorized for this event.` });
+      }
+    }
+
+    const now = new Date();
+    const timeStr = now.toISOString();
+
+    const existingAtt = await new Promise((res, rej) => db.get("SELECT * FROM attendance WHERE event_id = ? AND student_id = ?", [event_id, student.student_id], (e, r) => e ? rej(e) : res(r)));
+
+    if (scan_mode === 'TIME_OUT') {
+      if (!existingAtt || !existingAtt.time_in) {
+        return res.json({ success: false, code: 'NO_TIME_IN', message: `${student.first_name} ${student.last_name} has not timed in yet.` });
+      }
+      if (existingAtt.time_out) {
+        return res.json({ success: false, code: 'DUPLICATE_SCAN', message: `${student.first_name} ${student.last_name} has already timed out.`, student });
+      }
+
+      await new Promise((res, rej) => {
+        db.run("UPDATE attendance SET time_out = ? WHERE id = ?", [timeStr, existingAtt.id], (e) => e ? rej(e) : res());
+      });
+
+      logAudit(req.session.user.username, req.session.user.role, 'SCAN_TIME_OUT', `Time Out logged for ${student.student_id}`, req);
+      return res.json({
+        success: true,
+        action: 'TIME_OUT',
+        message: 'Time out recorded.',
+        student: {
+          student_id: student.student_id,
+          full_name: `${student.first_name} ${student.last_name}`,
+          position_name: student.position_name,
+          photo_url: student.photo_url,
+          time_out: now.toLocaleTimeString()
         }
-        next();
-    };
-}
+      });
+    } else {
+      // DEFAULT: TIME_IN
+      if (existingAtt && existingAtt.time_in) {
+        return res.json({
+          success: false,
+          code: 'DUPLICATE_SCAN',
+          message: `${student.first_name} ${student.last_name} is already recorded for this event.`,
+          student: { full_name: `${student.first_name} ${student.last_name}` }
+        });
+      }
+
+      // Late Calculation Threshold Logic
+      const settings = await new Promise((res, rej) => db.get("SELECT late_threshold_minutes FROM settings WHERE id = 1", (e, r) => e ? rej(e) : res(r)));
+      const lateMins = settings ? settings.late_threshold_minutes : 15;
+      
+      const eventStartDateTime = new Date(`${event.event_date}T${event.start_time}`);
+      const lateCutoff = new Date(eventStartDateTime.getTime() + lateMins * 60000);
+
+      let attStatus = 'PRESENT';
+      if (now > lateCutoff) attStatus = 'LATE';
+
+      if (existingAtt) {
+        await new Promise((res, rej) => {
+          db.run("UPDATE attendance SET time_in = ?, status = ?, scanned_by = ? WHERE id = ?", [timeStr, attStatus, req.session.user.username, existingAtt.id], (e) => e ? rej(e) : res());
+        });
+      } else {
+        await new Promise((res, rej) => {
+          db.run("INSERT INTO attendance (event_id, student_id, time_in, status, scanned_by) VALUES (?, ?, ?, ?, ?)", [event_id, student.student_id, timeStr, attStatus, req.session.user.username], (e) => e ? rej(e) : res());
+        });
+      }
+
+      logAudit(req.session.user.username, req.session.user.role, 'SCAN_TIME_IN', `Time In (${attStatus}) logged for ${student.student_id}`, req);
+      return res.json({
+        success: true,
+        action: 'TIME_IN',
+        status: attStatus,
+        message: `Attendance recorded as ${attStatus}.`,
+        student: {
+          student_id: student.student_id,
+          full_name: `${student.first_name} ${student.last_name}`,
+          position_name: student.position_name,
+          photo_url: student.photo_url,
+          time_in: now.toLocaleTimeString()
+        }
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, code: 'SERVER_ERROR', message: 'Error processing scanner API request.' });
+  }
+});
+
+app.get('/api/attendance/event/:event_id', requireAuth, (req, res) => {
+  const eventId = req.params.event_id;
+  db.all(
+    `SELECT a.*, s.first_name, s.last_name, (s.first_name || ' ' || s.last_name) as full_name, s.position_name, s.photo_url
+     FROM attendance a
+     JOIN students s ON a.student_id = s.student_id
+     WHERE a.event_id = ?
+     ORDER BY a.created_at DESC`,
+    [eventId],
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, message: 'Database error' });
+      res.json({ success: true, attendance: rows });
+    }
+  );
+});
+
+app.put('/api/attendance/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const { status, notes } = req.body;
+  const id = req.params.id;
+
+  db.run(`UPDATE attendance SET status = ?, notes = ? WHERE id = ?`, [status, notes || '', id], function(err) {
+    if (err) return res.json({ success: false, message: 'Failed to adjust attendance record.' });
+    logAudit(req.session.user.username, req.session.user.role, 'UPDATE_ATTENDANCE', `Updated attendance ID ${id} to ${status}`, req);
+    res.json({ success: true, message: 'Attendance status adjusted successfully.' });
+  });
+});
+
+// Analytics & Dashboard Summary APIs
+app.get('/api/analytics/dashboard', requireAuth, async (req, res) => {
+  try {
+    const totalStudents = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM students WHERE approval_status = 'Approved'", (e, row) => e ? j(e) : r(row.cnt)));
+    const activeStudents = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM students WHERE approval_status = 'Approved' AND membership_status = 'Active'", (e, row) => e ? j(e) : r(row.cnt)));
+    const inactiveStudents = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM students WHERE approval_status = 'Approved' AND membership_status != 'Active'", (e, row) => e ? j(e) : r(row.cnt)));
+    const totalOfficers = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM students WHERE approval_status = 'Approved' AND position_name != 'Member'", (e, row) => e ? j(e) : r(row.cnt)));
+    const pendingRegistrations = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM students WHERE approval_status = 'Pending'", (e, row) => e ? j(e) : r(row.cnt)));
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const presentToday = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM attendance WHERE status = 'PRESENT' AND date(time_in) = ?", [todayStr], (e, row) => e ? j(e) : r(row.cnt)));
+    const lateToday = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM attendance WHERE status = 'LATE' AND date(time_in) = ?", [todayStr], (e, row) => e ? j(e) : r(row.cnt)));
+    const absentToday = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM attendance WHERE status = 'ABSENT' AND date(created_at) = ?", [todayStr], (e, row) => e ? j(e) : r(row.cnt)));
+
+    // Position Distribution
+    const positionStats = await new Promise((r, j) => db.all("SELECT position_name, COUNT(*) as count FROM students WHERE approval_status = 'Approved' GROUP BY position_name", [], (e, rows) => e ? j(e) : r(rows)));
+
+    // Active Event
+    const activeEvent = await new Promise((r, j) => db.get("SELECT * FROM events WHERE status = 'ACTIVE' ORDER BY id DESC LIMIT 1", [], (e, row) => e ? j(e) : r(row)));
+
+    // Recent Scans
+    const recentScans = await new Promise((r, j) => db.all(
+      `SELECT a.*, (s.first_name || ' ' || s.last_name) as full_name, s.position_name, e.event_name
+       FROM attendance a
+       JOIN students s ON a.student_id = s.student_id
+       JOIN events e ON a.event_id = e.id
+       ORDER BY a.created_at DESC LIMIT 10`,
+      [], (e, rows) => e ? j(e) : r(rows)
+    ));
+
+    res.json({
+      success: true,
+      stats: {
+        totalStudents,
+        activeStudents,
+        inactiveStudents,
+        totalOfficers,
+        pendingRegistrations,
+        presentToday,
+        lateToday,
+        absentToday,
+        positionStats,
+        activeEvent,
+        recentScans
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Analytics aggregation error' });
+  }
+});
+
+// Participation Analytics & Ranking APIs
+app.get('/api/analytics/participation', requireAuth, async (req, res) => {
+  try {
+    const totalEvents = await new Promise((r, j) => db.get("SELECT COUNT(*) as cnt FROM events WHERE status = 'COMPLETED'", (e, row) => e ? j(e) : r(row.cnt)));
+    
+    const query = `
+      SELECT s.student_id, (s.first_name || ' ' || s.last_name) as full_name, s.position_name, s.membership_status,
+             COUNT(CASE WHEN a.status IN ('PRESENT', 'LATE') THEN 1 END) as attended_count,
+             COUNT(CASE WHEN a.status = 'PRESENT' THEN 1 END) as present_count,
+             COUNT(CASE WHEN a.status = 'LATE' THEN 1 END) as late_count,
+             COUNT(CASE WHEN a.status = 'ABSENT' THEN 1 END) as absent_count,
+             COUNT(CASE WHEN a.status = 'EXCUSED' THEN 1 END) as excused_count
+      FROM students s
+      LEFT JOIN attendance a ON s.student_id = a.student_id
+      WHERE s.approval_status = 'Approved'
+      GROUP BY s.student_id
+      ORDER BY attended_count DESC, s.last_name ASC`;
+
+    const stats = await new Promise((r, j) => db.all(query, [], (e, rows) => e ? j(e) : r(rows)));
+    const totalVal = totalEvents || 1;
+
+    const computed = stats.map(s => {
+      const rate = Math.round((s.attended_count / totalVal) * 100);
+      return { ...s, total_events: totalVal, participation_rate: Math.min(rate, 100) };
+    });
+
+    res.json({ success: true, total_events: totalEvents, participation: computed });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to calculate participation' });
+  }
+});
+
+// Student Member Portal Data Route
+app.get('/api/student/portal-data', requireAuth, requireRole(['STUDENT']), async (req, res) => {
+  const student_id = req.session.user.student_id;
+  try {
+    const student = await new Promise((r, j) => db.get("SELECT * FROM students WHERE student_id = ?", [student_id], (e, row) => e ? j(e) : r(row)));
+    const settings = await new Promise((r, j) => db.get("SELECT * FROM settings WHERE id = 1", (e, row) => e ? j(e) : r(row)));
+    const attendance = await new Promise((r, j) => db.all(
+      `SELECT a.*, e.event_name, e.event_date, e.event_type 
+       FROM attendance a 
+       JOIN events e ON a.event_id = e.id 
+       WHERE a.student_id = ? 
+       ORDER BY e.event_date DESC`,
+      [student_id], (e, rows) => e ? j(e) : r(rows)
+    ));
+    const upcomingEvents = await new Promise((r, j) => db.all("SELECT * FROM events WHERE status = 'UPCOMING' ORDER BY event_date ASC", [], (e, rows) => e ? j(e) : r(rows)));
+
+    // Generate Dynamic QR Data URL for Student Portal
+    const qrDataUrl = await QRCode.toDataURL(student.qr_code_token, { width: 300, margin: 2 });
+
+    res.json({
+      success: true,
+      student,
+      settings,
+      attendance,
+      upcomingEvents,
+      qrDataUrl
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Portal load failure' });
+  }
+});
+
+// Reports Generation & Printing Data Route
+app.get('/api/reports/generate', requireAuth, async (req, res) => {
+  const { report_type, event_id, position_name, start_date, end_date } = req.query;
+  try {
+    const settings = await new Promise((r, j) => db.get("SELECT * FROM settings WHERE id = 1", (e, row) => e ? j(e) : r(row)));
+    let query = `
+      SELECT a.*, s.first_name, s.last_name, (s.first_name || ' ' || s.last_name) as full_name, s.position_name, e.event_name, e.event_date, e.event_type
+      FROM attendance a
+      JOIN students s ON a.student_id = s.student_id
+      JOIN events e ON a.event_id = e.id
+      WHERE 1=1`;
+    const params = [];
+
+    if (event_id) { query += ` AND a.event_id = ?`; params.push(event_id); }
+    if (position_name) { query += ` AND s.position_name = ?`; params.push(position_name); }
+    if (start_date) { query += ` AND date(e.event_date) >= ?`; params.push(start_date); }
+    if (end_date) { query += ` AND date(e.event_date) <= ?`; params.push(end_date); }
+
+    query += ` ORDER BY e.event_date DESC, s.last_name ASC`;
+
+    const reportData = await new Promise((r, j) => db.all(query, params, (e, rows) => e ? j(e) : r(rows)));
+
+    res.json({
+      success: true,
+      settings,
+      generated_at: new Date().toLocaleString(),
+      report_type: report_type || 'General Attendance',
+      records: reportData
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Report generation failed.' });
+  }
+});
+
+// CSV Data Export API Route
+app.get('/api/export/csv', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const { type } = req.query; // 'students' or 'attendance'
+
+  if (type === 'students') {
+    db.all(`SELECT student_id, first_name, middle_name, last_name, email, contact_number, position_name, date_joined, membership_status FROM students WHERE approval_status = 'Approved'`, [], (err, rows) => {
+      if (err) return res.status(500).send('Database Error');
+      let csv = 'Student ID,First Name,Middle Name,Last Name,Email,Contact,Position,Date Joined,Status\n';
+      rows.forEach(r => {
+        csv += `"${r.student_id}","${r.first_name}","${r.middle_name}","${r.last_name}","${r.email}","${r.contact_number}","${r.position_name}","${r.date_joined}","${r.membership_status}"\n`;
+      });
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="Students_List.csv"');
+      res.status(200).send(csv);
+    });
+  } else {
+    db.all(`SELECT a.id, a.student_id, (s.first_name || ' ' || s.last_name) as full_name, s.position_name, e.event_name, e.event_date, a.time_in, a.time_out, a.status, a.notes 
+            FROM attendance a 
+            JOIN students s ON a.student_id = s.student_id 
+            JOIN events e ON a.event_id = e.id`, [], (err, rows) => {
+      if (err) return res.status(500).send('Database Error');
+      let csv = 'Record ID,Student ID,Student Name,Position,Event Name,Event Date,Time In,Time Out,Status,Notes\n';
+      rows.forEach(r => {
+        csv += `"${r.id}","${r.student_id}","${r.full_name}","${r.position_name}","${r.event_name}","${r.event_date}","${r.time_in || ''}","${r.time_out || ''}","${r.status}","${r.notes || ''}"\n`;
+      });
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="Attendance_Logs.csv"');
+      res.status(200).send(csv);
+    });
+  }
+});
+
+// Audit Logs API Route
+app.get('/api/audit-logs', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  db.all(`SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 200`, [], (err, rows) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    res.json({ success: true, logs: rows });
+  });
+});
+
+// Database Backup and Restore APIs
+app.get('/api/system/backup', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const backupFileName = `backup_club_attendance_${Date.now()}.db`;
+  const destPath = path.join(backupsDir, backupFileName);
+
+  fs.copyFile(dbPath, destPath, (err) => {
+    if (err) return res.status(500).json({ success: false, message: 'Backup creation failed.' });
+    logAudit(req.session.user.username, req.session.user.role, 'BACKUP_DB', `Created backup ${backupFileName}`, req);
+    res.download(destPath, backupFileName);
+  });
+});
+
+app.post('/api/system/restore', requireAuth, requireRole(['ADMIN']), upload.single('backup_file'), (req, res) => {
+  if (!req.file) return res.json({ success: false, message: 'Please upload a valid SQLite backup file.' });
+
+  const tempBackupPath = req.file.path;
+  
+  db.close((err) => {
+    if (err) return res.json({ success: false, message: 'Failed to lock database for restore.' });
+
+    fs.copyFile(tempBackupPath, dbPath, (err) => {
+      // Re-open DB Connection
+      global.db = new sqlite3.Database(dbPath);
+      if (err) return res.json({ success: false, message: 'Failed to restore database file.' });
+
+      logAudit(req.session.user.username, req.session.user.role, 'RESTORE_DB', 'Restored system database from backup upload', req);
+      res.json({ success: true, message: 'Database restored successfully. System re-initialized.' });
+    });
+  });
+});
+
+// QR Code Rendering Batch API for Printing A4 Grid
+app.get('/api/students/qr-batch', requireAuth, async (req, res) => {
+  const { ids } = req.query; // Comma separated student IDs or empty for ALL
+  let query = `SELECT * FROM students WHERE approval_status = 'Approved'`;
+  const params = [];
+
+  if (ids) {
+    const idList = ids.split(',').map(i => `'${i.trim()}'`).join(',');
+    query += ` AND student_id IN (${idList})`;
+  }
+
+  db.all(query, params, async (err, students) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+
+    try {
+      const studentCards = await Promise.all(students.map(async (st) => {
+        const qrDataUrl = await QRCode.toDataURL(st.qr_code_token, { width: 180, margin: 1 });
+        return { ...st, qrDataUrl };
+      }));
+      res.json({ success: true, students: studentCards });
+    } catch (e) {
+      res.status(500).json({ success: false, message: 'QR Rendering failed' });
+    }
+  });
+});
+
 
 // ==========================================
-// 4. EMBEDDED VIEW TEMPLATES (VIEWS SETUP)
+// FULL EMBEDDED SINGLE-PAGE CLIENT WEB APP
 // ==========================================
-// To make this fully deployable with zero missing view files, we generate standard EJS templates on startup if they don't exist.
-function createDefaultViews() {
-    const layoutHeader = `<!DOCTYPE html>
+app.get('*', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`
+<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><%= typeof title !== 'undefined' ? title : 'Student Club System' %></title>
-    <style>
-        :root { --primary: #1e3a8a; --secondary: #3b82f6; --accent: #10b981; --danger: #ef4444; --warning: #f59e0b; --bg: #f8fafc; --text: #1e293b; --card: #ffffff; --border: #e2e8f0; }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        body { background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
-        aside { width: 260px; background: var(--primary); color: white; display: flex; flex-direction: column; position: fixed; height: 100vh; overflow-y: auto; z-index: 100; }
-        .sidebar-brand { padding: 20px; font-size: 1.1rem; font-weight: bold; background: rgba(0,0,0,0.2); text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1); }
-        .sidebar-menu { list-style: none; padding: 15px 0; flex: 1; }
-        .sidebar-menu li a { display: block; padding: 12px 20px; color: #cbd5e1; text-decoration: none; font-size: 0.95rem; transition: 0.2s; border-left: 4px solid transparent; }
-        .sidebar-menu li a:hover, .sidebar-menu li a.active { background: rgba(255,255,255,0.1); color: white; border-left-color: var(--accent); }
-        main { margin-left: 260px; flex: 1; display: flex; flex-direction: column; min-width: 0; }
-        header { background: var(--card); padding: 15px 30px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-        .user-info { display: flex; align-items: center; gap: 15px; font-size: 0.9rem; font-weight: 600; }
-        .content { padding: 30px; flex: 1; }
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-        .row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-        .col { flex: 1; min-width: 250px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; background: white; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
-        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
-        th { background: #f1f5f9; color: #475569; font-weight: 600; }
-        tr:hover { background: #f8fafc; }
-        .btn { display: inline-block; padding: 8px 16px; background: var(--secondary); color: white; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: 0.2s; }
-        .btn:hover { opacity: 0.9; }
-        .btn-success { background: var(--accent); }
-        .btn-danger { background: var(--danger); }
-        .btn-warning { background: var(--warning); color: #fff; }
-        .btn-sm { padding: 5px 10px; font-size: 0.8rem; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 0.9rem; color: #334155; }
-        input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; outline: none; transition: 0.2s; }
-        input:focus, select:focus { border-color: var(--secondary); box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
-        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
-        .badge-success { background: #d1fae5; color: #065f46; }
-        .badge-warning { background: #fef3c7; color: #92400e; }
-        .badge-danger { background: #fee2e2; color: #991b1b; }
-        .badge-info { background: #e0f2fe; color: #0369a1; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px; }
-        .stat-card { background: white; padding: 20px; border-radius: 8px; border: 1px solid var(--border); border-left: 4px solid var(--secondary); }
-        .stat-card h3 { font-size: 1.8rem; margin-top: 5px; color: var(--primary); }
-        .stat-card p { color: #64748b; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; }
-        @media(max-width: 768px) { aside { width: 70px; } aside .sidebar-brand span, aside .sidebar-menu span { display: none; } main { margin-left: 70px; } }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>School Student Club QR Attendance System</title>
+  <!-- CSS Framework & Font Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+  <!-- HTML5 QR Camera Scanner Library -->
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  
+  <style>
+    :root {
+      --primary-color: #1e3a8a;
+      --secondary-color: #3b82f6;
+      --accent-color: #06b6d4;
+      --dark-bg: #0f172a;
+      --light-bg: #f8fafc;
+    }
+    body {
+      background-color: #f1f5f9;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    .sidebar {
+      min-height: 100vh;
+      background: var(--dark-bg);
+      color: #fff;
+    }
+    .sidebar .nav-link {
+      color: #94a3b8;
+      padding: 0.75rem 1.25rem;
+      font-weight: 500;
+      border-radius: 6px;
+      margin-bottom: 4px;
+    }
+    .sidebar .nav-link:hover, .sidebar .nav-link.active {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .sidebar .nav-link i {
+      margin-right: 10px;
+    }
+    .content-area {
+      padding: 20px;
+    }
+    .card-stat {
+      border: none;
+      border-radius: 12px;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+      transition: transform 0.2s;
+    }
+    .card-stat:hover {
+      transform: translateY(-3px);
+    }
+    .id-card-a4 {
+      width: 3.375in;
+      height: 2.125in;
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 8px;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      page-break-inside: avoid;
+    }
+    .id-card-header {
+      background: var(--primary-color);
+      color: white;
+      text-align: center;
+      padding: 2px 4px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: bold;
+    }
+    .id-card-body {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .id-card-photo {
+      width: 60px;
+      height: 60px;
+      border-radius: 4px;
+      object-fit: cover;
+      border: 1px solid #cbd5e1;
+    }
+    .id-card-qr {
+      width: 65px;
+      height: 65px;
+    }
+    .id-card-details {
+      font-size: 9px;
+      line-height: 1.2;
+    }
+    .a4-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 15px;
+      padding: 20px;
+      background: white;
+    }
+    @media print {
+      body * { visibility: hidden; }
+      #printableArea, #printableArea * { visibility: visible; }
+      #printableArea { position: absolute; left: 0; top: 0; width: 100%; }
+      .no-print { display: none !important; }
+    }
+    .scanner-preview {
+      width: 100%;
+      max-width: 500px;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 3px solid var(--secondary-color);
+    }
+  </style>
 </head>
-<body>`;
+<body>
 
-    if (!fs.existsSync(viewsDir)) fs.mkdirSync(viewsDir);
-    // Write partials or views as required. We will inline full page renders in app.js routes for maximum reliability and self-contained elegance.
-}
-createDefaultViews();
+<div id="app">
+  <!-- Dynamic Dynamic Navigation & View Rendering Root -->
+  <div class="text-center p-5 mt-5">
+    <div class="spinner-border text-primary" role="status"></div>
+    <p class="mt-2 text-muted">Loading Student Club System...</p>
+  </div>
+</div>
 
-// ==========================================
-// 5. PUBLIC & AUTHENTICATION ROUTES
-// ==========================================
+<!-- Core Client-Side Logic -->
+<script>
+  // Global State Application Object
+  const state = {
+    user: null,
+    settings: {},
+    currentRoute: 'login',
+    positions: [],
+    scanner: null,
+    voiceEnabled: true,
+    scannerMode: 'TIME_IN'
+  };
 
-// Login Page
-app.get('/login', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>System Login - Club Attendance</title>
-            <style>
-                body { background: #f1f5f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: 'Segoe UI', sans-serif; }
-                .login-card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); width: 100%; max-width: 400px; border-top: 5px solid #1e3a8a; }
-                h2 { margin-bottom: 25px; color: #1e3a8a; text-align: center; }
-                .form-group { margin-bottom: 20px; }
-                label { display: block; margin-bottom: 8px; font-weight: 600; font-size: 0.9rem; color: #334155; }
-                input { width: 100%; padding: 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 1rem; box-sizing: border-box; }
-                button { width: 100%; padding: 12px; background: #1e3a8a; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: 0.2s; }
-                button:hover { background: #1e40af; }
-                .error { background: #fee2e2; color: #991b1b; padding: 10px; border-radius: 6px; margin-bottom: 20px; font-size: 0.9rem; text-align: center; }
-                .links { margin-top: 20px; text-align: center; font-size: 0.9rem; }
-                .links a { color: #3b82f6; text-decoration: none; }
-            </style>
-        </head>
-        <body>
-            <div class="login-card">
-                <h2>Club Attendance Login</h2>
-                ${req.query.error ? `<div class="error">Invalid username, password, or role.</div>` : ''}
-                <form action="/login" method="POST">
-                    <div class="form-group">
-                        <label>Username / Student ID</label>
-                        <input type="text" name="username" required placeholder="Enter username or student ID">
-                    </div>
-                    <div class="form-group">
-                        <label>Password</label>
-                        <input type="password" name="password" required placeholder="Enter password">
-                    </div>
-                    <div class="form-group">
-                        <label>Login As</label>
-                        <select name="portal_type" style="width:100%; padding:12px; border:1px solid #cbd5e1; border-radius:6px;">
-                            <option value="admin">Administrator / Adviser</option>
-                            <option value="scanner">Scanner Officer</option>
-                            <option value="student">Student Member</option>
-                        </select>
-                    </div>
-                    <button type="submit">Sign In</button>
-                </form>
-                <div class="links">
-                    <p>Student self-registration? <a href="/register">Register here</a></p>
-                </div>
-            </div>
-        </body>
-        </html>
-    `);
-});
+  // API Call Wrapper
+  async function apiCall(url, method = 'GET', body = null, isFormData = false) {
+    try {
+      const options = { method, headers: {} };
+      if (body) {
+        if (isFormData) {
+          options.body = body;
+        } else {
+          options.headers['Content-Type'] = 'application/json';
+          options.body = JSON.stringify(body);
+        }
+      }
+      const res = await fetch(url, options);
+      return await res.json();
+    } catch (err) {
+      console.error('API Error:', err);
+      return { success: false, message: 'Network or server error.' };
+    }
+  }
 
-app.post('/login', async (req, res) => {
-    const { username, password, portal_type } = req.body;
+  // Audio Speech Synthesis Voice Announcement
+  function speak(text) {
+    if (!state.voiceEnabled || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.95;
+    utterance.pitch = 1.0;
+    window.speechSynthesis.speak(utterance);
+  }
 
-    if (portal_type === 'student') {
-        db.get("SELECT * FROM students WHERE student_id = ? OR school_email = ?", [username, username], async (err, student) => {
-            if (student && await bcrypt.compare(password, student.password)) {
-                req.session.user = {
-                    id: student.id,
-                    username: student.student_id,
-                    full_name: `${student.first_name} ${student.last_name}`,
-                    role: 'student',
-                    student_id: student.student_id
-                };
-                logAction(student.student_id, 'STUDENT_LOGIN', 'Student logged into portal', req);
-                return res.redirect('/member');
-            }
-            return res.redirect('/login?error=1');
-        });
+  // Sound Effect Audio Feedback
+  function playAudioFeedback(type) {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (type === 'success') {
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1); // A5
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.25);
+    } else if (type === 'warning') {
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      osc.frequency.setValueAtTime(440, ctx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+    } else { // Error
+      osc.frequency.setValueAtTime(220, ctx.currentTime);
+      osc.frequency.setValueAtTime(110, ctx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.35);
+    }
+  }
+
+  // App Initialization Sequence
+  async function initApp() {
+    const setRes = await apiCall('/api/settings');
+    if (setRes.success) state.settings = setRes.settings;
+
+    const authRes = await apiCall('/api/auth/me');
+    if (authRes.loggedIn) {
+      state.user = authRes.user;
+      if (window.location.pathname === '/register') {
+        renderPublicRegistration();
+      } else if (state.user.role === 'ADMIN') {
+        navigate('dashboard');
+      } else if (state.user.role === 'SCANNER') {
+        navigate('scanner');
+      } else {
+        navigate('student-portal');
+      }
     } else {
-        db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
-            if (user && await bcrypt.compare(password, user.password)) {
-                if (portal_type === 'scanner' && user.role !== 'scanner' && user.role !== 'admin') {
-                    return res.redirect('/login?error=1');
-                }
-                req.session.user = {
-                    id: user.id,
-                    username: user.username,
-                    full_name: user.full_name,
-                    role: user.role
-                };
-                logAction(user.username, 'USER_LOGIN', `Logged in as ${user.role}`, req);
-                if (user.role === 'admin') return res.redirect('/admin');
-                if (user.role === 'scanner') return res.redirect('/scanner');
-            }
-            return res.redirect('/login?error=1');
-        });
+      if (window.location.pathname === '/register') {
+        renderPublicRegistration();
+      } else {
+        renderLogin();
+      }
     }
-});
+  }
 
-app.get('/logout', (req, res) => {
-    if (req.session.user) {
-        logAction(req.session.user.username, 'USER_LOGOUT', 'Logged out of session', req);
+  // Router Engine
+  function navigate(route) {
+    state.currentRoute = route;
+    if (state.scanner) {
+      try { state.scanner.clear(); } catch(e){}
     }
-    req.session.destroy(() => {
-        res.redirect('/login');
-    });
-});
-
-// ==========================================
-// 6. PUBLIC STUDENT SELF-REGISTRATION
-// ==========================================
-app.get('/register', (req, res) => {
-    db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-        db.all("SELECT * FROM positions", (err, positions) => {
-            res.send(`
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Student Club Registration</title>
-                    <style>
-                        body { background: #f8fafc; padding: 20px; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; }
-                        .reg-container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); width: 100%; max-width: 600px; border-top: 5px solid #10b981; }
-                        h2 { color: #1e3a8a; margin-bottom: 5px; text-align: center; }
-                        .subtitle { text-align: center; color: #64748b; font-size: 0.9rem; margin-bottom: 25px; }
-                        .form-group { margin-bottom: 15px; }
-                        label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem; color: #334155; }
-                        input, select { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.95krem; box-sizing: border-box; }
-                        .row { display: flex; gap: 15px; }
-                        .col { flex: 1; }
-                        button { width: 100%; padding: 12px; background: #10b981; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; margin-top: 10px; }
-                        button:hover { background: #059669; }
-                        .alert-error { background: #fee2e2; color: #991b1b; padding: 12px; border-radius: 6px; margin-bottom: 20px; font-size: 0.9rem; }
-                        .note { font-size: 0.8rem; color: #64748b; margin-top: 5px; }
-                    </style>
-                </head>
-                <body>
-                    <div class="reg-container">
-                        <h2>${settings ? settings.school_name : 'School'} - ${settings ? settings.club_name : 'Student Club'}</h2>
-                        <div class="subtitle">Official Student Membership Registration Form</div>
-                        
-                        ${settings && settings.registration_open === 0 ? `
-                            <div class="alert-error" style="text-align:center;">Student registration is currently closed by the Club Adviser.</div>
-                        ` : `
-                            ${req.query.error ? `<div class="alert-error">${req.query.error}</div>` : ''}
-                            <form action="/register" method="POST">
-                                <div class="form-group">
-                                    <label>Student ID *</label>
-                                    <input type="text" name="student_id" required placeholder="e.g. 2026-001">
-                                </div>
-                                <div class="row">
-                                    <div class="col">
-                                        <div class="form-group">
-                                            <label>First Name *</label>
-                                            <input type="text" name="first_name" required placeholder="First Name">
-                                        </div>
-                                    </div>
-                                    <div class="col">
-                                        <div class="form-group">
-                                            <label>Middle Name</label>
-                                            <input type="text" name="middle_name" placeholder="Middle Name (Optional)">
-                                        </div>
-                                    </div>
-                                    <div class="col">
-                                        <div class="form-group">
-                                            <label>Last Name *</label>
-                                            <input type="text" name="last_name" required placeholder="Last Name">
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="form-group">
-                                    <label>School Email *</label>
-                                    <input type="email" name="school_email" required placeholder="student@school.edu">
-                                </div>
-                                <div class="form-group">
-                                    <label>Contact Number</label>
-                                    <input type="text" name="contact_number" placeholder="09123456789 (Optional)">
-                                </div>
-                                <div class="form-group">
-                                    <label>Position / Role *</label>
-                                    <select name="position" required>
-                                        <option value="Member">Member (Default)</option>
-                                        ${positions.filter(p => p.name !== 'Member').map(p => `<option value="${p.name}">${p.name}</option>`).join('')}
-                                    </select>
-                                    <div class="note">Subject to approval by Club Adviser.</div>
-                                </div>
-                                <div class="form-group">
-                                    <label>Create Password *</label>
-                                    <input type="password" name="password" required minlength="8" placeholder="Minimum 8 characters">
-                                </div>
-                                <button type="submit">Submit Registration</button>
-                            </form>
-                        `}
-                    </div>
-                </body>
-                </html>
-            `);
-        });
-    });
-});
-
-app.post('/register', async (req, res) => {
-    const { student_id, first_name, middle_name, last_name, school_email, contact_number, position, password } = req.body;
-
-    if (!password || password.length < 8) {
-        return res.redirect('/register?error=Password must be at least 8 characters long.');
+    
+    switch (route) {
+      case 'dashboard': renderAdminDashboard(); break;
+      case 'students': renderStudentManagement(); break;
+      case 'registrations': renderPendingRegistrations(); break;
+      case 'positions': renderPositionManagement(); break;
+      case 'events': renderEventManagement(); break;
+      case 'scanner': renderScannerPortal(); break;
+      case 'student-portal': renderStudentPortal(); break;
+      case 'reports': renderReportsPage(); break;
+      case 'id-printing': renderIDPrintingPage(); break;
+      case 'audit-logs': renderAuditLogsPage(); break;
+      case 'settings': renderSettingsPage(); break;
+      default: renderLogin(); break;
     }
+  }
 
-    db.get("SELECT * FROM student_registrations WHERE student_id = ? OR school_email = ?", [student_id, school_email], async (err, existingReg) => {
-        if (existingReg) {
-            return res.redirect('/register?error=Student ID or School Email is already registered or pending review.');
-        }
+  // UI Framework Shell Wrapper
+  function renderAppShell(contentHtml, activeNav = '') {
+    const appEl = document.getElementById('app');
+    const u = state.user || {};
 
-        db.get("SELECT * FROM students WHERE student_id = ? OR school_email = ?", [student_id, school_email], async (err, existingStudent) => {
-            if (existingStudent) {
-                return res.redirect('/register?error=Student ID already registered in active records.');
-            }
-
-            db.run(`INSERT INTO student_registrations (student_id, first_name, middle_name, last_name, school_email, contact_number, position, status) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
-                [student_id, first_name, middle_name || '', last_name, school_email, contact_number || '', position || 'Member'],
-                async (err) => {
-                    if (err) {
-                        return res.redirect('/register?error=Database error during registration.');
-                    }
-                    logAction(student_id, 'STUDENT_REGISTER', `Submitted registration for ${first_name} ${last_name}`, req);
-                    res.send(`
-                        <!DOCTYPE html>
-                        <html lang="en">
-                        <head><title>Registration Success</title><style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}.card{background:white;padding:40px;border-radius:10px;text-align:center;box-shadow:0 4px 10px rgba(0,0,0,0.05);max-width:500px;}h2{color:#10b981;margin-bottom:15px;}</style></head>
-                        <body>
-                            <div class="card">
-                                <h2>✓ REGISTRATION SUCCESSFUL</h2>
-                                <p>Welcome, <strong>${first_name} ${last_name}</strong>!</p>
-                                <p style="margin:15px 0; color:#475569;">Your student club registration has been submitted successfully and is awaiting review by the Club Adviser.</p>
-                                <p><strong>Student ID:</strong> ${student_id}</p>
-                                <p><strong>Position:</strong> ${position}</p>
-                                <br><a href="/login" class="btn" style="background:#1e3a8a;color:white;padding:10px 20px;text-decoration:none;border-radius:6px;">Proceed to Login</a>
-                            </div>
-                        </body>
-                        </html>
-                    `);
-                });
-        });
-    });
-});
-
-// ==========================================
-// 7. ADMIN DASHBOARD & CORE MANAGEMENT PORTAL
-// ==========================================
-app.get('/admin', requireAuth('admin'), (req, res) => {
-    db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-        db.get("SELECT COUNT(*) as total FROM students WHERE membership_status='Active'", (err, activeStudents) => {
-            db.get("SELECT COUNT(*) as total FROM students", (err, totalStudents) => {
-                db.get("SELECT COUNT(*) as total FROM student_registrations WHERE status='Pending'", (err, pendingRegs) => {
-                    db.get("SELECT COUNT(*) as total FROM events WHERE status='Ongoing' OR status='Upcoming'", (err, activeEvents) => {
-                        db.all("SELECT * FROM events ORDER BY event_date DESC LIMIT 5", (err, recentEvents) => {
-                            db.all("SELECT * FROM attendance ORDER BY recorded_at DESC LIMIT 10", (err, recentScans) => {
-                                res.send(renderAdminLayout(req, 'Admin Dashboard', `
-                                    <div class="stats-grid">
-                                        <div class="stat-card">
-                                            <p>Total Students</p>
-                                            <h3>${totalStudents ? totalStudents.total : 0}</h3>
-                                        </div>
-                                        <div class="stat-card" style="border-left-color: #10b981;">
-                                            <p>Active Members</p>
-                                            <h3>${activeStudents ? activeStudents.total : 0}</h3>
-                                        </div>
-                                        <div class="stat-card" style="border-left-color: #f59e0b;">
-                                            <p>Pending Registrations</p>
-                                            <h3>${pendingRegs ? pendingRegs.total : 0}</h3>
-                                        </div>
-                                        <div class="stat-card" style="border-left-color: #8b5cf6;">
-                                            <p>Active/Upcoming Events</p>
-                                            <h3>${activeEvents ? activeEvents.total : 0}</h3>
-                                        </div>
-                                    </div>
-
-                                    <div class="row">
-                                        <div class="col card">
-                                            <h3>Quick Actions</h3>
-                                            <div style="display:flex; gap:10px; margin-top:15px; flex-wrap:wrap;">
-                                                <a href="/admin/students/add" class="btn">Add Student</a>
-                                                <a href="/admin/events/add" class="btn btn-success">Create Event</a>
-                                                <a href="/admin/registrations" class="btn btn-warning">Review Registrations (${pendingRegs ? pendingRegs.total : 0})</a>
-                                                <a href="/scanner" class="btn" style="background:#8b5cf6;">Open Scanner Portal</a>
-                                                <a href="/admin/ids/print" class="btn" style="background:#0284c7;">Print A4 IDs (8/Page)</a>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div class="row">
-                                        <div class="col card">
-                                            <h3>Recent Attendance Scans</h3>
-                                            <table>
-                                                <thead>
-                                                    <tr>
-                                                        <th>Student ID</th>
-                                                        <th>Event</th>
-                                                        <th>Time In</th>
-                                                        <th>Status</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    ${recentScans && recentScans.length > 0 ? recentScans.map(s => `
-                                                        <tr>
-                                                            <td>${s.student_id}</td>
-                                                            <td>Event #${s.event_id}</td>
-                                                            <td>${s.time_in || 'N/A'}</td>
-                                                            <td><span class="badge badge-${s.status === 'Present' ? 'success' : (s.status === 'Late' ? 'warning' : 'danger')}">${s.status}</span></td>
-                                                        </tr>
-                                                    `).join('') : '<tr><td colspan="4" style="text-align:center;">No recent attendance scans.</td></tr>'}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-                                `));
-                            });
-                        });
-                    });
-                });
-            });
-        });
-    });
-});
-
-// Admin Layout Helper
-function renderAdminLayout(req, title, bodyContent) {
-    const user = req.session.user;
-    return `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>${title} - Club Attendance System</title>
-            <style>
-                :root { --primary: #1e3a8a; --secondary: #3b82f6; --accent: #10b981; --danger: #ef4444; --warning: #f59e0b; --bg: #f8fafc; --text: #1e293b; --card: #ffffff; --border: #e2e8f0; }
-                * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-                body { background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
-                aside { width: 260px; background: var(--primary); color: white; display: flex; flex-direction: column; position: fixed; height: 100vh; overflow-y: auto; z-index: 100; }
-                .sidebar-brand { padding: 20px; font-size: 1.1rem; font-weight: bold; background: rgba(0,0,0,0.2); text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1); }
-                .sidebar-menu { list-style: none; padding: 15px 0; flex: 1; }
-                .sidebar-menu li a { display: block; padding: 12px 20px; color: #cbd5e1; text-decoration: none; font-size: 0.95rem; transition: 0.2s; border-left: 4px solid transparent; }
-                .sidebar-menu li a:hover { background: rgba(255,255,255,0.1); color: white; border-left-color: var(--accent); }
-                main { margin-left: 260px; flex: 1; display: flex; flex-direction: column; min-width: 0; }
-                header { background: var(--card); padding: 15px 30px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-                .user-info { display: flex; align-items: center; gap: 15px; font-size: 0.9rem; font-weight: 600; }
-                .content { padding: 30px; flex: 1; }
-                .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-                .row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-                .col { flex: 1; min-width: 250px; }
-                table { width: 100%; border-collapse: collapse; margin-top: 10px; background: white; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
-                th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
-                th { background: #f1f5f9; color: #475569; font-weight: 600; }
-                tr:hover { background: #f8fafc; }
-                .btn { display: inline-block; padding: 8px 16px; background: var(--secondary); color: white; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: 0.2s; }
-                .btn:hover { opacity: 0.9; }
-                .btn-success { background: var(--accent); }
-                .btn-danger { background: var(--danger); }
-                .btn-warning { background: var(--warning); color: #fff; }
-                .btn-sm { padding: 5px 10px; font-size: 0.8rem; }
-                .form-group { margin-bottom: 15px; }
-                label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 0.9rem; color: #334155; }
-                input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; outline: none; transition: 0.2s; }
-                input:focus, select:focus { border-color: var(--secondary); box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
-                .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
-                .badge-success { background: #d1fae5; color: #065f46; }
-                .badge-warning { background: #fef3c7; color: #92400e; }
-                .badge-danger { background: #fee2e2; color: #991b1b; }
-                .badge-info { background: #e0f2fe; color: #0369a1; }
-                .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px; }
-                .stat-card { background: white; padding: 20px; border-radius: 8px; border: 1px solid var(--border); border-left: 4px solid var(--secondary); }
-                .stat-card h3 { font-size: 1.8rem; margin-top: 5px; color: var(--primary); }
-                .stat-card p { color: #64748b; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; }
-            </style>
-        </head>
-        <body>
-            <aside>
-                <div class="sidebar-brand">Club Attendance</div>
-                <ul class="sidebar-menu">
-                    <li><a href="/admin">Dashboard</a></li>
-                    <li><a href="/admin/registrations">Student Registrations</a></li>
-                    <li><a href="/admin/students">Student Management</a></li>
-                    <li><a href="/admin/positions">Position Management</a></li>
-                    <li><a href="/admin/ids/print">A4 ID Printing (8/Page)</a></li>
-                    <li><a href="/admin/events">Event Management</a></li>
-                    <li><a href="/admin/attendance">Attendance Records</a></li>
-                    <li><a href="/admin/reports">Reports & Analytics</a></li>
-                    <li><a href="/scanner">QR Scanner Portal</a></li>
-                    <li><a href="/admin/settings">System & Club Settings</a></li>
-                    <li><a href="/admin/audit">Audit Logs</a></li>
-                    <li><a href="/logout">Logout</a></li>
-                </ul>
-            </aside>
-            <main>
-                <header>
-                    <h2>${title}</h2>
-                    <div class="user-info">
-                        <span>👤 ${user ? user.full_name : 'Admin'} (${user ? user.role : 'admin'})</span>
-                        <a href="/admin/settings" class="btn btn-sm">Settings</a>
-                    </div>
-                </header>
-                <div class="content">
-                    ${bodyContent}
-                </div>
-            </main>
-        </body>
-        </html>
-    `;
-}
-
-// ==========================================
-// 8. STUDENT & REGISTRATION MANAGEMENT ROUTES
-// ==========================================
-app.get('/admin/registrations', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM student_registrations ORDER BY created_at DESC", (err, regs) => {
-        res.send(renderAdminLayout(req, 'Student Registrations Approval', `
-            <div class="card">
-                <h3>Public Registration Requests</h3>
-                <p style="color:#64748b; font-size:0.9rem; margin-bottom:15px;">Approve or reject student submissions from the public registration portal.</p>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Student ID</th>
-                            <th>Full Name</th>
-                            <th>Email</th>
-                            <th>Position</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${regs && regs.length > 0 ? regs.map(r => `
-                            <tr>
-                                <td>${r.student_id}</td>
-                                <td>${r.first_name} ${r.middle_name} ${r.last_name}</td>
-                                <td>${r.school_email}</td>
-                                <td>${r.position}</td>
-                                <td><span class="badge badge-${r.status === 'Approved' ? 'success' : (r.status === 'Pending' ? 'warning' : 'danger')}">${r.status}</span></td>
-                                <td>
-                                    ${r.status === 'Pending' ? `
-                                        <form action="/admin/registrations/${r.id}/approve" method="POST" style="display:inline;">
-                                            <button type="submit" class="btn btn-sm btn-success">Approve</button>
-                                        </form>
-                                        <form action="/admin/registrations/${r.id}/reject" method="POST" style="display:inline;">
-                                            <button type="submit" class="btn btn-sm btn-danger">Reject</button>
-                                        </form>
-                                    ` : `<span>Processed</span>`}
-                                </td>
-                            </tr>
-                        `).join('') : '<tr><td colspan="6" style="text-align:center;">No registration requests found.</td></tr>'}
-                    </tbody>
-                </table>
+    appEl.innerHTML = \`
+      <div class="container-fluid">
+        <div class="row">
+          <!-- Sidebar Navigation -->
+          <div class="col-md-3 col-lg-2 sidebar d-flex flex-column justify-content-between p-3 no-print">
+            <div>
+              <div class="text-center mb-4">
+                <i class="bi bi-qr-code-scan text-primary fs-1"></i>
+                <h5 class="mt-2 mb-0 fw-bold text-white">\${state.settings.club_name || 'Student Club'}</h5>
+                <small class="text-muted">\${state.settings.school_name || 'School Attendance'}</small>
+              </div>
+              <hr class="text-secondary">
+              <ul class="nav nav-pills flex-column mb-auto">
+                \${u.role === 'ADMIN' ? \`
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'dashboard' ? 'active' : ''}" onclick="navigate('dashboard')"><i class="bi bi-speedometer2"></i> Dashboard</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'registrations' ? 'active' : ''}" onclick="navigate('registrations')"><i class="bi bi-person-plus"></i> Registrations</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'students' ? 'active' : ''}" onclick="navigate('students')"><i class="bi bi-people"></i> Students</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'positions' ? 'active' : ''}" onclick="navigate('positions')"><i class="bi bi-award"></i> Positions</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'events' ? 'active' : ''}" onclick="navigate('events')"><i class="bi bi-calendar-event"></i> Events</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'id-printing' ? 'active' : ''}" onclick="navigate('id-printing')"><i class="bi bi-card-heading"></i> Print Club IDs</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'reports' ? 'active' : ''}" onclick="navigate('reports')"><i class="bi bi-bar-chart"></i> Reports</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'audit-logs' ? 'active' : ''}" onclick="navigate('audit-logs')"><i class="bi bi-shield-check"></i> Audit Logs</a></li>
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'settings' ? 'active' : ''}" onclick="navigate('settings')"><i class="bi bi-gear"></i> Settings</a></li>
+                \` : ''}
+                \${u.role === 'ADMIN' || u.role === 'SCANNER' ? \`
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'scanner' ? 'active' : ''}" onclick="navigate('scanner')"><i class="bi bi-qr-code-scan"></i> Scanner Portal</a></li>
+                \` : ''}
+                \${u.role === 'STUDENT' ? \`
+                  <li class="nav-item"><a href="#" class="nav-link \${activeNav === 'student-portal' ? 'active' : ''}" onclick="navigate('student-portal')"><i class="bi bi-person-badge"></i> My Student Portal</a></li>
+                \` : ''}
+              </ul>
             </div>
-        `));
-    });
-});
+            <div>
+              <hr class="text-secondary">
+              <div class="d-flex align-items-center justify-content-between">
+                <div>
+                  <strong class="d-block text-white">\${u.username || 'User'}</strong>
+                  <small class="text-muted">\${u.role || ''}</small>
+                </div>
+                <button class="btn btn-sm btn-outline-danger" onclick="handleLogout()"><i class="bi bi-box-arrow-right"></i></button>
+              </div>
+              <button class="btn btn-sm btn-link text-white-50 p-0 mt-2 text-decoration-none" onclick="openPasswordModal()">Change Password</button>
+            </div>
+          </div>
 
-app.post('/admin/registrations/:id/approve', requireAuth('admin'), async (req, res) => {
-    const regId = req.params.id;
-    db.get("SELECT * FROM student_registrations WHERE id = ?", [regId], async (err, reg) => {
-        if (!reg) return res.redirect('/admin/registrations');
+          <!-- Main Content Area -->
+          <div class="col-md-9 col-lg-10 content-area">
+            \${contentHtml}
+          </div>
+        </div>
+      </div>
 
-        // Check duplicate
-        db.get("SELECT * FROM students WHERE student_id = ? OR school_email = ?", [reg.student_id, reg.school_email], async (err, existing) => {
-            if (existing) {
-                db.run("UPDATE student_registrations SET status = 'Rejected' WHERE id = ?", [regId]);
-                return res.redirect('/admin/registrations');
-            }
+      <!-- Change Password Modal -->
+      <div class="modal fade" id="passwordModal" tabindex="-1">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">Change Password</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+              <form id="changePasswordForm" onsubmit="handleChangePassword(event)">
+                <div class="mb-3">
+                  <label class="form-label">Current Password</label>
+                  <input type="password" id="currPass" class="form-control" required>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">New Password (Min 8 chars)</label>
+                  <input type="password" id="newPass" class="form-control" minlength="8" required>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Confirm New Password</label>
+                  <input type="password" id="confirmPass" class="form-control" minlength="8" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Update Password</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    \`;
+  }
 
-            const defaultPass = await bcrypt.hash('student123', 10);
-            const qrToken = 'QR-STU-' + reg.student_id + '-' + Math.random().toString(36).substring(2, 9);
-
-            db.run(`INSERT INTO students (student_id, first_name, middle_name, last_name, school_email, contact_number, position, qr_token, password) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [reg.student_id, reg.first_name, reg.middle_name, reg.last_name, reg.school_email, reg.contact_number, reg.position, qrToken, defaultPass],
-                (err) => {
-                    db.run("UPDATE student_registrations SET status = 'Approved' WHERE id = ?", [regId]);
-                    logAction(req.session.user.username, 'APPROVE_STUDENT', `Approved student ${reg.student_id}`, req);
-                    res.redirect('/admin/registrations');
-                }
-            );
-        });
-    });
-});
-
-app.post('/admin/registrations/:id/reject', requireAuth('admin'), (req, res) => {
-    db.run("UPDATE student_registrations SET status = 'Rejected' WHERE id = ?", [req.params.id], () => {
-        res.redirect('/admin/registrations');
-    });
-});
-
-// Student Management
-app.get('/admin/students', requireAuth('admin'), (req, res) => {
-    const search = req.query.search || '';
-    const positionFilter = req.query.position || '';
-    let query = "SELECT * FROM students WHERE 1=1";
-    let params = [];
-
-    if (search) {
-        query += " AND (student_id LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR school_email LIKE ?)";
-        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+  // Authentication Handlers
+  async function handleLogin(e) {
+    e.preventDefault();
+    const u = document.getElementById('loginUsername').value;
+    const p = document.getElementById('loginPassword').value;
+    const res = await apiCall('/api/auth/login', 'POST', { username: u, password: p });
+    if (res.success) {
+      state.user = { username: u, role: res.role };
+      if (res.role === 'ADMIN') navigate('dashboard');
+      else if (res.role === 'SCANNER') navigate('scanner');
+      else navigate('student-portal');
+    } else {
+      alert(res.message);
     }
-    if (positionFilter) {
-        query += " AND position = ?";
-        params.push(positionFilter);
+  }
+
+  async function handleLogout() {
+    await apiCall('/api/auth/logout', 'POST');
+    state.user = null;
+    renderLogin();
+  }
+
+  function openPasswordModal() {
+    const modal = new bootstrap.Modal(document.getElementById('passwordModal'));
+    modal.show();
+  }
+
+  async function handleChangePassword(e) {
+    e.preventDefault();
+    const currentPassword = document.getElementById('currPass').value;
+    const newPassword = document.getElementById('newPass').value;
+    const confirmPassword = document.getElementById('confirmPass').value;
+
+    const res = await apiCall('/api/auth/change-password', 'POST', { currentPassword, newPassword, confirmPassword });
+    alert(res.message);
+    if (res.success) {
+      bootstrap.Modal.getInstance(document.getElementById('passwordModal')).hide();
     }
-    query += " ORDER BY last_name ASC";
+  }
 
-    db.all("SELECT * FROM positions", (err, positions) => {
-        db.all(query, params, (err, students) => {
-            res.send(renderAdminLayout(req, 'Student Management', `
-                <div class="card">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
-                        <h3>Club Members & Students</h3>
-                        <a href="/admin/students/add" class="btn">Add New Student</a>
-                    </div>
-                    <form method="GET" style="display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap;">
-                        <input type="text" name="search" placeholder="Search by ID, Name, or Email" value="${search}" style="flex:2; min-width:200px;">
-                        <select name="position" style="flex:1; min-width:150px;">
-                            <option value="">All Positions</option>
-                            ${positions.map(p => `<option value="${p.name}" ${positionFilter === p.name ? 'selected' : ''}>${p.name}</option>`).join('')}
-                        </select>
-                        <button type="submit" class="btn">Filter</button>
-                        <a href="/admin/students" class="btn btn-warning" style="text-decoration:none; display:inline-flex; align-items:center;">Reset</a>
-                    </form>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Student ID</th>
-                                <th>Full Name</th>
-                                <th>Position</th>
-                                <th>Email</th>
-                                <th>Status</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${students && students.length > 0 ? students.map(s => `
-                                <tr>
-                                    <td>${s.student_id}</td>
-                                    <td>${s.first_name} ${s.middle_name} ${s.last_name}</td>
-                                    <td><span class="badge badge-info">${s.position}</span></td>
-                                    <td>${s.school_email}</td>
-                                    <td><span class="badge badge-${s.membership_status === 'Active' ? 'success' : 'danger'}">${s.membership_status}</span></td>
-                                    <td>
-                                        <a href="/admin/students/${s.id}/edit" class="btn btn-sm">Edit</a>
-                                        <a href="/admin/students/${s.id}/id" class="btn btn-sm btn-success">Digital ID</a>
-                                    </td>
-                                </tr>
-                            `).join('') : '<tr><td colspan="6" style="text-align:center;">No students found.</td></tr>'}
-                        </tbody>
-                    </table>
-                </div>
-            `));
-        });
-    });
-});
-
-app.get('/admin/students/add', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM positions", (err, positions) => {
-        res.send(renderAdminLayout(req, 'Add Student', `
-            <div class="card" style="max-width:700px; margin:0 auto;">
-                <h3>Add Official Student Member</h3>
-                <form action="/admin/students/add" method="POST" style="margin-top:20px;">
-                    <div class="form-group">
-                        <label>Student ID *</label>
-                        <input type="text" name="student_id" required placeholder="e.g. 2026-002">
-                    </div>
-                    <div class="row">
-                        <div class="col"><div class="form-group"><label>First Name *</label><input type="text" name="first_name" required></div></div>
-                        <div class="col"><div class="form-group"><label>Middle Name</label><input type="text" name="middle_name"></div></div>
-                        <div class="col"><div class="form-group"><label>Last Name *</label><input type="text" name="last_name" required></div></div>
-                    </div>
-                    <div class="form-group">
-                        <label>School Email *</label>
-                        <input type="email" name="school_email" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Contact Number</label>
-                        <input type="text" name="contact_number">
-                    </div>
-                    <div class="form-group">
-                        <label>Position *</label>
-                        <select name="position" required>
-                            ${positions.map(p => `<option value="${p.name}">${p.name}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Initial Password *</label>
-                        <input type="password" name="password" required minlength="8" value="student123">
-                    </div>
-                    <button type="submit" class="btn">Save Student</button>
-                    <a href="/admin/students" class="btn btn-warning" style="margin-left:10px;">Cancel</a>
-                </form>
+  // Views Renderers
+  function renderLogin() {
+    document.getElementById('app').innerHTML = \`
+      <div class="container d-flex justify-content-center align-items-center vh-100">
+        <div class="card shadow-lg p-4" style="max-width: 400px; width: 100%; border-radius: 16px;">
+          <div class="text-center mb-4">
+            <i class="bi bi-qr-code-scan text-primary fs-1"></i>
+            <h4 class="fw-bold mt-2">\${state.settings.club_name || 'Student Club Attendance'}</h4>
+            <p class="text-muted small">\${state.settings.school_name || 'Apex National High School'}</p>
+          </div>
+          <form onsubmit="handleLogin(event)">
+            <div class="mb-3">
+              <label class="form-label font-weight-bold">Username / Student ID</label>
+              <input type="text" id="loginUsername" class="form-control" placeholder="Enter username" required>
             </div>
-        `));
-    });
-});
-
-app.post('/admin/students/add', requireAuth('admin'), async (req, res) => {
-    const { student_id, first_name, middle_name, last_name, school_email, contact_number, position, password } = req.body;
-    const hashedPass = await bcrypt.hash(password || 'student123', 10);
-    const qrToken = 'QR-STU-' + student_id + '-' + Math.random().toString(36).substring(2, 9);
-
-    db.run(`INSERT INTO students (student_id, first_name, middle_name, last_name, school_email, contact_number, position, qr_token, password) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [student_id, first_name, middle_name || '', last_name, school_email, contact_number || '', position, qrToken, hashedPass],
-        (err) => {
-            if (err) return res.redirect('/admin/students/add?error=1');
-            logAction(req.session.user.username, 'ADD_STUDENT', `Added student ${student_id}`, req);
-            res.redirect('/admin/students');
-        }
-    );
-});
-
-// Edit Student
-app.get('/admin/students/:id/edit', requireAuth('admin'), (req, res) => {
-    db.get("SELECT * FROM students WHERE id = ?", [req.params.id], (err, student) => {
-        if (!student) return res.redirect('/admin/students');
-        db.all("SELECT * FROM positions", (err, positions) => {
-            res.send(renderAdminLayout(req, 'Edit Student', `
-                <div class="card" style="max-width:700px; margin:0 auto;">
-                    <h3>Edit Student: ${student.first_name} ${student.last_name}</h3>
-                    <form action="/admin/students/${student.id}/edit" method="POST" style="margin-top:20px;">
-                        <div class="form-group">
-                            <label>Student ID</label>
-                            <input type="text" name="student_id" value="${student.student_id}" required>
-                        </div>
-                        <div class="row">
-                            <div class="col"><div class="form-group"><label>First Name</label><input type="text" name="first_name" value="${student.first_name}" required></div></div>
-                            <div class="col"><div class="form-group"><label>Middle Name</label><input type="text" name="middle_name" value="${student.middle_name || ''}"></div></div>
-                            <div class="col"><div class="form-group"><label>Last Name</label><input type="text" name="last_name" value="${student.last_name}" required></div></div>
-                        </div>
-                        <div class="form-group">
-                            <label>School Email</label>
-                            <input type="email" name="school_email" value="${student.school_email}" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Contact Number</label>
-                            <input type="text" name="contact_number" value="${student.contact_number || ''}">
-                        </div>
-                        <div class="form-group">
-                            <label>Position</label>
-                            <select name="position" required>
-                                ${positions.map(p => `<option value="${p.name}" ${student.position === p.name ? 'selected' : ''}>${p.name}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Membership Status</label>
-                            <select name="membership_status">
-                                <option value="Active" ${student.membership_status === 'Active' ? 'selected' : ''}>Active</option>
-                                <option value="Inactive" ${student.membership_status === 'Inactive' ? 'selected' : ''}>Inactive</option>
-                                <option value="Suspended" ${student.membership_status === 'Suspended' ? 'selected' : ''}>Suspended</option>
-                                <option value="Alumni" ${student.membership_status === 'Alumni' ? 'selected' : ''}>Alumni</option>
-                                <option value="Resigned" ${student.membership_status === 'Resigned' ? 'selected' : ''}>Resigned</option>
-                            </select>
-                        </div>
-                        <button type="submit" class="btn">Update Student</button>
-                        <a href="/admin/students" class="btn btn-warning" style="margin-left:10px;">Cancel</a>
-                    </form>
-                </div>
-            `));
-        });
-    });
-});
-
-app.post('/admin/students/:id/edit', requireAuth('admin'), (req, res) => {
-    const { student_id, first_name, middle_name, last_name, school_email, contact_number, position, membership_status } = req.body;
-    db.run(`UPDATE students SET student_id = ?, first_name = ?, middle_name = ?, last_name = ?, school_email = ?, contact_number = ?, position = ?, membership_status = ? WHERE id = ?`,
-        [student_id, first_name, middle_name || '', last_name, school_email, contact_number || '', position, membership_status, req.params.id],
-        (err) => {
-            logAction(req.session.user.username, 'EDIT_STUDENT', `Updated student ID ${student_id}`, req);
-            res.redirect('/admin/students');
-        }
-    );
-});
-
-// Digital Student ID & QR Preview
-app.get('/admin/students/:id/id', requireAuth('admin'), (req, res) => {
-    db.get("SELECT * FROM students WHERE id = ?", [req.params.id], (err, student) => {
-        if (!student) return res.redirect('/admin/students');
-        db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-            QRCode.toDataURL(student.qr_token, { width: 250, margin: 1 }, (err, qrCodeUrl) => {
-                res.send(`
-                    <!DOCTYPE html>
-                    <html lang="en">
-                    <head>
-                        <meta charset="UTF-8">
-                        <title>Digital Student Club ID - ${student.first_name} ${student.last_name}</title>
-                        <style>
-                            body { background: #e2e8f0; display: flex; flex-direction:column; justify-content: center; align-items: center; min-height: 100vh; margin: 0; font-family: 'Segoe UI', sans-serif; }
-                            .id-card { width: 350px; background: white; border-radius: 12px; box-shadow: 0 8px 20px rgba(0,0,0,0.15); overflow: hidden; border: 1px solid #cbd5e1; position: relative; }
-                            .id-header { background: #1e3a8a; color: white; padding: 15px; text-align: center; }
-                            .id-header h3 { font-size: 1rem; margin-bottom: 2px; }
-                            .id-header p { font-size: 0.75rem; color: #cbd5e1; }
-                            .id-body { padding: 20px; text-align: center; }
-                            .avatar { width: 90px; height: 90px; background: #e2e8f0; border-radius: 50%; margin: 0 auto 15px; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: #64748b; font-weight: bold; border: 3px solid #3b82f6; }
-                            .name { font-size: 1.2rem; font-weight: bold; color: #1e293b; margin-bottom: 5px; }
-                            .position { display: inline-block; background: #d1fae5; color: #065f46; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; margin-bottom: 15px; }
-                            .details { text-align: left; font-size: 0.85rem; color: #475569; border-top: 1px solid #f1f5f9; padding-top: 10px; margin-bottom: 15px; }
-                            .details p { display: flex; justify-content: space-between; margin-bottom: 5px; }
-                            .qr-container img { width: 150px; height: 150px; }
-                            .print-bar { margin-top: 20px; text-align: center; }
-                            .btn { padding: 10px 20px; background: #1e3a8a; color: white; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; font-weight: bold; }
-                            @media print { body { background: white; } .print-bar { display: none; } .id-card { box-shadow: none; border: 2px solid #000; } }
-                        </style>
-                    </head>
-                    <body>
-                        <div class="id-card">
-                            <div class="id-header">
-                                <h3>${settings ? settings.school_name : 'School Name'}</h3>
-                                <p>${settings ? settings.club_name : 'Student Club'} • SY ${settings ? settings.school_year : '2026-2027'}</p>
-                            </div>
-                            <div class="id-body">
-                                <div class="avatar">${student.first_name.charAt(0)}${student.last_name.charAt(0)}</div>
-                                <div class="name">${student.first_name} ${student.middle_name ? student.middle_name.charAt(0) + '.' : ''} ${student.last_name}</div>
-                                <div class="position">${student.position}</div>
-                                <div class="details">
-                                    <p><span>Student ID:</span> <strong>${student.student_id}</strong></p>
-                                    <p><span>Email:</span> <strong>${student.school_email}</strong></p>
-                                    <p><span>Status:</span> <strong>${student.membership_status}</strong></p>
-                                </div>
-                                <div class="qr-container">
-                                    <img src="${qrCodeUrl}" alt="Student QR Code">
-                                </div>
-                            </div>
-                        </div>
-                        <div class="print-bar">
-                            <button onclick="window.print()" class="btn">Print Digital ID</button>
-                            <a href="/admin/students" class="btn" style="background:#64748b; margin-left:10px;">Back to Students</a>
-                        </div>
-                    </body>
-                    </html>
-                `);
-            });
-        });
-    });
-});
-
-// ==========================================
-// 9. A4 ID PRINTING (8 IDs PER PAGE LAYOUT)
-// ==========================================
-app.get('/admin/ids/print', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM students WHERE membership_status = 'Active' ORDER BY last_name ASC", (err, students) => {
-        db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-            // Generate QR codes for all students beforehand
-            let processedCount = 0;
-            const studentsWithQr = [];
-
-            if (!students || students.length === 0) {
-                return res.send(renderAdminLayout(req, 'A4 ID Printing', '<div class="card"><p>No active students available for ID printing.</p></div>'));
-            }
-
-            students.forEach(student => {
-                QRCode.toDataURL(student.qr_token, { width: 150, margin: 1 }, (err, qrUrl) => {
-                    studentsWithQr.push({ ...student, qrUrl });
-                    processedCount++;
-                    if (processedCount === students.length) {
-                        renderA4Sheet(req, res, studentsWithQr, settings);
-                    }
-                });
-            });
-        });
-    });
-});
-
-function renderA4Sheet(req, res, students, settings) {
-    let html = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <title>A4 ID Batch Print (8 IDs per Page)</title>
-            <style>
-                @page { size: A4 portrait; margin: 10mm; }
-                body { background: #555; margin: 0; font-family: 'Segoe UI', Tahoma, sans-serif; }
-                .controls { background: #1e3a8a; color: white; padding: 15px; text-align: center; position: sticky; top: 0; z-index: 1000; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
-                .btn { padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; text-decoration: none; }
-                .a4-page { width: 210mm; height: 297mm; background: white; margin: 10mm auto; padding: 10mm; box-sizing: border-box; display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(4, 1fr); gap: 5mm; page-break-after: always; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
-                .id-badge { width: 85mm; height: 55mm; border: 1px dashed #94a3b8; border-radius: 6px; padding: 8px; box-sizing: border-box; display: flex; background: white; position: relative; overflow: hidden; }
-                .id-left { width: 55%; display: flex; flex-direction: column; justify-content: space-between; }
-                .id-right { width: 45%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
-                .school-title { font-size: 8pt; font-weight: bold; color: #1e3a8a; line-height: 1.1; }
-                .club-title { font-size: 7pt; color: #64748b; margin-bottom: 5px; }
-                .student-name { font-size: 10pt; font-weight: bold; color: #1e293b; margin-bottom: 2px; }
-                .student-pos { font-size: 8pt; background: #e0f2fe; color: #0369a1; padding: 2px 6px; border-radius: 4px; display: inline-block; font-weight: bold; margin-bottom: 5px; }
-                .student-meta { font-size: 7.5pt; color: #334155; line-height: 1.2; }
-                .qr-img { width: 28mm; height: 28mm; }
-                @media print { .controls { display: none; } body { background: white; } .a4-page { margin: 0; box-shadow: none; } }
-            </style>
-        </head>
-        <body>
-            <div class="controls">
-                <span style="margin-right:20px; font-weight:bold;">A4 ID Batch Generator (${students.length} Total IDs)</span>
-                <button onclick="window.print()" class="btn">Print All Sheets Now</button>
-                <a href="/admin/students" class="btn" style="background:#64748b; margin-left:10px;">Back to Admin</a>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" id="loginPassword" class="form-control" placeholder="Enter password" required>
             </div>
-    `;
+            <button type="submit" class="btn btn-primary w-100 py-2">Sign In</button>
+          </form>
+          <hr class="my-4">
+          <div class="text-center">
+            <small class="text-muted">Are you a new student member?</small><br>
+            <a href="/register" class="btn btn-link btn-sm fw-bold">Open Public Self-Registration</a>
+          </div>
+        </div>
+      </div>
+    \`;
+  }
 
-    // Chunk students into groups of 8 per page
-    for (let i = 0; i < students.length; i += 8) {
-        const pageStudents = students.slice(i, i + 8);
-        html += `<div class="a4-page">`;
-        pageStudents.forEach(s => {
-            html += `
-                <div class="id-badge">
-                    <div class="id-left">
-                        <div>
-                            <div class="school-title">${settings ? settings.school_name : 'School Name'}</div>
-                            <div class="club-title">${settings ? settings.club_name : 'Student Club'}</div>
-                        </div>
-                        <div>
-                            <div class="student-name">${s.first_name} ${s.last_name}</div>
-                            <div class="student-pos">${s.position}</div>
-                            <div class="student-meta">
-                                ID: <strong>${s.student_id}</strong><br>
-                                SY: ${settings ? settings.school_year : '2026-2027'}
-                            </div>
-                        </div>
-                    </div>
-                    <div class="id-right">
-                        <img src="${s.qrUrl}" class="qr-img" alt="QR">
-                    </div>
-                </div>
-            `;
-        });
-        html += `</div>`;
-    }
+  function renderPublicRegistration() {
+    fetch('/api/positions').then(r => r.json()).then(posRes => {
+      const positions = posRes.positions || [];
+      const posOptions = positions.map(p => \`<option value="\${p.position_name}">\${p.position_name}</option>\`).join('');
 
-    html += `</body></html>`;
-    res.send(html);
-}
-
-// ==========================================
-// 10. POSITION MANAGEMENT
-// ==========================================
-app.get('/admin/positions', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM positions ORDER BY name ASC", (err, positions) => {
-        res.send(renderAdminLayout(req, 'Position Management', `
-            <div class="row">
-                <div class="col card" style="flex:1;">
-                    <h3>Add Custom Position</h3>
-                    <form action="/admin/positions/add" method="POST" style="margin-top:15px;">
-                        <div class="form-group">
-                            <label>Position Name *</label>
-                            <input type="text" name="name" required placeholder="e.g. Technical Officer">
-                        </div>
-                        <div class="form-group">
-                            <label>Description</label>
-                            <textarea name="description" placeholder="Brief description of duties"></textarea>
-                        </div>
-                        <button type="submit" class="btn">Create Position</button>
-                    </form>
-                </div>
-                <div class="col card" style="flex:2;">
-                    <h3>Configured Positions</h3>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Position Name</th>
-                                <th>Description</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${positions && positions.length > 0 ? positions.map(p => `
-                                <tr>
-                                    <td><strong>${p.name}</strong></td>
-                                    <td>${p.description || 'N/A'}</td>
-                                    <td>
-                                        <form action="/admin/positions/${p.id}/delete" method="POST" style="display:inline;" onsubmit="return confirm('Delete position?');">
-                                            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
-                                        </form>
-                                    </td>
-                                </tr>
-                            `).join('') : '<tr><td colspan="3" style="text-align:center;">No positions found.</td></tr>'}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        `));
-    });
-});
-
-app.post('/admin/positions/add', requireAuth('admin'), (req, res) => {
-    const { name, description } = req.body;
-    db.run("INSERT INTO positions (name, description) VALUES (?, ?)", [name, description || ''], (err) => {
-        logAction(req.session.user.username, 'ADD_POSITION', `Created position ${name}`, req);
-        res.redirect('/admin/positions');
-    });
-});
-
-app.post('/admin/positions/:id/delete', requireAuth('admin'), (req, res) => {
-    db.run("DELETE FROM positions WHERE id = ?", [req.params.id], () => {
-        res.redirect('/admin/positions');
-    });
-});
-
-// ==========================================
-// 11. EVENT MANAGEMENT & ATTENDANCE ENGINE
-// ==========================================
-app.get('/admin/events', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM events ORDER BY event_date DESC", (err, events) => {
-        res.send(renderAdminLayout(req, 'Event Management', `
-            <div class="card">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
-                    <h3>Club Events & Gatherings</h3>
-                    <a href="/admin/events/add" class="btn">Create Event</a>
-                </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Event Name</th>
-                            <th>Type</th>
-                            <th>Date</th>
-                            <th>Time</th>
-                            <th>Location</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${events && events.length > 0 ? events.map(e => `
-                            <tr>
-                                <td><strong>${e.event_name}</strong></td>
-                                <td><span class="badge badge-info">${e.event_type}</span></td>
-                                <td>${e.event_date}</td>
-                                <td>${e.start_time} - ${e.end_time}</td>
-                                <td>${e.location}</td>
-                                <td><span class="badge badge-${e.status === 'Ongoing' ? 'success' : (e.status === 'Upcoming' ? 'warning' : 'info')}">${e.status}</span></td>
-                                <td>
-                                    <a href="/admin/events/${e.id}/attendance" class="btn btn-sm">Attendance Sheet</a>
-                                    <a href="/admin/events/${e.id}/edit" class="btn btn-sm btn-success">Edit</a>
-                                </td>
-                            </tr>
-                        `).join('') : '<tr><td colspan="7" style="text-align:center;">No events created yet.</td></tr>'}
-                    </tbody>
-                </table>
-            </div>
-        `));
-    });
-});
-
-app.get('/admin/events/add', requireAuth('admin'), (req, res) => {
-    res.send(renderAdminLayout(req, 'Create Event', `
-        <div class="card" style="max-width:700px; margin:0 auto;">
-            <h3>Create New Club Event</h3>
-            <form action="/admin/events/add" method="POST" style="margin-top:20px;">
-                <div class="form-group">
-                    <label>Event Name *</label>
-                    <input type="text" name="event_name" required placeholder="e.g. General Assembly 2026">
-                </div>
-                <div class="form-group">
-                    <label>Description</label>
-                    <textarea name="description" placeholder="Event details and agenda"></textarea>
-                </div>
-                <div class="form-group">
-                    <label>Event Type</label>
-                    <select name="event_type">
-                        <option value="General Meeting">General Meeting</option>
-                        <option value="General Assembly">General Assembly</option>
-                        <option value="Officer Meeting">Officer Meeting</option>
-                        <option value="Seminar / Workshop">Seminar / Workshop</option>
-                        <option value="Community Service">Community Service</option>
-                        <option value="Team Building">Team Building</option>
-                        <option value="Special Event">Special Event</option>
-                    </select>
+      document.getElementById('app').innerHTML = \`
+        <div class="container py-5" style="max-width: 600px;">
+          <div class="card shadow border-0" style="border-radius: 16px;">
+            <div class="card-body p-4">
+              <div class="text-center mb-4">
+                <i class="bi bi-person-plus-fill text-primary fs-1"></i>
+                <h3 class="fw-bold mt-2">\${state.settings.club_name || 'Student Club'} Registration</h3>
+                <p class="text-muted">\${state.settings.school_name || 'School Membership Form'}</p>
+              </div>
+              <div id="regSuccessAlert" class="d-none alert alert-success"></div>
+              <form id="publicRegForm" onsubmit="handlePublicRegistration(event)">
+                <div class="mb-3">
+                  <label class="form-label fw-bold">Student ID *</label>
+                  <input type="text" id="regStudentId" class="form-control" placeholder="e.g. 2026-001" required>
                 </div>
                 <div class="row">
-                    <div class="col"><div class="form-group"><label>Event Date *</label><input type="date" name="event_date" required></div></div>
-                    <div class="col"><div class="form-group"><label>Start Time *</label><input type="time" name="start_time" required></div></div>
-                    <div class="col"><div class="form-group"><label>End Time *</label><input type="time" name="end_time" required></div></div>
+                  <div class="col-md-5 mb-3">
+                    <label class="form-label fw-bold">First Name *</label>
+                    <input type="text" id="regFirstName" class="form-control" required>
+                  </div>
+                  <div class="col-md-2 mb-3">
+                    <label class="form-label">M.I.</label>
+                    <input type="text" id="regMiddleName" class="form-control" maxlength="2">
+                  </div>
+                  <div class="col-md-5 mb-3">
+                    <label class="form-label fw-bold">Last Name *</label>
+                    <input type="text" id="regLastName" class="form-control" required>
+                  </div>
                 </div>
-                <div class="form-group">
-                    <label>Location</label>
-                    <input type="text" name="location" value="School Gymnasium">
+                <div class="mb-3">
+                  <label class="form-label fw-bold">School Email *</label>
+                  <input type="email" id="regEmail" class="form-control" placeholder="student@school.edu" required>
                 </div>
-                <div class="form-group">
-                    <label>Status</label>
-                    <select name="status">
-                        <option value="Upcoming">Upcoming</option>
-                        <option value="Ongoing">Ongoing</option>
-                        <option value="Completed">Completed</option>
-                    </select>
+                <div class="mb-3">
+                  <label class="form-label">Contact Number (Optional)</label>
+                  <input type="text" id="regContact" class="form-control">
                 </div>
-                <button type="submit" class="btn">Save & Publish Event</button>
-                <a href="/admin/events" class="btn btn-warning" style="margin-left:10px;">Cancel</a>
-            </form>
+                \${state.settings.allow_student_positions ? \`
+                  <div class="mb-3">
+                    <label class="form-label fw-bold">Apply for Position</label>
+                    <select id="regPosition" class="form-select">\${posOptions}</select>
+                  </div>
+                \` : \`
+                  <input type="hidden" id="regPosition" value="Member">
+                \`}
+                <div class="mb-3">
+                  <label class="form-label">Student Photo (Optional)</label>
+                  <input type="file" id="regPhoto" class="form-control" accept="image/*">
+                </div>
+                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold">Submit Registration</button>
+              </form>
+              <div class="text-center mt-3">
+                <a href="/" class="text-decoration-none small">Return to Login Page</a>
+              </div>
+            </div>
+          </div>
         </div>
-    `));
-});
+      \`;
+    });
+  }
 
-app.post('/admin/events/add', requireAuth('admin'), (req, res) => {
-    const { event_name, description, event_type, event_date, start_time, end_time, location, status } = req.body;
-    db.run(`INSERT INTO events (event_name, description, event_type, event_date, start_time, end_time, location, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [event_name, description || '', event_type, event_date, start_time, end_time, location || '', status || 'Upcoming'],
-        (err) => {
-            logAction(req.session.user.username, 'ADD_EVENT', `Created event ${event_name}`, req);
-            res.redirect('/admin/events');
-        }
-    );
-});
+  async function handlePublicRegistration(e) {
+    e.preventDefault();
+    const formData = new FormData();
+    formData.append('student_id', document.getElementById('regStudentId').value);
+    formData.append('first_name', document.getElementById('regFirstName').value);
+    formData.append('middle_name', document.getElementById('regMiddleName').value);
+    formData.append('last_name', document.getElementById('regLastName').value);
+    formData.append('email', document.getElementById('regEmail').value);
+    formData.append('contact_number', document.getElementById('regContact').value);
+    formData.append('position_name', document.getElementById('regPosition').value);
 
-// Event Attendance sheet viewer
-app.get('/admin/events/:id/attendance', requireAuth('admin'), (req, res) => {
-    const eventId = req.params.id;
-    db.get("SELECT * FROM events WHERE id = ?", [eventId], (err, event) => {
-        if (!event) return res.redirect('/admin/events');
-        db.all(`SELECT s.student_id, s.first_name, s.last_name, s.position, a.time_in, a.time_out, a.status 
-                FROM students s 
-                LEFT JOIN attendance a ON s.student_id = a.student_id AND a.event_id = ? 
-                WHERE s.membership_status = 'Active' ORDER BY s.last_name ASC`, [eventId], (err, records) => {
-            res.send(renderAdminLayout(req, `Attendance: ${event.event_name}`, `
-                <div class="card">
-                    <h3>Event Attendance Sheet: ${event.event_name}</h3>
-                    <p style="color:#64748b; font-size:0.9rem; margin-bottom:15px;">Date: ${event.event_date} | Time: ${event.start_time} - ${event.end_time} | Location: ${event.location}</p>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Student ID</th>
-                                <th>Full Name</th>
-                                <th>Position</th>
-                                <th>Time In</th>
-                                <th>Time Out</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${records && records.length > 0 ? records.map(r => `
-                                <tr>
-                                    <td>${r.student_id}</td>
-                                    <td>${r.first_name} ${r.last_name}</td>
-                                    <td>${r.position}</td>
-                                    <td>${r.time_in || '---'}</td>
-                                    <td>${r.time_out || '---'}</td>
-                                    <td><span class="badge badge-${r.status === 'Present' ? 'success' : (r.status === 'Late' ? 'warning' : 'danger')}">${r.status || 'Absent'}</span></td>
-                                </tr>
-                            `).join('') : '<tr><td colspan="6" style="text-align:center;">No attendance records found.</td></tr>'}
-                        </tbody>
-                    </table>
+    const photoFile = document.getElementById('regPhoto').files[0];
+    if (photoFile) formData.append('photo', photoFile);
+
+    const res = await apiCall('/api/public/register', 'POST', formData, true);
+    if (res.success) {
+      document.getElementById('publicRegForm').reset();
+      const alertEl = document.getElementById('regSuccessAlert');
+      alertEl.classList.remove('d-none');
+      alertEl.innerHTML = \`
+        <h5><i class="bi bi-check-circle-fill"></i> REGISTRATION SUCCESSFUL</h5>
+        <p class="mb-0">Welcome, <strong>\${res.student.first_name} \${res.student.last_name}</strong>!</p>
+        <p class="small">Your registration has been submitted and is pending approval by Adviser <strong>\${state.settings.club_adviser}</strong>.</p>
+      \`;
+    } else {
+      alert(res.message);
+    }
+  }
+
+  async function renderAdminDashboard() {
+    const res = await apiCall('/api/analytics/dashboard');
+    if (!res.success) return;
+    const s = res.stats;
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+          <h3 class="fw-bold mb-0">Club Adviser Dashboard</h3>
+          <p class="text-muted">\${state.settings.club_name} | School Year \${state.settings.school_year}</p>
+        </div>
+        <div>
+          <button class="btn btn-outline-primary me-2" onclick="copyRegistrationLink()"><i class="bi bi-link-45deg"></i> Copy Self-Reg Link</button>
+          <button class="btn btn-primary" onclick="navigate('events')"><i class="bi bi-calendar-plus"></i> Manage Events</button>
+        </div>
+      </div>
+
+      <!-- Quick Metrics Grid -->
+      <div class="row g-3 mb-4">
+        <div class="col-md-3">
+          <div class="card card-stat bg-primary text-white p-3">
+            <small class="text-white-50">Total Active Members</small>
+            <h2 class="fw-bold mb-0">\${s.activeStudents}</h2>
+            <small>\${s.totalOfficers} Officers | \${s.inactiveStudents} Inactive</small>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card card-stat bg-success text-white p-3">
+            <small class="text-white-50">Present Today</small>
+            <h2 class="fw-bold mb-0">\${s.presentToday}</h2>
+            <small>\${s.lateToday} Late | \${s.absentToday} Absent</small>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card card-stat bg-warning text-dark p-3">
+            <small class="text-dark-50">Pending Registrations</small>
+            <h2 class="fw-bold mb-0">\${s.pendingRegistrations}</h2>
+            <small><a href="#" onclick="navigate('registrations')" class="text-dark font-weight-bold">Review Approval Queue &rarr;</a></small>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card card-stat bg-dark text-white p-3">
+            <small class="text-white-50">Active Event</small>
+            <h5 class="fw-bold mb-0 text-truncate">\${s.activeEvent ? s.activeEvent.event_name : 'No Active Event'}</h5>
+            <small>\${s.activeEvent ? s.activeEvent.location : 'Scanner Idle'}</small>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Recent Scans & Position Breakdown -->
+      <div class="row g-3">
+        <div class="col-md-8">
+          <div class="card border-0 shadow-sm p-3">
+            <h5 class="fw-bold mb-3"><i class="bi bi-activity text-primary"></i> Live Attendance Activity Stream</h5>
+            <div class="table-responsive">
+              <table class="table table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th>Student Name</th>
+                    <th>Position</th>
+                    <th>Event</th>
+                    <th>Time In</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  \${s.recentScans.length ? s.recentScans.map(r => \`
+                    <tr>
+                      <td class="fw-bold">\${r.full_name}</td>
+                      <td><span class="badge bg-secondary">\${r.position_name}</span></td>
+                      <td>\${r.event_name}</td>
+                      <td>\${new Date(r.time_in).toLocaleTimeString()}</td>
+                      <td><span class="badge bg-\${r.status === 'PRESENT' ? 'success' : r.status === 'LATE' ? 'warning' : 'danger'}">\${r.status}</span></td>
+                    </tr>
+                  \`).join('') : '<tr><td colspan="5" class="text-center text-muted">No attendance activity logged today.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="card border-0 shadow-sm p-3">
+            <h5 class="fw-bold mb-3"><i class="bi bi-pie-chart-fill text-primary"></i> Positions Distribution</h5>
+            <ul class="list-group list-group-flush">
+              \${s.positionStats.map(p => \`
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                  \${p.position_name}
+                  <span class="badge bg-primary rounded-pill">\${p.count}</span>
+                </li>
+              \`).join('')}
+            </ul>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    renderAppShell(html, 'dashboard');
+  }
+
+  function copyRegistrationLink() {
+    const link = window.location.origin + '/register';
+    navigator.clipboard.writeText(link);
+    alert('Public Registration Link copied to clipboard:\n' + link);
+  }
+
+  async function renderPendingRegistrations() {
+    const res = await apiCall('/api/students?approval=Pending');
+    const students = res.students || [];
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3 class="fw-bold">Pending Student Registrations</h3>
+        <span class="badge bg-warning text-dark fs-6">\${students.length} Queue Total</span>
+      </div>
+      <div class="card border-0 shadow-sm p-3">
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead>
+              <tr>
+                <th>Student ID</th>
+                <th>Full Name</th>
+                <th>School Email</th>
+                <th>Applied Position</th>
+                <th>Date Submitted</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${students.length ? students.map(s => \`
+                <tr>
+                  <td class="fw-bold">\${s.student_id}</td>
+                  <td>\${s.full_name}</td>
+                  <td>\${s.email}</td>
+                  <td><span class="badge bg-info text-dark">\${s.position_name}</span></td>
+                  <td>\${s.date_joined}</td>
+                  <td class="text-end">
+                    <button class="btn btn-sm btn-success me-1" onclick="approveStudent('\${s.student_id}')"><i class="bi bi-check-lg"></i> Approve</button>
+                    <button class="btn btn-sm btn-danger" onclick="rejectStudent('\${s.student_id}')"><i class="bi bi-x-lg"></i> Reject</button>
+                  </td>
+                </tr>
+              \`).join('') : '<tr><td colspan="6" class="text-center text-muted p-4">No pending student self-registrations.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'registrations');
+  }
+
+  async function approveStudent(id) {
+    if (!confirm(\`Approve registration for Student ID \${id}?\`)) return;
+    const res = await apiCall(\`/api/students/\${id}/approve\`, 'POST');
+    alert(res.message);
+    renderPendingRegistrations();
+  }
+
+  async function rejectStudent(id) {
+    if (!confirm(\`Reject registration for Student ID \${id}?\`)) return;
+    const res = await apiCall(\`/api/students/\${id}/reject\`, 'POST');
+    alert(res.message);
+    renderPendingRegistrations();
+  }
+
+  async function renderStudentManagement() {
+    const res = await apiCall('/api/students');
+    const posRes = await apiCall('/api/positions');
+    const students = res.students || [];
+    const positions = posRes.positions || [];
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3 class="fw-bold">Student Members Management</h3>
+        <button class="btn btn-primary" onclick="openStudentModal()"><i class="bi bi-person-plus-fill"></i> Add Student Manually</button>
+      </div>
+
+      <div class="card border-0 shadow-sm p-3 mb-4">
+        <div class="row g-2">
+          <div class="col-md-4">
+            <input type="text" id="studentSearch" class="form-control" placeholder="Search ID or Name..." onkeyup="filterStudentsTable()">
+          </div>
+          <div class="col-md-4">
+            <select id="positionFilter" class="form-select" onchange="filterStudentsTable()">
+              <option value="">All Positions</option>
+              \${positions.map(p => \`<option value="\${p.position_name}">\${p.position_name}</option>\`).join('')}
+            </select>
+          </div>
+          <div class="col-md-4 text-end">
+            <a href="/api/export/csv?type=students" class="btn btn-outline-success"><i class="bi bi-file-earmark-excel"></i> Export CSV</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="card border-0 shadow-sm p-3">
+        <div class="table-responsive">
+          <table class="table table-hover align-middle" id="studentsTable">
+            <thead>
+              <tr>
+                <th>Photo</th>
+                <th>Student ID</th>
+                <th>Full Name</th>
+                <th>Position</th>
+                <th>Email</th>
+                <th>Status</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${students.map(s => \`
+                <tr>
+                  <td><img src="\${s.photo_url || 'https://via.placeholder.com/40'}" class="rounded-circle" width="40" height="40"></td>
+                  <td class="fw-bold">\${s.student_id}</td>
+                  <td>\${s.full_name}</td>
+                  <td><span class="badge bg-primary">\${s.position_name}</span></td>
+                  <td>\${s.email}</td>
+                  <td><span class="badge bg-\${s.membership_status === 'Active' ? 'success' : 'danger'}">\${s.membership_status}</span></td>
+                  <td class="text-end">
+                    <button class="btn btn-sm btn-outline-info me-1" onclick="viewStudentHistory('\${s.student_id}')"><i class="bi bi-clock-history"></i></button>
+                    <button class="btn btn-sm btn-outline-warning me-1" onclick="regenerateQR('\${s.student_id}')"><i class="bi bi-qr-code"></i> Reset QR</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteStudent('\${s.student_id}')"><i class="bi bi-trash"></i></button>
+                  </td>
+                </tr>
+              \`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'students');
+  }
+
+  async function regenerateQR(student_id) {
+    if (!confirm('Regenerating will invalidate the student\'s old QR code. Continue?')) return;
+    const res = await apiCall(\`/api/students/\${student_id}/regenerate-qr\`, 'POST');
+    alert(res.message);
+  }
+
+  async function deleteStudent(student_id) {
+    if (!confirm(\`Delete student \${student_id} permanently?\`)) return;
+    const res = await apiCall(\`/api/students/\${student_id}\`, 'DELETE');
+    alert(res.message);
+    renderStudentManagement();
+  }
+
+  async function viewStudentHistory(student_id) {
+    const res = await apiCall(\`/api/students/\${student_id}/history\`);
+    const history = res.history || [];
+    let text = \`Position Audit History for ID \${student_id}:\n\n\`;
+    history.forEach(h => {
+      text += \`School Year: \${h.school_year} | Position: \${h.position_name} (\${new Date(h.assigned_date).toLocaleDateString()})\n\`;
+    });
+    alert(text || 'No history recorded.');
+  }
+
+  function filterStudentsTable() {
+    const search = document.getElementById('studentSearch').value.toLowerCase();
+    const pos = document.getElementById('positionFilter').value.toLowerCase();
+    const rows = document.querySelectorAll('#studentsTable tbody tr');
+
+    rows.forEach(r => {
+      const text = r.innerText.toLowerCase();
+      const matchesSearch = text.includes(search);
+      const matchesPos = !pos || text.includes(pos);
+      r.style.display = (matchesSearch && matchesPos) ? '' : 'none';
+    });
+  }
+
+  async function renderPositionManagement() {
+    const res = await apiCall('/api/positions');
+    const positions = res.positions || [];
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3 class="fw-bold">Customizable Position Management</h3>
+        <button class="btn btn-primary" onclick="openAddPositionModal()"><i class="bi bi-plus-circle"></i> Create New Position</button>
+      </div>
+      <div class="card border-0 shadow-sm p-3">
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Position Title</th>
+                <th>Description</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${positions.map(p => \`
+                <tr>
+                  <td>\${p.id}</td>
+                  <td class="fw-bold text-primary">\${p.position_name}</td>
+                  <td>\${p.description || 'N/A'}</td>
+                  <td class="text-end">
+                    <button class="btn btn-sm btn-outline-danger" onclick="deletePosition(\${p.id})"><i class="bi bi-trash"></i> Delete</button>
+                  </td>
+                </tr>
+              \`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'positions');
+  }
+
+  async function openAddPositionModal() {
+    const title = prompt('Enter New Custom Position Title:');
+    if (!title) return;
+    const desc = prompt('Enter Position Description (Optional):');
+    const res = await apiCall('/api/positions', 'POST', { position_name: title, description: desc });
+    alert(res.message);
+    if (res.success) renderPositionManagement();
+  }
+
+  async function deletePosition(id) {
+    if (!confirm('Are you sure? Deleting this position may affect filter categories.')) return;
+    const res = await apiCall(\`/api/positions/\${id}\`, 'DELETE');
+    alert(res.message);
+    if (res.success) renderPositionManagement();
+  }
+
+  async function renderEventManagement() {
+    const res = await apiCall('/api/events');
+    const events = res.events || [];
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3 class="fw-bold">Club Event Attendance Management</h3>
+        <button class="btn btn-primary" onclick="openCreateEventModal()"><i class="bi bi-calendar-plus-fill"></i> Create Event</button>
+      </div>
+
+      <div class="row g-3">
+        \${events.map(e => \`
+          <div class="col-md-6">
+            <div class="card border-0 shadow-sm p-3">
+              <div class="d-flex justify-content-between align-items-start">
+                <div>
+                  <span class="badge bg-\${e.status === 'ACTIVE' ? 'success' : e.status === 'COMPLETED' ? 'secondary' : 'primary'} mb-2">\${e.status}</span>
+                  <h4 class="fw-bold mb-1">\${e.event_name}</h4>
+                  <p class="text-muted small mb-2"><i class="bi bi-geo-alt"></i> \${e.location} | \${e.event_date}</p>
                 </div>
-            `));
-        });
-    });
-});
-
-app.get('/admin/attendance', requireAuth('admin'), (req, res) => {
-    db.all(`SELECT a.*, e.event_name, s.first_name, s.last_name, s.position 
-            FROM attendance a 
-            JOIN events e ON a.event_id = e.id 
-            JOIN students s ON a.student_id = s.student_id 
-            ORDER BY a.recorded_at DESC LIMIT 100`, (err, records) => {
-        res.send(renderAdminLayout(req, 'All Attendance Records', `
-            <div class="card">
-                <h3>Attendance Logs (Recent 100)</h3>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Student ID</th>
-                            <th>Student Name</th>
-                            <th>Position</th>
-                            <th>Event</th>
-                            <th>Time In</th>
-                            <th>Time Out</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${records && records.length > 0 ? records.map(r => `
-                            <tr>
-                                <td>${r.student_id}</td>
-                                <td>${r.first_name} ${r.last_name}</td>
-                                <td>${r.position}</td>
-                                <td>${r.event_name}</td>
-                                <td>${r.time_in || 'N/A'}</td>
-                                <td>${r.time_out || 'N/A'}</td>
-                                <td><span class="badge badge-${r.status === 'Present' ? 'success' : (r.status === 'Late' ? 'warning' : 'danger')}">${r.status}</span></td>
-                            </tr>
-                        `).join('') : '<tr><td colspan="7" style="text-align:center;">No attendance records available.</td></tr>'}
-                    </tbody>
-                </table>
-            </div>
-        `));
-    });
-});
-
-// ==========================================
-// 12. SEPARATE MOBILE QR SCANNER PORTAL
-// ==========================================
-app.get('/scanner', requireAuth('scanner'), (req, res) => {
-    db.all("SELECT * FROM events WHERE status != 'Completed' ORDER BY event_date DESC", (err, events) => {
-        db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-            res.send(`
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>QR Scanner Portal - Attendance System</title>
-                    <style>
-                        body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
-                        .scanner-container { width: 100%; max-width: 500px; background: #1e293b; border-radius: 12px; padding: 25px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
-                        h2 { text-align: center; color: #38bdf8; margin-bottom: 20px; font-size: 1.4rem; }
-                        .form-group { margin-bottom: 20px; }
-                        label { display: block; margin-bottom: 8px; font-weight: 600; color: #cbd5e1; font-size: 0.9rem; }
-                        select, input { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #475569; color: white; border-radius: 6px; font-size: 1rem; box-sizing: border-box; }
-                        .scan-box { background: #0f172a; border: 2px dashed #475569; border-radius: 8px; padding: 20px; text-align: center; margin-bottom: 20px; }
-                        button { width: 100%; padding: 14px; background: #3b82f6; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; transition: 0.2s; }
-                        button:hover { background: #2563eb; }
-                        .scan-result { margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; display: none; }
-                        .success { background: #065f46; color: #d1fae5; border: 1px solid #10b981; }
-                        .error { background: #991b1b; color: #fee2e2; border: 1px solid #ef4444; }
-                        .nav-links { margin-top: 20px; text-align: center; font-size: 0.9rem; }
-                        .nav-links a { color: #38bdf8; text-decoration: none; }
-                    </style>
-                </head>
-                <body>
-                    <div class="scanner-container">
-                        <h2>📱 QR Attendance Scanner</h2>
-                        <div class="form-group">
-                            <label>Select Active Event *</label>
-                            <select id="eventId" required>
-                                ${events && events.length > 0 ? events.map(e => `<option value="${e.id}">${e.event_name} (${e.event_date})</option>`).join('') : '<option value="">No active events</option>'}
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Scan Mode</label>
-                            <select id="scanMode">
-                                <option value="time_in">Time In</option>
-                                <option value="time_out">Time Out</option>
-                            </select>
-                        </div>
-                        <div class="scan-box">
-                            <p style="margin-bottom:15px; color:#94a3b8; font-size:0.9rem;">Simulate QR Code Scan / Enter QR Token or Student ID</p>
-                            <input type="text" id="qrTokenInput" placeholder="Scan or type QR token / Student ID..." style="margin-bottom:15px;">
-                            <button onclick="processScan()">Submit Attendance Scan</button>
-                        </div>
-                        <div id="scanResult" class="scan-result"></div>
-                        <div class="nav-links">
-                            <a href="/logout">Logout from Scanner</a>
-                        </div>
-                    </div>
-
-                    <script>
-                        function speak(text) {
-                            if ('speechSynthesis' in window) {
-                                const utterance = new SpeechSynthesisUtterance(text);
-                                window.speechSynthesis.speak(utterance);
-                            }
-                        }
-
-                        function processScan() {
-                            const eventId = document.getElementById('eventId').value;
-                            const scanMode = document.getElementById('scanMode').value;
-                            const token = document.getElementById('qrTokenInput').value.trim();
-                            const resultDiv = document.getElementById('scanResult');
-
-                            if (!eventId || !token) {
-                                alert('Please select an event and provide a QR token or student ID.');
-                                return;
-                            }
-
-                            fetch('/api/scan', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ event_id: eventId, qr_token: token, mode: scanMode })
-                            })
-                            .then(res => res.json())
-                            .then(data => {
-                                resultDiv.style.display = 'block';
-                                if (data.success) {
-                                    resultDiv.className = 'scan-result success';
-                                    resultDiv.innerHTML = '✓ ' + data.message;
-                                    speak(data.speech);
-                                } else {
-                                    resultDiv.className = 'scan-result error';
-                                    resultDiv.innerHTML = '✕ ' + data.message;
-                                    speak(data.speech);
-                                }
-                                document.getElementById('qrTokenInput').value = '';
-                                document.getElementById('qrTokenInput').focus();
-                            })
-                            .catch(err => {
-                                console.error(err);
-                                alert('Server connection error during scan.');
-                            });
-                        }
-                    </script>
-                </body>
-                </html>
-            `);
-        });
-    });
-});
-
-// Attendance Scan API Endpoint
-app.post('/api/scan', requireAuth('scanner'), (req, res) => {
-    const { event_id, qr_token, mode } = req.body;
-
-    db.get("SELECT * FROM students WHERE qr_token = ? OR student_id = ?", [qr_token, qr_token], (err, student) => {
-        if (!student) {
-            return res.json({ success: false, message: 'Invalid QR Code or Student ID', speech: 'Invalid QR code' });
-        }
-
-        if (student.membership_status !== 'Active') {
-            return res.json({ success: false, message: `Student membership is ${student.membership_status}`, speech: 'Student membership is inactive' });
-        }
-
-        db.get("SELECT * FROM attendance WHERE event_id = ? AND student_id = ?", [event_id, student.student_id], (err, existingAttendance) => {
-            const currentTime = new Date().toLocaleTimeString();
-
-            if (mode === 'time_in') {
-                if (existingAttendance && existingAttendance.time_in) {
-                    return res.json({ 
-                        success: false, 
-                        message: `${student.first_name} ${student.last_name} already recorded Time In.`, 
-                        speech: `${student.first_name} ${student.last_name}, you are already recorded.` 
-                    });
-                }
-
-                if (existingAttendance) {
-                    db.run("UPDATE attendance SET time_in = ?, status = 'Present' WHERE event_id = ? AND student_id = ?", 
-                        [currentTime, event_id, student.student_id], () => {
-                            res.json({ 
-                                success: true, 
-                                message: `Time In Recorded: ${student.first_name} ${student.last_name} (${student.position})`, 
-                                speech: `${student.first_name} ${student.last_name}, attendance recorded.` 
-                            });
-                        });
-                } else {
-                    db.run("INSERT INTO attendance (event_id, student_id, time_in, status) VALUES (?, ?, ?, 'Present')", 
-                        [event_id, student.student_id, currentTime], () => {
-                            res.json({ 
-                                success: true, 
-                                message: `Time In Recorded: ${student.first_name} ${student.last_name} (${student.position})`, 
-                                speech: `${student.first_name} ${student.last_name}, attendance recorded.` 
-                            });
-                        });
-                }
-            } else {
-                // Time Out mode
-                if (!existingAttendance || !existingAttendance.time_in) {
-                    return res.json({ success: false, message: 'No Time In record found for this event.', speech: 'No time in record found' });
-                }
-                db.run("UPDATE attendance SET time_out = ? WHERE event_id = ? AND student_id = ?", 
-                    [currentTime, event_id, student.student_id], () => {
-                        res.json({ 
-                            success: true, 
-                            message: `Time Out Recorded: ${student.first_name} ${student.last_name}`, 
-                            speech: `${student.first_name} ${student.last_name}, time out recorded.` 
-                        });
-                    });
-            }
-        });
-    });
-});
-
-// ==========================================
-// 13. STUDENT PORTAL
-// ==========================================
-app.get('/member', requireAuth('student'), (req, res) => {
-    const studentId = req.session.user.student_id;
-    db.get("SELECT * FROM students WHERE student_id = ?", [studentId], (err, student) => {
-        db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-            db.all(`SELECT a.*, e.event_name, e.event_date FROM attendance a JOIN events e ON a.event_id = e.id WHERE a.student_id = ? ORDER BY e.event_date DESC`, [studentId], (err, history) => {
-                QRCode.toDataURL(student.qr_token, { width: 200, margin: 1 }, (err, qrCodeUrl) => {
-                    res.send(`
-                        <!DOCTYPE html>
-                        <html lang="en">
-                        <head>
-                            <meta charset="UTF-8">
-                            <title>Student Portal - Club Attendance</title>
-                            <style>
-                                body { background: #f8fafc; color: #1e293b; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }
-                                .container { max-width: 800px; margin: 0 auto; }
-                                .card { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 25px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }
-                                .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 20px; }
-                                h2 { color: #1e3a8a; }
-                                .badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; background: #e0f2fe; color: #0369a1; }
-                                table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-                                th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.9rem; }
-                                th { background: #f1f5f9; color: #475569; }
-                                .btn { display: inline-block; padding: 8px 16px; background: #3b82f6; color: white; border-radius: 6px; text-decoration: none; font-size: 0.9rem; font-weight: 500; }
-                            </style>
-                        </head>
-                        <body>
-                            <div class="container">
-                                <div class="header">
-                                    <div>
-                                        <h2>Student Portal</h2>
-                                        <p style="color:#64748b;">${settings ? settings.school_name : ''} - ${settings ? settings.club_name : ''}</p>
-                                    </div>
-                                    <div>
-                                        <a href="/logout" class="btn" style="background:#ef4444;">Logout</a>
-                                    </div>
-                                </div>
-
-                                <div class="card" style="display:flex; gap:25px; align-items:center; flex-wrap:wrap;">
-                                    <div style="text-align:center;">
-                                        <img src="${qrCodeUrl}" alt="QR" style="width:160px; height:160px;"><br>
-                                        <span style="font-size:0.8rem; color:#64748b;">Digital QR ID Token</span>
-                                    </div>
-                                    <div style="flex:1;">
-                                        <h3>${student.first_name} ${student.last_name}</h3>
-                                        <p style="margin:5px 0;"><strong>Student ID:</strong> ${student.student_id}</p>
-                                        <p style="margin:5px 0;"><strong>School Email:</strong> ${student.school_email}</p>
-                                        <p style="margin:5px 0;"><strong>Position:</strong> <span class="badge">${student.position}</span></p>
-                                        <p style="margin:5px 0;"><strong>Membership Status:</strong> <span class="badge" style="background:#d1fae5; color:#065f46;">${student.membership_status}</span></p>
-                                    </div>
-                                </div>
-
-                                <div class="card">
-                                    <h3>My Attendance History</h3>
-                                    <table>
-                                        <thead>
-                                            <tr>
-                                                <th>Event</th>
-                                                <th>Date</th>
-                                                <th>Time In</th>
-                                                <th>Time Out</th>
-                                                <th>Status</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            ${history && history.length > 0 ? history.map(h => `
-                                                <tr>
-                                                    <td>${h.event_name}</td>
-                                                    <td>${h.event_date}</td>
-                                                    <td>${h.time_in || '---'}</td>
-                                                    <td>${h.time_out || '---'}</td>
-                                                    <td><span class="badge" style="background:${h.status === 'Present' ? '#d1fae5' : '#fee2e2'}; color:${h.status === 'Present' ? '#065f46' : '#991b1b'};">${h.status}</span></td>
-                                                </tr>
-                                            `).join('') : '<tr><td colspan="5" style="text-align:center;">No attendance history recorded yet.</td></tr>'}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </body>
-                        </html>
-                    `);
-                });
-            });
-        });
-    });
-});
-
-// ==========================================
-// 14. REPORTS, ANALYTICS, SETTINGS & BACKUP
-// ==========================================
-app.get('/admin/reports', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM events", (err, events) => {
-        res.send(renderAdminLayout(req, 'Reports & Analytics', `
-            <div class="card">
-                <h3>Generate Attendance Reports</h3>
-                <p style="color:#64748b; font-size:0.9rem; margin-bottom:15px;">Select an event or generate comprehensive club participation summaries.</p>
-                <div style="display:flex; gap:15px; flex-wrap:wrap;">
-                    <a href="/admin/reports/print-summary" class="btn btn-success" target="_blank">Print Full Club Summary Report</a>
+                <button class="btn btn-sm btn-outline-danger" onclick="deleteEvent(\${e.id})"><i class="bi bi-trash"></i></button>
+              </div>
+              <p class="small text-secondary">\${e.description || 'No description provided.'}</p>
+              <div class="d-flex justify-content-between align-items-center mt-3 pt-2 border-top">
+                <small class="text-muted"><i class="bi bi-clock"></i> \${e.start_time} - \${e.end_time}</small>
+                <div>
+                  \${e.status !== 'COMPLETED' ? \`
+                    <button class="btn btn-sm btn-warning text-dark me-1" onclick="closeEventMarkAbsent(\${e.id})">Mark Absentees & Close</button>
+                  \` : ''}
+                  <button class="btn btn-sm btn-primary" onclick="navigate('scanner')">Open Scanner</button>
                 </div>
+              </div>
             </div>
-            <div class="card">
-                <h3>Event Specific Reports</h3>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Event Name</th>
-                            <th>Date</th>
-                            <th>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${events && events.length > 0 ? events.map(e => `
-                            <tr>
-                                <td>${e.event_name}</td>
-                                <td>${e.event_date}</td>
-                                <td><a href="/admin/events/${e.id}/attendance" class="btn btn-sm">View Report</a></td>
-                            </tr>
-                        `).join('') : '<tr><td colspan="3">No events available.</td></tr>'}
-                    </tbody>
-                </table>
+          </div>
+        \`).join('')}
+      </div>
+    \`;
+    renderAppShell(html, 'events');
+  }
+
+  async function openCreateEventModal() {
+    const name = prompt('Event Name:');
+    if (!name) return;
+    const date = prompt('Event Date (YYYY-MM-DD):', new Date().toISOString().split('T')[0]);
+    const start = prompt('Start Time (HH:MM):', '09:00');
+    const end = prompt('End Time (HH:MM):', '12:00');
+    const location = prompt('Location/Venue:', 'School Auditorium');
+
+    const res = await apiCall('/api/events', 'POST', {
+      event_name: name,
+      event_date: date,
+      start_time: start,
+      end_time: end,
+      location: location,
+      target_audience: 'ALL'
+    });
+    alert(res.message);
+    if (res.success) renderEventManagement();
+  }
+
+  async function closeEventMarkAbsent(id) {
+    if (!confirm('Mark all non-attending eligible students as ABSENT and complete event?')) return;
+    const res = await apiCall(\`/api/events/\${id}/close-and-mark-absent\`, 'POST');
+    alert(res.message);
+    renderEventManagement();
+  }
+
+  async function deleteEvent(id) {
+    if (!confirm('Delete event and associated logs?')) return;
+    const res = await apiCall(\`/api/events/\${id}\`, 'DELETE');
+    alert(res.message);
+    renderEventManagement();
+  }
+
+  async function renderScannerPortal() {
+    const eventsRes = await apiCall('/api/events');
+    const activeEvents = (eventsRes.events || []).filter(e => e.status !== 'COMPLETED');
+
+    const html = \`
+      <div class="row justify-content-center">
+        <div class="col-md-8 text-center">
+          <h3 class="fw-bold mb-3"><i class="bi bi-qr-code-scan text-primary"></i> Live Attendance QR Scanner</h3>
+          
+          <div class="card border-0 shadow-sm p-4 mb-4">
+            <div class="row g-3 align-items-center mb-3">
+              <div class="col-md-6">
+                <label class="form-label fw-bold">Select Active Event Target</label>
+                <select id="scannerEventSelect" class="form-select">
+                  \${activeEvents.map(e => \`<option value="\${e.id}">\${e.event_name} (\${e.event_date})</option>\`).join('')}
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label fw-bold">Scan Mode</label>
+                <div class="btn-group w-100" role="group">
+                  <input type="radio" class="btn-check" name="scanMode" id="modeIn" value="TIME_IN" checked onclick="state.scannerMode='TIME_IN'">
+                  <label class="btn btn-outline-success" for="modeIn">TIME IN</label>
+                  <input type="radio" class="btn-check" name="scanMode" id="modeOut" value="TIME_OUT" onclick="state.scannerMode='TIME_OUT'">
+                  <label class="btn btn-outline-danger" for="modeOut">TIME OUT</label>
+                </div>
+              </div>
             </div>
-        `));
-    });
-});
 
-app.get('/admin/reports/print-summary', requireAuth('admin'), (req, res) => {
-    db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-        db.all("SELECT * FROM students WHERE membership_status='Active'", (err, students) => {
-            res.send(`
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <title>Club Membership & Attendance Summary Report</title>
-                    <style>
-                        body { font-family: 'Segoe UI', sans-serif; padding: 20px; color: #1e293b; }
-                        .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #1e3a8a; padding-bottom: 15px; }
-                        h2 { color: #1e3a8a; margin-bottom: 5px; }
-                        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                        th, td { border: 1px solid #cbd5e1; padding: 8px 12px; font-size: 0.9rem; text-align: left; }
-                        th { background: #f1f5f9; }
-                        .signature { margin-top: 50px; display: flex; justify-content: flex-end; }
-                        .sig-box { text-align: center; width: 250px; border-top: 1px solid #000; padding-top: 5px; }
-                        @media print { .no-print { display: none; } }
-                    </style>
-                </head>
-                <body>
-                    <div class="no-print" style="margin-bottom:20px;">
-                        <button onclick="window.print()" style="padding:10px 20px; background:#1e3a8a; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold;">Print Report</button>
-                    </div>
-                    <div class="header">
-                        <h2>${settings ? settings.school_name : 'School Name'}</h2>
-                        <p><strong>${settings ? settings.club_name : 'Student Club'}</strong> — Official Summary Report</p>
-                        <p style="font-size:0.85rem; color:#64748b;">School Year: ${settings ? settings.school_year : '2026-2027'} | Generated on ${new Date().toLocaleDateString()}</p>
-                    </div>
-                    <h3>Active Student Members (${students.length} Total)</h3>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Student ID</th>
-                                <th>Full Name</th>
-                                <th>Position</th>
-                                <th>Email</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${students.map(s => `
-                                <tr>
-                                    <td>${s.student_id}</td>
-                                    <td>${s.first_name} ${s.last_name}</td>
-                                    <td>${s.position}</td>
-                                    <td>${s.school_email}</td>
-                                    <td>${s.membership_status}</td>
-                                </tr>
-                            `).join('')}
-                        </tbody>
-                    </table>
-                    <div class="signature">
-                        <div class="sig-box">
-                            <strong>${settings ? settings.club_adviser : 'Club Adviser'}</strong><br>
-                            <span style="font-size:0.85rem; color:#64748b;">Club Adviser</span>
-                        </div>
-                    </div>
-                </body>
-                </html>
-            `);
-        });
-    });
-});
-
-app.get('/admin/settings', requireAuth('admin'), (req, res) => {
-    db.get("SELECT * FROM settings LIMIT 1", (err, settings) => {
-        res.send(renderAdminLayout(req, 'System Settings', `
-            <div class="card" style="max-width:700px; margin:0 auto;">
-                <h3>School & Club Configuration</h3>
-                <form action="/admin/settings" method="POST" style="margin-top:20px;">
-                    <div class="form-group">
-                        <label>School Name</label>
-                        <input type="text" name="school_name" value="${settings ? settings.school_name : ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Student Club Name</label>
-                        <input type="text" name="club_name" value="${settings ? settings.club_name : ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>School Year</label>
-                        <input type="text" name="school_year" value="${settings ? settings.school_year : ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Club Adviser</label>
-                        <input type="text" name="club_adviser" value="${settings ? settings.club_adviser : ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Student Self-Registration Portal</label>
-                        <select name="registration_open">
-                            <option value="1" ${settings && settings.registration_open === 1 ? 'selected' : ''}>Open (Students can register)</option>
-                            <option value="0" ${settings && settings.registration_open === 0 ? 'selected' : ''}>Closed (Registration disabled)</option>
-                        </select>
-                    </div>
-                    <button type="submit" class="btn">Save Configuration</button>
-                </form>
+            <!-- HTML5 Video Stream Holder -->
+            <div class="d-flex justify-content-center my-3">
+              <div id="reader" class="scanner-preview"></div>
             </div>
-        `));
-    });
-});
 
-app.post('/admin/settings', requireAuth('admin'), (req, res) => {
-    const { school_name, club_name, school_year, club_adviser, registration_open } = req.body;
-    db.run(`UPDATE settings SET school_name = ?, club_name = ?, school_year = ?, club_adviser = ?, registration_open = ?`,
-        [school_name, club_name, school_year, club_adviser, registration_open],
-        (err) => {
-            logAction(req.session.user.username, 'UPDATE_SETTINGS', 'Updated system configuration', req);
-            res.redirect('/admin/settings');
+            <div class="d-flex justify-content-center gap-2">
+              <button class="btn btn-success" onclick="startScanner()"><i class="bi bi-camera-fill"></i> Start Camera</button>
+              <button class="btn btn-secondary" onclick="stopScanner()"><i class="bi bi-camera-video-off"></i> Stop Camera</button>
+            </div>
+          </div>
+
+          <!-- Live Scan Alert Overlay Result Banner -->
+          <div id="scanResultCard" class="card border-0 shadow p-4 d-none text-start">
+            <div class="d-flex align-items-center gap-3">
+              <img id="scanPhoto" src="" class="rounded" width="80" height="80" style="object-fit:cover;">
+              <div>
+                <span id="scanStatusBadge" class="badge bg-success mb-1">RECORDED</span>
+                <h4 id="scanName" class="fw-bold mb-0">Juan Dela Cruz</h4>
+                <p id="scanDetails" class="text-muted mb-0">Student ID: 2026-001 | Member</p>
+                <small id="scanTime" class="text-primary fw-bold">Time In: 3:00 PM</small>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'scanner');
+  }
+
+  function startScanner() {
+    if (state.scanner) stopScanner();
+    state.scanner = new Html5Qrcode("reader");
+    state.scanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      async (decodedText) => {
+        const eventId = document.getElementById('scannerEventSelect').value;
+        if (!eventId) {
+          alert('Please select an active event first!');
+          return;
         }
+
+        // Send API Scan
+        const res = await apiCall('/api/attendance/scan', 'POST', {
+          event_id: eventId,
+          qr_token: decodedText,
+          scan_mode: state.scannerMode
+        });
+
+        const card = document.getElementById('scanResultCard');
+        card.classList.remove('d-none');
+
+        if (res.success) {
+          playAudioFeedback('success');
+          speak(\`\${res.student.full_name}, \${res.action === 'TIME_IN' ? 'Time In Recorded' : 'Time Out Recorded'}\`);
+          document.getElementById('scanStatusBadge').className = \`badge bg-\${res.status === 'LATE' ? 'warning' : 'success'}\`;
+          document.getElementById('scanStatusBadge').innerText = res.status || 'RECORDED';
+          document.getElementById('scanName').innerText = res.student.full_name;
+          document.getElementById('scanDetails').innerText = \`Student ID: \${res.student.student_id} | \${res.student.position_name}\`;
+          document.getElementById('scanPhoto').src = res.student.photo_url || 'https://via.placeholder.com/80';
+          document.getElementById('scanTime').innerText = \`Time: \${res.student.time_in || res.student.time_out}\`;
+        } else {
+          if (res.code === 'DUPLICATE_SCAN') {
+            playAudioFeedback('warning');
+            speak(\`\${res.student.full_name}, you are already recorded.\`);
+            document.getElementById('scanStatusBadge').className = 'badge bg-warning text-dark';
+            document.getElementById('scanStatusBadge').innerText = 'ALREADY RECORDED';
+            document.getElementById('scanName').innerText = res.student.full_name;
+          } else {
+            playAudioFeedback('error');
+            speak('Invalid QR Code');
+            document.getElementById('scanStatusBadge').className = 'badge bg-danger';
+            document.getElementById('scanStatusBadge').innerText = 'INVALID QR';
+            document.getElementById('scanName').innerText = 'Unrecognized Token';
+          }
+        }
+      },
+      (errorMessage) => { /* ignore minor frame parse failures */ }
     );
-});
+  }
 
-app.get('/admin/audit', requireAuth('admin'), (req, res) => {
-    db.all("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 100", (err, logs) => {
-        res.send(renderAdminLayout(req, 'Audit Logs', `
-            <div class="card">
-                <h3>System Audit Trail</h3>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Timestamp</th>
-                            <th>User</th>
-                            <th>Action</th>
-                            <th>Details</th>
-                            <th>IP Address</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${logs && logs.length > 0 ? logs.map(l => `
-                            <tr>
-                                <td>${l.timestamp}</td>
-                                <td><strong>${l.user}</strong></td>
-                                <td><span class="badge badge-info">${l.action}</span></td>
-                                <td>${l.details || '---'}</td>
-                                <td>${l.ip_address}</td>
-                            </tr>
-                        `).join('') : '<tr><td colspan="5" style="text-align:center;">No audit logs recorded.</td></tr>'}
-                    </tbody>
-                </table>
+  function stopScanner() {
+    if (state.scanner) {
+      state.scanner.stop().then(() => {
+        state.scanner.clear();
+        state.scanner = null;
+      }).catch(err => console.error(err));
+    }
+  }
+
+  async function renderIDPrintingPage() {
+    const res = await apiCall('/api/students/qr-batch');
+    const students = res.students || [];
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4 no-print">
+        <div>
+          <h3 class="fw-bold">A4 Student ID Card Printing</h3>
+          <p class="text-muted">Standard 8 Cards per A4 Sheet Print Layout</p>
+        </div>
+        <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-printer-fill"></i> Print ID Sheet</button>
+      </div>
+
+      <div id="printableArea">
+        <div class="a4-grid">
+          \${students.map(s => \`
+            <div class="id-card-a4">
+              <div class="id-card-header">
+                <div>\${state.settings.school_name}</div>
+                <div style="font-size: 8px; opacity: 0.9;">\${state.settings.club_name}</div>
+              </div>
+              <div class="id-card-body">
+                <img src="\${s.photo_url || 'https://via.placeholder.com/60'}" class="id-card-photo">
+                <div class="id-card-details">
+                  <div class="fw-bold text-dark" style="font-size: 11px;">\${s.first_name} \${s.last_name}</div>
+                  <div class="text-primary fw-bold">\${s.position_name}</div>
+                  <div>ID: \${s.student_id}</div>
+                  <div>SY: \${state.settings.school_year}</div>
+                </div>
+                <img src="\${s.qrDataUrl}" class="id-card-qr ms-auto">
+              </div>
             </div>
-        `));
-    });
+          \`).join('')}
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'id-printing');
+  }
+
+  async function renderStudentPortal() {
+    const res = await apiCall('/api/student/portal-data');
+    if (!res.success) return;
+    const st = res.student;
+    const att = res.attendance || [];
+
+    const html = \`
+      <div class="row g-4">
+        <div class="col-md-4">
+          <div class="card border-0 shadow-sm text-center p-4">
+            <img src="\${st.photo_url || 'https://via.placeholder.com/120'}" class="rounded-circle mx-auto mb-3" width="120" height="120" style="object-fit:cover;">
+            <h4 class="fw-bold mb-0">\${st.first_name} \${st.last_name}</h4>
+            <span class="badge bg-primary my-2">\${st.position_name}</span>
+            <p class="text-muted small">Student ID: \${st.student_id}</p>
+            <hr>
+            <div class="p-2 bg-light rounded">
+              <small class="text-muted d-block mb-2">My Digital QR Code Pass</small>
+              <img src="\${res.qrDataUrl}" class="img-fluid" style="max-width:200px;">
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-8">
+          <div class="card border-0 shadow-sm p-4">
+            <h5 class="fw-bold mb-3"><i class="bi bi-clock-history text-primary"></i> My Attendance Record History</h5>
+            <div class="table-responsive">
+              <table class="table table-hover">
+                <thead>
+                  <tr>
+                    <th>Event</th>
+                    <th>Date</th>
+                    <th>Time In</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  \${att.length ? att.map(a => \`
+                    <tr>
+                      <td class="fw-bold">\${a.event_name}</td>
+                      <td>\${a.event_date}</td>
+                      <td>\${a.time_in ? new Date(a.time_in).toLocaleTimeString() : 'N/A'}</td>
+                      <td><span class="badge bg-\${a.status === 'PRESENT' ? 'success' : a.status === 'LATE' ? 'warning' : 'danger'}">\${a.status}</span></td>
+                    </tr>
+                  \`).join('') : '<tr><td colspan="4" class="text-center text-muted">No attendance records found.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'student-portal');
+  }
+
+  async function renderReportsPage() {
+    const eventsRes = await apiCall('/api/events');
+    const events = eventsRes.events || [];
+
+    const html = \`
+      <div class="d-flex justify-content-between align-items-center mb-4 no-print">
+        <h3 class="fw-bold">Attendance & Participation Reports</h3>
+        <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-printer"></i> Print Report Sheet</button>
+      </div>
+
+      <div class="card border-0 shadow-sm p-3 mb-4 no-print">
+        <div class="row g-2">
+          <div class="col-md-4">
+            <label class="form-label fw-bold">Filter by Event</label>
+            <select id="reportEvent" class="form-select" onchange="loadReportData()">
+              <option value="">All Events</option>
+              \${events.map(e => \`<option value="\${e.id}">\${e.event_name}</option>\`).join('')}
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-bold">Export Options</label><br>
+            <a href="/api/export/csv?type=attendance" class="btn btn-outline-success"><i class="bi bi-file-earmark-excel"></i> Export Full Logs CSV</a>
+          </div>
+        </div>
+      </div>
+
+      <div id="printableArea" class="card border-0 shadow-sm p-4">
+        <div class="text-center mb-4">
+          <h4 class="fw-bold text-uppercase mb-0">\${state.settings.school_name}</h4>
+          <h5 class="text-primary mb-1">\${state.settings.club_name}</h5>
+          <p class="text-muted small">Official Event Attendance Report Summary</p>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-bordered align-middle" id="reportTable">
+            <thead>
+              <tr class="table-light">
+                <th>Student ID</th>
+                <th>Student Name</th>
+                <th>Position</th>
+                <th>Event Name</th>
+                <th>Time In</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="reportTbody">
+              <tr><td colspan="6" class="text-center">Loading Report...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="row mt-5 pt-4">
+          <div class="col-6 text-center">
+            <p class="mb-5">Prepared By:</p>
+            <p class="fw-bold mb-0">___________________________</p>
+            <small class="text-muted">Club Secretary / Officer</small>
+          </div>
+          <div class="col-6 text-center">
+            <p class="mb-5">Approved By:</p>
+            <p class="fw-bold mb-0">\${state.settings.club_adviser}</p>
+            <small class="text-muted">Club Adviser</small>
+          </div>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'reports');
+    loadReportData();
+  }
+
+  async function loadReportData() {
+    const eventId = document.getElementById('reportEvent') ? document.getElementById('reportEvent').value : '';
+    const res = await apiCall(\`/api/reports/generate?event_id=\${eventId}\`);
+    const tbody = document.getElementById('reportTbody');
+    if (!tbody) return;
+
+    if (res.success && res.records.length) {
+      tbody.innerHTML = res.records.map(r => \`
+        <tr>
+          <td>\${r.student_id}</td>
+          <td class="fw-bold">\${r.full_name}</td>
+          <td>\${r.position_name}</td>
+          <td>\${r.event_name}</td>
+          <td>\${r.time_in ? new Date(r.time_in).toLocaleTimeString() : 'N/A'}</td>
+          <td><span class="badge bg-\${r.status === 'PRESENT' ? 'success' : r.status === 'LATE' ? 'warning' : 'danger'}">\${r.status}</span></td>
+        </tr>
+      \`).join('');
+    } else {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No attendance data matching filter.</td></tr>';
+    }
+  }
+
+  async function renderAuditLogsPage() {
+    const res = await apiCall('/api/audit-logs');
+    const logs = res.logs || [];
+
+    const html = \`
+      <h3 class="fw-bold mb-4">Security & Audit Logs</h3>
+      <div class="card border-0 shadow-sm p-3">
+        <div class="table-responsive">
+          <table class="table table-hover align-middle small">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>User</th>
+                <th>Role</th>
+                <th>Action</th>
+                <th>Details</th>
+                <th>IP Address</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${logs.map(l => \`
+                <tr>
+                  <td>\${new Date(l.timestamp).toLocaleString()}</td>
+                  <td class="fw-bold">\${l.username}</td>
+                  <td><span class="badge bg-secondary">\${l.role}</span></td>
+                  <td><span class="badge bg-primary">\${l.action}</span></td>
+                  <td>\${l.details}</td>
+                  <td>\${l.ip_address}</td>
+                </tr>
+              \`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'audit-logs');
+  }
+
+  async function renderSettingsPage() {
+    const set = state.settings;
+
+    const html = \`
+      <h3 class="fw-bold mb-4">School & System Settings</h3>
+      <div class="row g-4">
+        <div class="col-md-8">
+          <div class="card border-0 shadow-sm p-4">
+            <form onsubmit="handleSaveSettings(event)">
+              <h5 class="fw-bold mb-3 text-primary">School & Club Profile</h5>
+              <div class="mb-3">
+                <label class="form-label">School Name</label>
+                <input type="text" id="setSchoolName" class="form-control" value="\${set.school_name || ''}" required>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">School Year</label>
+                <input type="text" id="setSchoolYear" class="form-control" value="\${set.school_year || ''}" required>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Club / Organization Name</label>
+                <input type="text" id="setClubName" class="form-control" value="\${set.club_name || ''}" required>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Club Adviser Name</label>
+                <input type="text" id="setAdviser" class="form-control" value="\${set.club_adviser || ''}" required>
+              </div>
+              <hr>
+              <h5 class="fw-bold mb-3 text-primary">Registration Controls</h5>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="setRegEnabled" \${set.registration_enabled ? 'checked' : ''}>
+                <label class="form-check-label fw-bold">Enable Public Self-Registration</label>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="setAllowPositions" \${set.allow_student_positions ? 'checked' : ''}>
+                <label class="form-check-label">Allow Students to Select Custom Position during Self-Registration</label>
+              </div>
+              <button type="submit" class="btn btn-primary fw-bold">Save Settings</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="col-md-4">
+          <div class="card border-0 shadow-sm p-4">
+            <h5 class="fw-bold mb-3 text-danger">Database Backup & Restore</h5>
+            <p class="small text-muted">Create a backup copy of SQLite database or restore from a previously saved file.</p>
+            <a href="/api/system/backup" class="btn btn-outline-primary w-100 mb-3"><i class="bi bi-download"></i> Download Backup DB</a>
+            
+            <form onsubmit="handleRestoreDB(event)">
+              <div class="mb-2">
+                <label class="form-label small">Upload Backup File (.db)</label>
+                <input type="file" id="restoreFile" class="form-control form-control-sm" accept=".db" required>
+              </div>
+              <button type="submit" class="btn btn-danger w-100"><i class="bi bi-upload"></i> Restore Database</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    \`;
+    renderAppShell(html, 'settings');
+  }
+
+  async function handleSaveSettings(e) {
+    e.preventDefault();
+    const body = {
+      school_name: document.getElementById('setSchoolName').value,
+      school_year: document.getElementById('setSchoolYear').value,
+      club_name: document.getElementById('setClubName').value,
+      organization_name: document.getElementById('setClubName').value,
+      club_adviser: document.getElementById('setAdviser').value,
+      registration_enabled: document.getElementById('setRegEnabled').checked,
+      allow_student_positions: document.getElementById('setAllowPositions').checked
+    };
+
+    const res = await apiCall('/api/settings', 'POST', body);
+    alert(res.message);
+    if (res.success) initApp();
+  }
+
+  async function handleRestoreDB(e) {
+    e.preventDefault();
+    if (!confirm('CRITICAL WARNING: Restoring database will overwrite all current system data. Proceed?')) return;
+    const formData = new FormData();
+    formData.append('backup_file', document.getElementById('restoreFile').files[0]);
+
+    const res = await apiCall('/api/system/restore', 'POST', formData, true);
+    alert(res.message);
+    if (res.success) window.location.reload();
+  }
+
+  // Kickstart Web Application Initialization
+  window.onload = initApp;
+</script>
+</body>
+</html>
+  `);
 });
 
-// Root Route Redirect
-app.get('/', (req, res) => {
-    res.redirect('/login');
-});
-
-// ==========================================
-// 15. START SERVER
-// ==========================================
+// Start Express Server Listener
 app.listen(PORT, () => {
-    console.log(`============================================================`);
-    console.log(` STUDENT CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM RUNNING `);
-    console.log(` PORT: ${PORT}`);
-    console.log(` ADMIN LOGIN: http://localhost:${PORT}/login`);
-    console.log(` PUBLIC STUDENT REGISTRATION: http://localhost:${PORT}/register`);
-    console.log(`============================================================`);
+  console.log(`
+====================================================================
+ SCHOOL STUDENT CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM RUNNING
+====================================================================
+ [Local Server]     : http://localhost:${PORT}
+ [Public Reg Link]  : http://localhost:${PORT}/register
+ [Scanner Portal]   : http://localhost:${PORT} (Login -> Scanner)
+====================================================================
+ Default Credentials:
+  - Admin   : username: admin   | password: Admin@123
+  - Scanner : username: scanner | password: Scanner@123
+====================================================================
+  `);
 });
