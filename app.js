@@ -1,3 +1,8 @@
+/**
+ * SCHOOL STUDENT CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM
+ * Monolithic Express + Better-SQLite3 Application
+ */
+
 const express = require('express');
 const session = require('express-session');
 const Database = require('better-sqlite3');
@@ -11,13 +16,20 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Setup directories
+// Directory Initialization
 const uploadsDir = path.join(__dirname, 'uploads');
 const backupsDir = path.join(__dirname, 'backups');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
 
-// Setup Storage for Photos
+// Default photo generation fallback
+const defaultAvatarPath = path.join(uploadsDir, 'default_avatar.png');
+if (!fs.existsSync(defaultAvatarPath)) {
+  const dummyPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  fs.writeFileSync(defaultAvatarPath, Buffer.from(dummyPngBase64, 'base64'));
+}
+
+// Multer Storage Configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
@@ -25,19 +37,30 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.round(Math.random() * 1E9)}${ext}`);
   }
 });
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image uploads are allowed'));
+    }
+  }
+});
 
 // Database Initialization
 const db = new Database(path.join(__dirname, 'club_attendance.db'));
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
-// Initialize Database Tables
+// Schema Creation
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL, -- ADMIN, SCANNER, STUDENT
+    role TEXT NOT NULL, -- 'ADMIN', 'SCANNER', 'STUDENT'
     student_id TEXT UNIQUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -49,7 +72,8 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL
+    name TEXT UNIQUE NOT NULL,
+    hierarchy_order INTEGER DEFAULT 99
   );
 
   CREATE TABLE IF NOT EXISTS students (
@@ -69,12 +93,12 @@ db.exec(`
     address TEXT,
     photo_path TEXT,
     date_joined TEXT,
-    membership_status TEXT DEFAULT 'Active', -- Active, Inactive, Suspended, Alumni, Resigned
+    membership_status TEXT DEFAULT 'Active', -- 'Active', 'Inactive', 'Suspended', 'Alumni'
     expiration_date TEXT,
     parent_name TEXT,
     parent_contact TEXT,
     qr_token TEXT UNIQUE NOT NULL,
-    qr_status TEXT DEFAULT 'Active',
+    qr_status TEXT DEFAULT 'Active', -- 'Active', 'Disabled'
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(position_id) REFERENCES positions(id)
   );
@@ -92,23 +116,16 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     description TEXT,
-    type TEXT NOT NULL,
+    type TEXT NOT NULL, -- 'Regular Meeting', 'Workshop', 'Assembly', 'Special Event'
     date TEXT NOT NULL,
     start_time TEXT NOT NULL,
     end_time TEXT NOT NULL,
     location TEXT,
     organizer TEXT,
-    target_audience TEXT DEFAULT 'ALL', -- ALL, OFFICERS, POSITIONS, SPECIFIC
-    target_positions TEXT, -- JSON array of position IDs if target_audience is POSITIONS
-    status TEXT DEFAULT 'Upcoming', -- Upcoming, Active, Completed, Cancelled
+    target_audience TEXT DEFAULT 'ALL', -- 'ALL', 'OFFICERS', 'POSITIONS'
+    target_positions TEXT, -- JSON Array of position IDs
+    status TEXT DEFAULT 'Upcoming', -- 'Upcoming', 'Active', 'Completed', 'Cancelled'
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS event_participants (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id INTEGER NOT NULL,
-    student_id TEXT NOT NULL,
-    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS attendance (
@@ -117,7 +134,7 @@ db.exec(`
     student_id TEXT NOT NULL,
     time_in TEXT,
     time_out TEXT,
-    status TEXT NOT NULL, -- PRESENT, LATE, ABSENT, EXCUSED
+    status TEXT NOT NULL, -- 'PRESENT', 'LATE', 'ABSENT', 'EXCUSED'
     recorded_by TEXT,
     date TEXT NOT NULL,
     FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
@@ -142,95 +159,99 @@ db.exec(`
   );
 `);
 
-// Seed Initial Settings & Admin
-function seedDefaults() {
+// Database Seeding Logic
+function seedDatabaseDefaults() {
   const settingsCount = db.prepare("SELECT COUNT(*) as count FROM settings").get().count;
   if (settingsCount === 0) {
     const insertSetting = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)");
     insertSetting.run('school_name', 'ABC National High School');
     insertSetting.run('school_logo', '');
     insertSetting.run('club_name', 'Computer Club');
-    insertSetting.run('org_name', 'Student Organization');
-    insertSetting.run('club_adviser', 'Mr. John Doe');
-    insertSetting.run('school_address', '123 School Lane, City');
-    insertSetting.run('contact_info', 'contact@school.edu');
+    insertSetting.run('org_name', 'Student Technology Association');
+    insertSetting.run('club_adviser', 'Mr. Alex Mercer');
+    insertSetting.run('school_address', '123 Academic Way, Innovation Campus');
+    insertSetting.run('contact_info', 'computerclub@school.edu');
     insertSetting.run('school_year', '2026-2027');
-    insertSetting.run('club_description', 'Official Club for Computer Science and Technology Enthusiasts');
+    insertSetting.run('club_description', 'Official Student Club for Programming, Cybersecurity, and Hardware Innovation.');
     insertSetting.run('late_threshold_mins', '15');
     insertSetting.run('min_participation_pct', '75');
     insertSetting.run('voice_enabled', 'true');
   }
 
-  // Seed Default Positions
   const posCount = db.prepare("SELECT COUNT(*) as count FROM positions").get().count;
   if (posCount === 0) {
     const defaultPositions = [
-      'President', 'Vice President', 'Secretary', 'Treasurer', 
-      'Auditor', 'Public Information Officer', 'Representative', 'Member'
+      { name: 'President', order: 1 },
+      { name: 'Vice President', order: 2 },
+      { name: 'Secretary', order: 3 },
+      { name: 'Treasurer', order: 4 },
+      { name: 'Auditor', order: 5 },
+      { name: 'Public Information Officer', order: 6 },
+      { name: 'Technical Lead', order: 7 },
+      { name: 'Representative', order: 8 },
+      { name: 'Member', order: 99 }
     ];
-    const insertPos = db.prepare("INSERT INTO positions (name) VALUES (?)");
-    defaultPositions.forEach(p => insertPos.run(p));
+    const insertPos = db.prepare("INSERT INTO positions (name, hierarchy_order) VALUES (?, ?)");
+    defaultPositions.forEach(p => insertPos.run(p.name, p.order));
   }
 
-  // Seed Default Users
-  const adminExists = db.prepare("SELECT * FROM users WHERE username = 'admin'").get();
-  if (!adminExists) {
+  const adminUser = db.prepare("SELECT * FROM users WHERE username = 'admin'").get();
+  if (!adminUser) {
     const hash = bcrypt.hashSync('admin123', 10);
     db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)").run('admin', hash, 'ADMIN');
   }
 
-  const scannerExists = db.prepare("SELECT * FROM users WHERE username = 'scanner'").get();
-  if (!scannerExists) {
+  const scannerUser = db.prepare("SELECT * FROM users WHERE username = 'scanner'").get();
+  if (!scannerUser) {
     const hash = bcrypt.hashSync('scanner123', 10);
     db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)").run('scanner', hash, 'SCANNER');
   }
 }
-seedDefaults();
+seedDatabaseDefaults();
 
-// Audit Logger Helper
+// Audit Logging Function
 function logAudit(user, action, details) {
   try {
     db.prepare("INSERT INTO audit_logs (user, action, details) VALUES (?, ?, ?)").run(user || 'System', action, details);
-  } catch (e) {
-    console.error("Audit log error:", e);
+  } catch (err) {
+    console.error("Audit log recording failed:", err);
   }
 }
 
-// Middleware
+// Middleware Configuration
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
 app.use(session({
-  secret: 'school-club-qr-secret-key-2026',
+  secret: 'school-club-qr-attendance-secret-key-2026',
   resave: false,
   saveUninitialized: false,
   cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
 }));
 
-// Auth Middlewares
+// Route Guard Middlewares
 function requireAuth(req, res, next) {
-  if (!req.session.user) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+  if (!req.session.user) return res.status(401).json({ error: 'Unauthorized. Session expired or missing.' });
   next();
 }
 
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.session.user || !roles.includes(req.session.user.role)) {
-      return res.status(403).json({ error: 'Forbidden. Access denied.' });
+      return res.status(403).json({ error: 'Forbidden. Access restricted to specific roles.' });
     }
     next();
   };
 }
 
-// ==========================================
-// API ROUTES
-// ==========================================
+// ============================================================================
+// API ENDPOINTS - AUTHENTICATION & PROFILE
+// ============================================================================
 
-// AUTHENTICATION
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
+  if (!username || !password) return res.status(400).json({ error: 'Username and password are required.' });
 
   const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
@@ -244,8 +265,8 @@ app.post('/api/auth/login', (req, res) => {
     student_id: user.student_id
   };
 
-  logAudit(user.username, 'LOGIN', 'User logged into system');
-  res.json({ success: true, role: user.role });
+  logAudit(user.username, 'LOGIN', `User logged in from IP ${req.ip}`);
+  res.json({ success: true, role: user.role, username: user.username });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -266,7 +287,7 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
   const username = req.session.user.username;
 
   if (!currentPassword || !newPassword || !confirmPassword) {
-    return res.status(400).json({ error: 'All fields are required.' });
+    return res.status(400).json({ error: 'All password fields are required.' });
   }
   if (newPassword !== confirmPassword) {
     return res.status(400).json({ error: 'New password and confirmation do not match.' });
@@ -277,23 +298,23 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
 
   const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
   if (!user || !bcrypt.compareSync(currentPassword, user.password_hash)) {
-    return res.status(400).json({ error: 'Current password is incorrect.' });
+    return res.status(400).json({ error: 'Current password provided is incorrect.' });
   }
 
   const hash = bcrypt.hashSync(newPassword, 10);
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, user.id);
 
-  logAudit(username, 'CHANGE_PASSWORD', 'User updated password');
+  logAudit(username, 'CHANGE_PASSWORD', 'User updated password successfully');
   res.json({ success: true, message: 'Password changed successfully.' });
 });
 
 app.post('/api/admin/reset-password', requireAuth, requireRole('ADMIN'), (req, res) => {
   const { targetUsername, newPassword } = req.body;
-  if (!targetUsername || !newPassword) return res.status(400).json({ error: 'Fields required.' });
+  if (!targetUsername || !newPassword) return res.status(400).json({ error: 'Target user and new password required.' });
   if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
 
   const target = db.prepare("SELECT * FROM users WHERE username = ?").get(targetUsername);
-  if (!target) return res.status(404).json({ error: 'Target user not found.' });
+  if (!target) return res.status(404).json({ error: 'Target account not found.' });
 
   const hash = bcrypt.hashSync(newPassword, 10);
   db.prepare("UPDATE users SET password_hash = ? WHERE username = ?").run(hash, targetUsername);
@@ -302,7 +323,10 @@ app.post('/api/admin/reset-password', requireAuth, requireRole('ADMIN'), (req, r
   res.json({ success: true, message: `Password reset successfully for ${targetUsername}` });
 });
 
-// SETTINGS
+// ============================================================================
+// API ENDPOINTS - SETTINGS
+// ============================================================================
+
 app.get('/api/settings', (req, res) => {
   const rows = db.prepare("SELECT * FROM settings").all();
   const settings = {};
@@ -312,43 +336,57 @@ app.get('/api/settings', (req, res) => {
 
 app.post('/api/settings', requireAuth, requireRole('ADMIN'), (req, res) => {
   const updateSetting = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-  Object.keys(req.body).forEach(key => {
-    updateSetting.run(key, String(req.body[key]));
+  
+  const transaction = db.transaction((data) => {
+    Object.keys(data).forEach(key => {
+      updateSetting.run(key, String(data[key]));
+    });
   });
-  logAudit(req.session.user.username, 'UPDATE_SETTINGS', 'Updated system settings');
-  res.json({ success: true, message: 'Settings saved successfully.' });
+
+  try {
+    transaction(req.body);
+    logAudit(req.session.user.username, 'UPDATE_SETTINGS', 'Updated system settings configuration');
+    res.json({ success: true, message: 'Settings saved successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save settings: ' + err.message });
+  }
 });
 
-// POSITIONS
+// ============================================================================
+// API ENDPOINTS - POSITIONS
+// ============================================================================
+
 app.get('/api/positions', (req, res) => {
-  const positions = db.prepare("SELECT * FROM positions ORDER BY name ASC").all();
+  const positions = db.prepare("SELECT * FROM positions ORDER BY hierarchy_order ASC, name ASC").all();
   res.json(positions);
 });
 
 app.post('/api/positions', requireAuth, requireRole('ADMIN'), (req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) return res.status(400).json({ error: 'Position name required.' });
+  const { name, hierarchy_order } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Position name is required.' });
 
   try {
-    const info = db.prepare("INSERT INTO positions (name) VALUES (?)").run(name.trim());
+    const order = hierarchy_order ? parseInt(hierarchy_order, 10) : 99;
+    const info = db.prepare("INSERT INTO positions (name, hierarchy_order) VALUES (?, ?)").run(name.trim(), order);
     logAudit(req.session.user.username, 'CREATE_POSITION', `Created position: ${name.trim()}`);
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
-    res.status(400).json({ error: 'Position already exists.' });
+    res.status(400).json({ error: 'Position name already exists or invalid data.' });
   }
 });
 
 app.put('/api/positions/:id', requireAuth, requireRole('ADMIN'), (req, res) => {
-  const { name } = req.body;
+  const { name, hierarchy_order } = req.body;
   const { id } = req.params;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Position name required.' });
 
   try {
-    db.prepare("UPDATE positions SET name = ? WHERE id = ?").run(name.trim(), id);
-    logAudit(req.session.user.username, 'UPDATE_POSITION', `Renamed position ID ${id} to ${name.trim()}`);
+    const order = hierarchy_order ? parseInt(hierarchy_order, 10) : 99;
+    db.prepare("UPDATE positions SET name = ?, hierarchy_order = ? WHERE id = ?").run(name.trim(), order, id);
+    logAudit(req.session.user.username, 'UPDATE_POSITION', `Updated position ID ${id} to ${name.trim()}`);
     res.json({ success: true });
   } catch (err) {
-    res.status(400).json({ error: 'Position name already exists or update failed.' });
+    res.status(400).json({ error: 'Position update failed or name conflict.' });
   }
 });
 
@@ -356,19 +394,21 @@ app.delete('/api/positions/:id', requireAuth, requireRole('ADMIN'), (req, res) =
   const { id } = req.params;
   const assigned = db.prepare("SELECT COUNT(*) as count FROM students WHERE position_id = ?").get(id).count;
   if (assigned > 0) {
-    return res.status(400).json({ error: `Cannot delete position. It is currently assigned to ${assigned} student(s).` });
+    return res.status(400).json({ error: `Cannot delete position. It is currently assigned to ${assigned} member(s).` });
   }
 
   db.prepare("DELETE FROM positions WHERE id = ?").run(id);
   logAudit(req.session.user.username, 'DELETE_POSITION', `Deleted position ID ${id}`);
   res.json({ success: true });
 });
+// ============================================================================
+// API ENDPOINTS - STUDENTS & MEMBERSHIP MANAGEMENT
+// ============================================================================
 
-// STUDENTS
 app.get('/api/students', requireAuth, (req, res) => {
   const { position, status, search } = req.query;
   let query = `
-    SELECT s.*, p.name as position_name 
+    SELECT s.*, p.name as position_name, p.hierarchy_order 
     FROM students s 
     JOIN positions p ON s.position_id = p.id 
     WHERE 1=1
@@ -388,35 +428,44 @@ app.get('/api/students', requireAuth, (req, res) => {
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
 
-  query += " ORDER BY s.full_name ASC";
+  query += " ORDER BY p.hierarchy_order ASC, s.full_name ASC";
   const students = db.prepare(query).all(...params);
   res.json(students);
 });
 
 app.get('/api/students/:student_id', requireAuth, (req, res) => {
   const student = db.prepare(`
-    SELECT s.*, p.name as position_name 
+    SELECT s.*, p.name as position_name, p.hierarchy_order
     FROM students s 
     JOIN positions p ON s.position_id = p.id 
     WHERE s.student_id = ?
   `).get(req.params.student_id);
 
-  if (!student) return res.status(404).json({ error: 'Student not found.' });
+  if (!student) return res.status(404).json({ error: 'Student record not found.' });
 
-  // Add Attendance Stats
   const totalEvents = db.prepare("SELECT COUNT(*) as count FROM events WHERE status = 'Completed' OR status = 'Active'").get().count;
-  const attendanceRecords = db.prepare("SELECT * FROM attendance WHERE student_id = ?").all(student.student_id);
-  
+  const attendanceRecords = db.prepare(`
+    SELECT a.*, e.name as event_name, e.date as event_date, e.type as event_type 
+    FROM attendance a 
+    JOIN events e ON a.event_id = e.id 
+    WHERE a.student_id = ? 
+    ORDER BY e.date DESC
+  `).all(student.student_id);
+
+  const officerHistory = db.prepare("SELECT * FROM officer_history WHERE student_id = ? ORDER BY id DESC").all(student.student_id);
+
   const presentCount = attendanceRecords.filter(a => a.status === 'PRESENT').length;
   const lateCount = attendanceRecords.filter(a => a.status === 'LATE').length;
   const excusedCount = attendanceRecords.filter(a => a.status === 'EXCUSED').length;
   const attendedCount = presentCount + lateCount + excusedCount;
   const absentCount = Math.max(0, totalEvents - attendedCount);
 
-  const pct = totalEvents > 0 ? Math.round((attendedCount / totalEvents) * 100) : 100;
+  const participationPct = totalEvents > 0 ? Math.round((attendedCount / totalEvents) * 100) : 100;
 
   res.json({
     ...student,
+    attendanceRecords,
+    officerHistory,
     stats: {
       totalEvents,
       attendedCount,
@@ -424,7 +473,7 @@ app.get('/api/students/:student_id', requireAuth, (req, res) => {
       lateCount,
       absentCount,
       excusedCount,
-      participationPct: pct
+      participationPct
     }
   });
 });
@@ -437,16 +486,15 @@ app.post('/api/students', requireAuth, requireRole('ADMIN'), upload.single('phot
   } = req.body;
 
   if (!student_id || !first_name || !last_name || !position_id || !club || !school_year) {
-    return res.status(400).json({ error: 'Required fields missing.' });
+    return res.status(400).json({ error: 'Required student fields are missing.' });
   }
 
-  // Check unique ID
   const existing = db.prepare("SELECT id FROM students WHERE student_id = ?").get(student_id);
   if (existing) {
-    return res.status(400).json({ error: 'Student ID already exists.' });
+    return res.status(400).json({ error: 'Student ID already registered.' });
   }
 
-  const full_name = `${first_name} ${middle_name ? middle_name + ' ' : ''}${last_name}`.trim();
+  const full_name = `${first_name} ${middle_name ? middle_name.trim() + ' ' : ''}${last_name}`.trim();
   const photo_path = req.file ? `/uploads/${req.file.filename}` : '/uploads/default_avatar.png';
   const qr_token = crypto.randomBytes(16).toString('hex');
 
@@ -458,33 +506,36 @@ app.post('/api/students', requireAuth, requireRole('ADMIN'), upload.single('phot
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  stmt.run(
-    student_id, first_name, middle_name || '', last_name, full_name, position_id, club,
-    school_year, gender || '', date_of_birth || '', contact_number || '', school_email || '', address || '',
-    photo_path, date_joined || new Date().toISOString().split('T')[0], membership_status || 'Active',
-    expiration_date || '', parent_name || '', parent_contact || '', qr_token
-  );
-
-  // Auto-create Student Portal Login User
-  const defaultPasswordHash = bcrypt.hashSync(student_id, 10);
   try {
+    stmt.run(
+      student_id.trim(), first_name.trim(), middle_name ? middle_name.trim() : '', last_name.trim(), full_name,
+      position_id, club.trim(), school_year.trim(), gender || '', date_of_birth || '',
+      contact_number || '', school_email || '', address || '', photo_path,
+      date_joined || new Date().toISOString().split('T')[0], membership_status || 'Active',
+      expiration_date || '', parent_name || '', parent_contact || '', qr_token
+    );
+
+    // Auto-generate student portal user
+    const defaultPasswordHash = bcrypt.hashSync(student_id.trim(), 10);
     db.prepare("INSERT INTO users (username, password_hash, role, student_id) VALUES (?, ?, ?, ?)")
-      .run(student_id, defaultPasswordHash, 'STUDENT', student_id);
-  } catch(e) {}
+      .run(student_id.trim(), defaultPasswordHash, 'STUDENT', student_id.trim());
 
-  // Log Officer History
-  const posObj = db.prepare("SELECT name FROM positions WHERE id = ?").get(position_id);
-  db.prepare("INSERT INTO officer_history (student_id, position_name, start_date) VALUES (?, ?, ?)")
-    .run(student_id, posObj ? posObj.name : 'Member', new Date().toISOString().split('T')[0]);
+    // Officer history tracking
+    const posObj = db.prepare("SELECT name FROM positions WHERE id = ?").get(position_id);
+    db.prepare("INSERT INTO officer_history (student_id, position_name, start_date) VALUES (?, ?, ?)")
+      .run(student_id.trim(), posObj ? posObj.name : 'Member', new Date().toISOString().split('T')[0]);
 
-  logAudit(req.session.user.username, 'REGISTER_STUDENT', `Registered student: ${full_name} (${student_id})`);
-  res.json({ success: true, message: 'Student registered successfully.' });
+    logAudit(req.session.user.username, 'REGISTER_STUDENT', `Registered student: ${full_name} (${student_id})`);
+    res.json({ success: true, message: 'Student member registered successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error during registration: ' + err.message });
+  }
 });
 
 app.put('/api/students/:student_id', requireAuth, requireRole('ADMIN'), upload.single('photo'), (req, res) => {
   const { student_id } = req.params;
   const current = db.prepare("SELECT * FROM students WHERE student_id = ?").get(student_id);
-  if (!current) return res.status(404).json({ error: 'Student not found.' });
+  if (!current) return res.status(404).json({ error: 'Student record not found.' });
 
   const {
     first_name, middle_name, last_name, position_id, club, school_year,
@@ -492,18 +543,13 @@ app.put('/api/students/:student_id', requireAuth, requireRole('ADMIN'), upload.s
     membership_status, expiration_date, parent_name, parent_contact
   } = req.body;
 
-  const full_name = `${first_name} ${middle_name ? middle_name + ' ' : ''}${last_name}`.trim();
+  const full_name = `${first_name} ${middle_name ? middle_name.trim() + ' ' : ''}${last_name}`.trim();
   const photo_path = req.file ? `/uploads/${req.file.filename}` : current.photo_path;
 
-  // Track position change
   if (current.position_id != position_id) {
-    const oldPos = db.prepare("SELECT name FROM positions WHERE id = ?").get(current.position_id);
     const newPos = db.prepare("SELECT name FROM positions WHERE id = ?").get(position_id);
-    
-    // Close previous record
     db.prepare("UPDATE officer_history SET end_date = ?, status = 'Former' WHERE student_id = ? AND status = 'Active'")
       .run(new Date().toISOString().split('T')[0], student_id);
-    // Add new record
     db.prepare("INSERT INTO officer_history (student_id, position_name, start_date) VALUES (?, ?, ?)")
       .run(student_id, newPos ? newPos.name : 'Member', new Date().toISOString().split('T')[0]);
   }
@@ -517,15 +563,19 @@ app.put('/api/students/:student_id', requireAuth, requireRole('ADMIN'), upload.s
     WHERE student_id = ?
   `);
 
-  stmt.run(
-    first_name, middle_name || '', last_name, full_name, position_id, club, school_year,
-    gender || '', date_of_birth || '', contact_number || '', school_email || '', address || '',
-    photo_path, date_joined, membership_status, expiration_date || '', parent_name || '',
-    parent_contact || '', student_id
-  );
+  try {
+    stmt.run(
+      first_name.trim(), middle_name ? middle_name.trim() : '', last_name.trim(), full_name, position_id,
+      club.trim(), school_year.trim(), gender || '', date_of_birth || '', contact_number || '',
+      school_email || '', address || '', photo_path, date_joined, membership_status,
+      expiration_date || '', parent_name || '', parent_contact || '', student_id
+    );
 
-  logAudit(req.session.user.username, 'UPDATE_STUDENT', `Updated student record for ${full_name}`);
-  res.json({ success: true, message: 'Student updated successfully.' });
+    logAudit(req.session.user.username, 'UPDATE_STUDENT', `Updated student details for ${full_name}`);
+    res.json({ success: true, message: 'Student updated successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update student: ' + err.message });
+  }
 });
 
 app.post('/api/students/:student_id/regenerate-qr', requireAuth, requireRole('ADMIN'), (req, res) => {
@@ -533,29 +583,38 @@ app.post('/api/students/:student_id/regenerate-qr', requireAuth, requireRole('AD
   const newToken = crypto.randomBytes(16).toString('hex');
 
   db.prepare("UPDATE students SET qr_token = ?, qr_status = 'Active' WHERE student_id = ?").run(newToken, student_id);
-  logAudit(req.session.user.username, 'REGENERATE_QR', `Regenerated QR code for student ID: ${student_id}`);
+  logAudit(req.session.user.username, 'REGENERATE_QR', `Regenerated QR token for student ID: ${student_id}`);
   res.json({ success: true, qr_token: newToken });
 });
 
 app.post('/api/students/:student_id/toggle-qr', requireAuth, requireRole('ADMIN'), (req, res) => {
   const { student_id } = req.params;
-  const { status } = req.body; // Active or Disabled
+  const { status } = req.body; // 'Active' or 'Disabled'
   
   db.prepare("UPDATE students SET qr_status = ? WHERE student_id = ?").run(status, student_id);
-  logAudit(req.session.user.username, 'TOGGLE_QR', `Set QR status to ${status} for student ID: ${student_id}`);
+  logAudit(req.session.user.username, 'TOGGLE_QR', `Updated QR status to ${status} for student ID: ${student_id}`);
   res.json({ success: true });
 });
 
-// EVENTS
+// ============================================================================
+// API ENDPOINTS - CLUB EVENTS
+// ============================================================================
+
 app.get('/api/events', requireAuth, (req, res) => {
   const events = db.prepare("SELECT * FROM events ORDER BY date DESC, start_time DESC").all();
   res.json(events);
 });
 
+app.get('/api/events/:id', requireAuth, (req, res) => {
+  const event = db.prepare("SELECT * FROM events WHERE id = ?").get(req.params.id);
+  if (!event) return res.status(404).json({ error: 'Event not found.' });
+  res.json(event);
+});
+
 app.post('/api/events', requireAuth, requireRole('ADMIN'), (req, res) => {
   const { name, description, type, date, start_time, end_time, location, organizer, target_audience, target_positions, status } = req.body;
   if (!name || !type || !date || !start_time || !end_time) {
-    return res.status(400).json({ error: 'Required fields missing.' });
+    return res.status(400).json({ error: 'Required event details missing.' });
   }
 
   const stmt = db.prepare(`
@@ -563,38 +622,56 @@ app.post('/api/events', requireAuth, requireRole('ADMIN'), (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const info = stmt.run(
-    name, description || '', type, date, start_time, end_time, location || '', organizer || '',
-    target_audience || 'ALL', JSON.stringify(target_positions || []), status || 'Upcoming'
-  );
+  try {
+    const info = stmt.run(
+      name.trim(), description || '', type, date, start_time, end_time, location || '', organizer || '',
+      target_audience || 'ALL', JSON.stringify(target_positions || []), status || 'Upcoming'
+    );
 
-  logAudit(req.session.user.username, 'CREATE_EVENT', `Created event: ${name}`);
-  res.json({ success: true, id: info.lastInsertRowid });
+    logAudit(req.session.user.username, 'CREATE_EVENT', `Created event: ${name.trim()}`);
+    res.json({ success: true, id: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create event: ' + err.message });
+  }
 });
 
 app.put('/api/events/:id', requireAuth, requireRole('ADMIN'), (req, res) => {
   const { name, description, type, date, start_time, end_time, location, organizer, target_audience, target_positions, status } = req.body;
   const { id } = req.params;
 
-  db.prepare(`
-    UPDATE events SET name = ?, description = ?, type = ?, date = ?, start_time = ?, end_time = ?,
-    location = ?, organizer = ?, target_audience = ?, target_positions = ?, status = ?
-    WHERE id = ?
-  `).run(
-    name, description, type, date, start_time, end_time, location, organizer,
-    target_audience, JSON.stringify(target_positions || []), status, id
-  );
+  try {
+    db.prepare(`
+      UPDATE events SET name = ?, description = ?, type = ?, date = ?, start_time = ?, end_time = ?,
+      location = ?, organizer = ?, target_audience = ?, target_positions = ?, status = ?
+      WHERE id = ?
+    `).run(
+      name.trim(), description || '', type, date, start_time, end_time, location || '', organizer || '',
+      target_audience, JSON.stringify(target_positions || []), status, id
+    );
 
-  logAudit(req.session.user.username, 'UPDATE_EVENT', `Updated event ID ${id}`);
+    logAudit(req.session.user.username, 'UPDATE_EVENT', `Updated event ID ${id}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update event: ' + err.message });
+  }
+});
+
+app.delete('/api/events/:id', requireAuth, requireRole('ADMIN'), (req, res) => {
+  const { id } = req.params;
+  db.prepare("DELETE FROM events WHERE id = ?").run(id);
+  logAudit(req.session.user.username, 'DELETE_EVENT', `Deleted event ID ${id}`);
   res.json({ success: true });
 });
 
-// ATTENDANCE & SCANNER API
+// ============================================================================
+// API ENDPOINTS - ATTENDANCE & SCANNING ENGINE
+// ============================================================================
+
 app.post('/api/attendance/scan', requireAuth, requireRole('ADMIN', 'SCANNER'), (req, res) => {
   const { event_id, qr_token, scan_type } = req.body; // scan_type = 'IN' or 'OUT'
 
   if (!event_id || !qr_token || !scan_type) {
-    return res.status(400).json({ error: 'Event ID, QR Token, and Scan Type required.' });
+    return res.status(400).json({ error: 'Event ID, QR Token, and Scan Type are required.' });
   }
 
   const event = db.prepare("SELECT * FROM events WHERE id = ?").get(event_id);
@@ -602,15 +679,15 @@ app.post('/api/attendance/scan', requireAuth, requireRole('ADMIN', 'SCANNER'), (
 
   const student = db.prepare("SELECT s.*, p.name as position_name FROM students s JOIN positions p ON s.position_id = p.id WHERE s.qr_token = ?").get(qr_token);
   if (!student) {
-    return res.status(400).json({ error: 'Invalid or unknown QR code.', code: 'INVALID_QR' });
+    return res.status(400).json({ error: 'Invalid or unknown QR code scanned.', code: 'INVALID_QR' });
   }
 
   if (student.qr_status !== 'Active') {
-    return res.status(400).json({ error: 'This QR Code is disabled.', code: 'DISABLED_QR' });
+    return res.status(400).json({ error: 'This student QR Code has been disabled.', code: 'DISABLED_QR' });
   }
 
   if (student.membership_status !== 'Active') {
-    return res.status(400).json({ error: `Student membership is ${student.membership_status}.`, code: 'INACTIVE_MEMBER' });
+    return res.status(400).json({ error: `Student membership status is ${student.membership_status}.`, code: 'INACTIVE_MEMBER' });
   }
 
   const todayStr = new Date().toISOString().split('T')[0];
@@ -627,16 +704,14 @@ app.post('/api/attendance/scan', requireAuth, requireRole('ADMIN', 'SCANNER'), (
       });
     }
 
-    // Determine status: Present vs Late
-    const lateMinsSetting = parseInt(db.prepare("SELECT value FROM settings WHERE key = 'late_threshold_mins'").get().value || '15', 10);
-    const eventStartTime = event.start_time; // HH:MM format
-    
+    const lateThreshold = parseInt(db.prepare("SELECT value FROM settings WHERE key = 'late_threshold_mins'").get()?.value || '15', 10);
     let status = 'PRESENT';
-    if (eventStartTime) {
-      const [eHours, eMins] = eventStartTime.split(':').map(Number);
+
+    if (event.start_time) {
+      const [eHours, eMins] = event.start_time.split(':').map(Number);
       const now = new Date();
       const eventStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), eHours, eMins);
-      const thresholdTime = new Date(eventStart.getTime() + lateMinsSetting * 60000);
+      const thresholdTime = new Date(eventStart.getTime() + lateThreshold * 60000);
 
       if (now > thresholdTime) {
         status = 'LATE';
@@ -651,7 +726,7 @@ app.post('/api/attendance/scan', requireAuth, requireRole('ADMIN', 'SCANNER'), (
         .run(event_id, student.student_id, currentTimeStr, status, req.session.user.username, todayStr);
     }
 
-    logAudit(req.session.user.username, 'SCAN_TIME_IN', `Recorded Time In for ${student.full_name} in event ${event.name}`);
+    logAudit(req.session.user.username, 'SCAN_TIME_IN', `Recorded Time In for ${student.full_name} (${student.student_id})`);
 
     return res.json({
       success: true,
@@ -668,7 +743,7 @@ app.post('/api/attendance/scan', requireAuth, requireRole('ADMIN', 'SCANNER'), (
     });
   } else if (scan_type === 'OUT') {
     if (!existing || !existing.time_in) {
-      return res.status(400).json({ error: 'Cannot record Time Out. Student has no Time In record for this event.', code: 'NO_TIME_IN' });
+      return res.status(400).json({ error: 'Cannot record Time Out without prior Time In.', code: 'NO_TIME_IN' });
     }
     if (existing.time_out) {
       return res.status(400).json({ error: 'Already recorded Time Out for this event.', code: 'DUPLICATE', student_name: student.full_name });
@@ -676,7 +751,7 @@ app.post('/api/attendance/scan', requireAuth, requireRole('ADMIN', 'SCANNER'), (
 
     db.prepare("UPDATE attendance SET time_out = ? WHERE id = ?").run(currentTimeStr, existing.id);
 
-    logAudit(req.session.user.username, 'SCAN_TIME_OUT', `Recorded Time Out for ${student.full_name} in event ${event.name}`);
+    logAudit(req.session.user.username, 'SCAN_TIME_OUT', `Recorded Time Out for ${student.full_name} (${student.student_id})`);
 
     return res.json({
       success: true,
@@ -711,14 +786,14 @@ app.get('/api/attendance/records', requireAuth, (req, res) => {
   if (status) { query += " AND a.status = ?"; params.push(status); }
   if (position_id) { query += " AND s.position_id = ?"; params.push(position_id); }
 
-  query += " ORDER BY a.id DESC LIMIT 200";
+  query += " ORDER BY a.id DESC LIMIT 300";
   const records = db.prepare(query).all(...params);
   res.json(records);
 });
 
 app.post('/api/attendance/excuse', requireAuth, requireRole('ADMIN'), (req, res) => {
   const { event_id, student_id, reason, notes } = req.body;
-  if (!event_id || !student_id || !reason) return res.status(400).json({ error: 'Fields required.' });
+  if (!event_id || !student_id || !reason) return res.status(400).json({ error: 'Event, student, and reason are required.' });
 
   const todayStr = new Date().toISOString().split('T')[0];
   let existing = db.prepare("SELECT * FROM attendance WHERE event_id = ? AND student_id = ?").get(event_id, student_id);
@@ -733,11 +808,14 @@ app.post('/api/attendance/excuse', requireAuth, requireRole('ADMIN'), (req, res)
   db.prepare("INSERT INTO excuses (event_id, student_id, reason, notes, approved_by) VALUES (?, ?, ?, ?, ?)")
     .run(event_id, student_id, reason, notes || '', req.session.user.username);
 
-  logAudit(req.session.user.username, 'MARK_EXCUSED', `Marked ${student_id} excused for event ID ${event_id}`);
+  logAudit(req.session.user.username, 'MARK_EXCUSED', `Excused student ${student_id} for event ID ${event_id}`);
   res.json({ success: true });
 });
 
-// REPORTS & ANALYTICS
+// ============================================================================
+// API ENDPOINTS - ANALYTICS, REPORTS & SYSTEM ADMIN
+// ============================================================================
+
 app.get('/api/analytics/dashboard', requireAuth, (req, res) => {
   const totalMembers = db.prepare("SELECT COUNT(*) as count FROM students").get().count;
   const activeMembers = db.prepare("SELECT COUNT(*) as count FROM students WHERE membership_status = 'Active'").get().count;
@@ -755,12 +833,12 @@ app.get('/api/analytics/dashboard', requireAuth, (req, res) => {
   const activeEvent = db.prepare("SELECT * FROM events WHERE status = 'Active' ORDER BY id DESC LIMIT 1").get() || null;
   const upcomingEvents = db.prepare("SELECT * FROM events WHERE status = 'Upcoming' ORDER BY date ASC LIMIT 5").all();
 
-  // Position breakdown
   const positionStats = db.prepare(`
     SELECT p.name, COUNT(s.id) as count 
     FROM positions p 
     LEFT JOIN students s ON s.position_id = p.id 
     GROUP BY p.id
+    ORDER BY p.hierarchy_order ASC
   `).all();
 
   res.json({
@@ -802,9 +880,8 @@ app.get('/api/reports/participation', requireAuth, (req, res) => {
   res.json(report);
 });
 
-// AUDIT LOGS & BACKUP
 app.get('/api/admin/audit-logs', requireAuth, requireRole('ADMIN'), (req, res) => {
-  const logs = db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200").all();
+  const logs = db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 250").all();
   res.json(logs);
 });
 
@@ -813,16 +890,15 @@ app.get('/api/admin/backup', requireAuth, requireRole('ADMIN'), (req, res) => {
   const backupPath = path.join(backupsDir, backupFileName);
 
   db.backup(backupPath).then(() => {
-    logAudit(req.session.user.username, 'CREATE_BACKUP', `Created database backup: ${backupFileName}`);
+    logAudit(req.session.user.username, 'CREATE_BACKUP', `Database backup created: ${backupFileName}`);
     res.download(backupPath);
   }).catch(err => {
-    res.status(500).json({ error: 'Backup failed: ' + err.message });
+    res.status(500).json({ error: 'Database backup failed: ' + err.message });
   });
 });
-
-// ==========================================
-// FRONTEND MONOLITH HTML RESPONSES
-// ==========================================
+// ============================================================================
+// SINGLE-PAGE FRONTEND INTEGRATED ENGINE
+// ============================================================================
 
 const CLIENT_APP_HTML = `
 <!DOCTYPE html>
@@ -830,7 +906,7 @@ const CLIENT_APP_HTML = `
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>School Student Club QR Code Attendance System</title>
+  <title>School Student Club QR Attendance System</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
   <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
@@ -846,7 +922,7 @@ const CLIENT_APP_HTML = `
     .sidebar .nav-link:hover, .sidebar .nav-link.active { background-color: #1e293b; color: #fff; }
     .card-stat { border: none; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
     
-    /* Printable ID Card CSS */
+    /* Printable ID Card Standard CSS Grid */
     .id-card-grid {
       display: grid;
       grid-template-columns: repeat(2, 3.375in);
@@ -889,8 +965,11 @@ const CLIENT_APP_HTML = `
 <body>
 
 <div id="app">
-  <!-- Dynamic Routing Rendered by JS -->
+  <!-- Dynamic JS SPA Mount Point -->
 </div>
+
+<!-- Dynamic Modals Container -->
+<div id="modal-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
@@ -898,23 +977,27 @@ const CLIENT_APP_HTML = `
   let systemSettings = {};
 
   async function initApp() {
-    const authRes = await fetch('/api/auth/me');
-    const authData = await authRes.json();
-    
-    const setRes = await fetch('/api/settings');
-    systemSettings = await setRes.json();
+    try {
+      const authRes = await fetch('/api/auth/me');
+      const authData = await authRes.json();
+      
+      const setRes = await fetch('/api/settings');
+      systemSettings = await setRes.json();
 
-    if (!authData.loggedIn) {
-      renderLogin();
-    } else {
-      currentUser = authData.user;
-      if (window.location.pathname === '/scanner') {
-        renderScannerPortal();
-      } else if (currentUser.role === 'STUDENT') {
-        renderStudentPortal();
+      if (!authData.loggedIn) {
+        renderLogin();
       } else {
-        renderAdminDashboard();
+        currentUser = authData.user;
+        if (window.location.pathname === '/scanner') {
+          renderScannerPortal();
+        } else if (currentUser.role === 'STUDENT') {
+          renderStudentPortal();
+        } else {
+          renderAdminDashboard();
+        }
       }
+    } catch (err) {
+      console.error("System Initialization Failure:", err);
     }
   }
 
@@ -998,7 +1081,7 @@ const CLIENT_APP_HTML = `
           </div>
         </div>
         <div class="flex-grow-1 p-4" id="admin-main-content">
-          <!-- Main Content Injected Here -->
+          <!-- Main Content Pane -->
         </div>
       </div>
     \`;
@@ -1007,21 +1090,26 @@ const CLIENT_APP_HTML = `
 
   async function loadAdminTab(tab) {
     const main = document.getElementById('admin-main-content');
+    
+    // Active navigation state highlight
+    document.querySelectorAll('.sidebar .nav-link').forEach(el => el.classList.remove('active'));
+    event?.target?.classList?.add('active');
+
     if (tab === 'dashboard') {
       const res = await fetch('/api/analytics/dashboard');
       const data = await res.json();
       main.innerHTML = \`
-        <h3 class="fw-bold mb-4">School Club Dashboard</h3>
+        <h3 class="fw-bold mb-4">School Club Overview</h3>
         <div class="row g-3 mb-4">
           <div class="col-md-3">
             <div class="card card-stat bg-primary text-white p-3">
-              <h6>Total Members</h6>
+              <h6>Total Registered Members</h6>
               <h2 class="fw-bold m-0">\${data.totalMembers}</h2>
             </div>
           </div>
           <div class="col-md-3">
             <div class="card card-stat bg-success text-white p-3">
-              <h6>Active Members</h6>
+              <h6>Active Status Members</h6>
               <h2 class="fw-bold m-0">\${data.activeMembers}</h2>
             </div>
           </div>
@@ -1042,18 +1130,18 @@ const CLIENT_APP_HTML = `
         <div class="row g-4">
           <div class="col-md-6">
             <div class="card p-3 shadow-sm">
-              <h5 class="fw-bold">Active Event</h5>
+              <h5 class="fw-bold mb-3">Active Event Scanner Status</h5>
               \${data.activeEvent ? \`
                 <div class="alert alert-success">
                   <h6 class="fw-bold m-0">\${data.activeEvent.name}</h6>
-                  <small>Date: \${data.activeEvent.date} | Time: \${data.activeEvent.start_time} - \${data.activeEvent.end_time}</small>
+                  <small>Date: \${data.activeEvent.date} | Schedule: \${data.activeEvent.start_time} - \${data.activeEvent.end_time}</small>
                 </div>
-              \` : '<p class="text-muted">No active event ongoing right now.</p>'}
+              \` : '<p class="text-muted">No active club event currently ongoing.</p>'}
             </div>
           </div>
           <div class="col-md-6">
             <div class="card p-3 shadow-sm">
-              <h5 class="fw-bold">Upcoming Club Events</h5>
+              <h5 class="fw-bold mb-3">Upcoming Club Schedules</h5>
               <ul class="list-group list-group-flush">
                 \${data.upcomingEvents.map(e => \`
                   <li class="list-group-item d-flex justify-content-between align-items-center">
@@ -1063,7 +1151,7 @@ const CLIENT_APP_HTML = `
                     </div>
                     <span class="badge bg-primary">\${e.status}</span>
                   </li>
-                \`).join('') || '<p class="text-muted">No upcoming events.</p>'}
+                \`).join('') || '<p class="text-muted">No upcoming events scheduled.</p>'}
               </ul>
             </div>
           </div>
@@ -1073,32 +1161,43 @@ const CLIENT_APP_HTML = `
       renderPositionsTab();
     } else if (tab === 'students') {
       renderStudentsTab();
-    } else if (tab === 'account') {
-      renderChangePasswordTab();
+    } else if (tab === 'events') {
+      renderEventsTab();
+    } else if (tab === 'attendance') {
+      renderAttendanceLogsTab();
     } else if (tab === 'printing') {
       renderPrintingTab();
+    } else if (tab === 'reports') {
+      renderReportsTab();
+    } else if (tab === 'settings') {
+      renderSettingsTab();
+    } else if (tab === 'account') {
+      renderChangePasswordTab();
     }
   }
-
+  // Position Management Tab UI
   async function renderPositionsTab() {
     const res = await fetch('/api/positions');
     const positions = await res.json();
     const main = document.getElementById('admin-main-content');
+
     main.innerHTML = \`
       <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">Customizable Position Manager</h3>
+        <h3 class="fw-bold">Customizable Position Hierarchy</h3>
         <button class="btn btn-primary" onclick="showAddPositionModal()"><i class="bi bi-plus-circle me-1"></i>Add New Position</button>
       </div>
       <div class="card p-3 shadow-sm">
-        <table class="table table-hover">
-          <thead><tr><th>ID</th><th>Position Name</th><th>Actions</th></tr></thead>
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr><th>Order</th><th>Position Name</th><th>Actions</th></tr>
+          </thead>
           <tbody>
             \${positions.map(p => \`
               <tr>
-                <td>\${p.id}</td>
+                <td><span class="badge bg-secondary">\${p.hierarchy_order}</span></td>
                 <td><strong>\${p.name}</strong></td>
                 <td>
-                  <button class="btn btn-sm btn-outline-secondary me-1" onclick="renamePosition(\${p.id}, '\${p.name}')">Rename</button>
+                  <button class="btn btn-sm btn-outline-primary me-1" onclick="editPosition(\${p.id}, '\${p.name}', \${p.hierarchy_order})">Edit</button>
                   <button class="btn btn-sm btn-outline-danger" onclick="deletePosition(\${p.id})">Delete</button>
                 </td>
               </tr>
@@ -1109,6 +1208,78 @@ const CLIENT_APP_HTML = `
     \`;
   }
 
+  function showAddPositionModal() {
+    const modalHtml = \`
+      <div class="modal fade" id="posModal" tabindex="-1">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title fw-bold">Add Position</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+              <div class="mb-3">
+                <label class="form-label">Position Name</label>
+                <input type="text" id="pos-name" class="form-control" required placeholder="e.g. Activity Coordinator">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Hierarchy Rank Order</label>
+                <input type="number" id="pos-order" class="form-control" value="10" placeholder="Lower number = higher rank">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-primary" onclick="submitPosition()">Save Position</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    \`;
+    document.getElementById('modal-container').innerHTML = modalHtml;
+    const modal = new bootstrap.Modal(document.getElementById('posModal'));
+    modal.show();
+  }
+
+  async function submitPosition() {
+    const name = document.getElementById('pos-name').value;
+    const hierarchy_order = document.getElementById('pos-order').value;
+
+    const res = await fetch('/api/positions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, hierarchy_order })
+    });
+
+    if (res.ok) {
+      bootstrap.Modal.getInstance(document.getElementById('posModal')).hide();
+      renderPositionsTab();
+    } else {
+      const data = await res.json();
+      alert('Error: ' + data.error);
+    }
+  }
+
+  async function editPosition(id, currentName, currentOrder) {
+    const newName = prompt("Enter updated position name:", currentName);
+    if (!newName) return;
+    const newOrder = prompt("Enter position rank order:", currentOrder);
+
+    const res = await fetch(\`/api/positions/\${id}\`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName, hierarchy_order: newOrder })
+    });
+
+    if (res.ok) renderPositionsTab();
+    else alert('Failed to update position');
+  }
+
+  async function deletePosition(id) {
+    if (!confirm("Are you sure you want to delete this position?")) return;
+    const res = await fetch(\`/api/positions/\${id}\`, { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok) renderPositionsTab();
+    else alert('Error: ' + data.error);
+  }
+
+  // Student Members Management Tab UI
   async function renderStudentsTab() {
     const res = await fetch('/api/students');
     const students = await res.json();
@@ -1118,16 +1289,16 @@ const CLIENT_APP_HTML = `
     const main = document.getElementById('admin-main-content');
     main.innerHTML = \`
       <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">Student Members Management</h3>
+        <h3 class="fw-bold">Student Membership Registry</h3>
         <button class="btn btn-primary" onclick="showStudentModal()"><i class="bi bi-person-plus me-1"></i>Register New Student</button>
       </div>
       <div class="card p-3 shadow-sm mb-3">
         <div class="row g-2">
-          <div class="col-md-4">
-            <input type="text" id="search-student" class="form-control" placeholder="Search by ID or Name..." onkeyup="filterStudents()">
+          <div class="col-md-5">
+            <input type="text" id="search-student" class="form-control" placeholder="Search by ID, Name, or Email..." onkeyup="filterStudentsTable()">
           </div>
           <div class="col-md-4">
-            <select id="filter-position" class="form-select" onchange="filterStudents()">
+            <select id="filter-position" class="form-select" onchange="filterStudentsTable()">
               <option value="">All Positions</option>
               \${positions.map(p => \`<option value="\${p.id}">\${p.name}</option>\`).join('')}
             </select>
@@ -1148,7 +1319,8 @@ const CLIENT_APP_HTML = `
                 <td><span class="badge bg-secondary">\${s.position_name}</span></td>
                 <td><span class="badge bg-\${s.membership_status === 'Active' ? 'success' : 'danger'}">\${s.membership_status}</span></td>
                 <td>
-                  <button class="btn btn-sm btn-info text-white" onclick="viewStudentQR('\${s.student_id}', '\${s.full_name}', '\${s.qr_token}')"><i class="bi bi-qr-code"></i> QR Token</button>
+                  <button class="btn btn-sm btn-info text-white me-1" onclick="viewStudentDetails('\${s.student_id}')"><i class="bi bi-eye"></i> View</button>
+                  <button class="btn btn-sm btn-outline-secondary me-1" onclick="showStudentModal('\${s.student_id}')"><i class="bi bi-pencil"></i> Edit</button>
                 </td>
               </tr>
             \`).join('')}
@@ -1158,6 +1330,346 @@ const CLIENT_APP_HTML = `
     \`;
   }
 
+  async function showStudentModal(studentId = null) {
+    const posRes = await fetch('/api/positions');
+    const positions = await posRes.json();
+    let student = null;
+
+    if (studentId) {
+      const res = await fetch(\`/api/students/\${studentId}\`);
+      student = await res.json();
+    }
+
+    const modalHtml = \`
+      <div class="modal fade" id="studentModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title fw-bold">\${student ? 'Edit Member Profile' : 'Register New Student Member'}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="student-form" enctype="multipart/form-data">
+              <div class="modal-body row g-3">
+                <div class="col-md-4">
+                  <label class="form-label">Student ID</label>
+                  <input type="text" name="student_id" class="form-control" required \${student ? 'readonly' : ''} value="\${student ? student.student_id : ''}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">First Name</label>
+                  <input type="text" name="first_name" class="form-control" required value="\${student ? student.first_name : ''}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Last Name</label>
+                  <input type="text" name="last_name" class="form-control" required value="\${student ? student.last_name : ''}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Middle Name</label>
+                  <input type="text" name="middle_name" class="form-control" value="\${student ? student.middle_name || '' : ''}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Position</label>
+                  <select name="position_id" class="form-select" required>
+                    \${positions.map(p => \`<option value="\${p.id}" \${student && student.position_id == p.id ? 'selected' : ''}>\${p.name}</option>\`).join('')}
+                  </select>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Club Name</label>
+                  <input type="text" name="club" class="form-control" required value="\${student ? student.club : systemSettings.club_name || 'Computer Club'}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">School Year</label>
+                  <input type="text" name="school_year" class="form-control" required value="\${student ? student.school_year : systemSettings.school_year || '2026-2027'}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">School Email</label>
+                  <input type="email" name="school_email" class="form-control" value="\${student ? student.school_email || '' : ''}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Contact Number</label>
+                  <input type="text" name="contact_number" class="form-control" value="\${student ? student.contact_number || '' : ''}">
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label">Membership Status</label>
+                  <select name="membership_status" class="form-select">
+                    <option value="Active" \${student && student.membership_status === 'Active' ? 'selected' : ''}>Active</option>
+                    <option value="Inactive" \${student && student.membership_status === 'Inactive' ? 'selected' : ''}>Inactive</option>
+                    <option value="Suspended" \${student && student.membership_status === 'Suspended' ? 'selected' : ''}>Suspended</option>
+                    <option value="Alumni" \${student && student.membership_status === 'Alumni' ? 'selected' : ''}>Alumni</option>
+                  </select>
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label">Profile Photo</label>
+                  <input type="file" name="photo" class="form-control" accept="image/*">
+                </div>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save Member</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    document.getElementById('modal-container').innerHTML = modalHtml;
+    const modal = new bootstrap.Modal(document.getElementById('studentModal'));
+    modal.show();
+
+    document.getElementById('student-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const url = student ? \`/api/students/\${student.student_id}\` : '/api/students';
+      const method = student ? 'PUT' : 'POST';
+
+      const res = await fetch(url, { method, body: formData });
+      if (res.ok) {
+        modal.hide();
+        renderStudentsTab();
+      } else {
+        const data = await res.json();
+        alert('Error: ' + data.error);
+      }
+    });
+  }
+
+  async function viewStudentDetails(studentId) {
+    const res = await fetch(\`/api/students/\${studentId}\`);
+    const student = await res.json();
+
+    const modalHtml = \`
+      <div class="modal fade" id="viewStudentModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title fw-bold">Student Profile & QR Token</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+              <div class="row align-items-center mb-4">
+                <div class="col-md-3 text-center">
+                  <img src="\${student.photo_path}" style="width: 120px; height: 120px; object-fit: cover; border-radius: 8px; border: 2px solid #cbd5e1;">
+                </div>
+                <div class="col-md-6">
+                  <h4 class="fw-bold m-0">\${student.full_name}</h4>
+                  <p class="text-primary fw-semibold m-0">\${student.position_name}</p>
+                  <p class="text-muted small">Student ID: \${student.student_id} | S.Y.: \${student.school_year}</p>
+                  <span class="badge bg-\${student.membership_status === 'Active' ? 'success' : 'danger'}">\${student.membership_status} Member</span>
+                </div>
+                <div class="col-md-3 text-center">
+                  <img src="https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=\${student.qr_token}" style="width: 100px; height: 100px;">
+                  <small class="d-block text-muted mt-1">Token Active</small>
+                </div>
+              </div>
+
+              <div class="row g-3">
+                <div class="col-md-3">
+                  <div class="p-2 border rounded text-center">
+                    <small class="text-muted d-block">Participation</small>
+                    <strong class="fs-5 text-primary">\${student.stats.participationPct}%</strong>
+                  </div>
+                </div>
+                <div class="col-md-3">
+                  <div class="p-2 border rounded text-center">
+                    <small class="text-muted d-block">Attended</small>
+                    <strong class="fs-5 text-success">\${student.stats.attendedCount}</strong>
+                  </div>
+                </div>
+                <div class="col-md-3">
+                  <div class="p-2 border rounded text-center">
+                    <small class="text-muted d-block">Late</small>
+                    <strong class="fs-5 text-warning">\${student.stats.lateCount}</strong>
+                  </div>
+                </div>
+                <div class="col-md-3">
+                  <div class="p-2 border rounded text-center">
+                    <small class="text-muted d-block">Excused</small>
+                    <strong class="fs-5 text-info">\${student.stats.excusedCount}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    document.getElementById('modal-container').innerHTML = modalHtml;
+    const modal = new bootstrap.Modal(document.getElementById('viewStudentModal'));
+    modal.show();
+  }
+
+  // Event Management Tab UI
+  async function renderEventsTab() {
+    const res = await fetch('/api/events');
+    const events = await res.json();
+    const main = document.getElementById('admin-main-content');
+
+    main.innerHTML = \`
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3 class="fw-bold">Club Activities & Meetings</h3>
+        <button class="btn btn-primary" onclick="showEventModal()"><i class="bi bi-calendar-plus me-1"></i>Create New Event</button>
+      </div>
+      <div class="card p-3 shadow-sm">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr><th>Event Name</th><th>Type</th><th>Date</th><th>Schedule</th><th>Location</th><th>Status</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            \${events.map(e => \`
+              <tr>
+                <td><strong>\${e.name}</strong></td>
+                <td><span class="badge bg-outline-secondary">\${e.type}</span></td>
+                <td>\${e.date}</td>
+                <td>\${e.start_time} - \${e.end_time}</td>
+                <td>\${e.location || 'Campus'}</td>
+                <td><span class="badge bg-\${e.status === 'Active' ? 'success' : e.status === 'Upcoming' ? 'primary' : 'secondary'}">\${e.status}</span></td>
+                <td>
+                  <button class="btn btn-sm btn-outline-primary me-1" onclick="showEventModal(\${e.id})">Edit</button>
+                  <button class="btn btn-sm btn-outline-danger" onclick="deleteEvent(\${e.id})">Delete</button>
+                </td>
+              </tr>
+            \`).join('')}
+          </tbody>
+        </table>
+      </div>
+    \`;
+  }
+
+  async function showEventModal(eventId = null) {
+    let eventData = null;
+    if (eventId) {
+      const res = await fetch(\`/api/events/\${eventId}\`);
+      eventData = await res.json();
+    }
+
+    const modalHtml = \`
+      <div class="modal fade" id="eventModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title fw-bold">\${eventData ? 'Edit Activity Schedule' : 'Create New Activity'}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <form id="event-form">
+              <div class="modal-body row g-3">
+                <div class="col-md-6">
+                  <label class="form-label">Event Title</label>
+                  <input type="text" id="ev-name" class="form-control" required value="\${eventData ? eventData.name : ''}">
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label">Event Type</label>
+                  <select id="ev-type" class="form-select">
+                    <option value="Regular Meeting" \${eventData && eventData.type === 'Regular Meeting' ? 'selected' : ''}>Regular Meeting</option>
+                    <option value="Workshop" \${eventData && eventData.type === 'Workshop' ? 'selected' : ''}>Workshop</option>
+                    <option value="Assembly" \${eventData && eventData.type === 'Assembly' ? 'selected' : ''}>Assembly</option>
+                    <option value="Special Event" \${eventData && eventData.type === 'Special Event' ? 'selected' : ''}>Special Event</option>
+                  </select>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Date</label>
+                  <input type="date" id="ev-date" class="form-control" required value="\${eventData ? eventData.date : new Date().toISOString().split('T')[0]}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Start Time</label>
+                  <input type="time" id="ev-start" class="form-control" required value="\${eventData ? eventData.start_time : '09:00'}">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">End Time</label>
+                  <input type="time" id="ev-end" class="form-control" required value="\${eventData ? eventData.end_time : '11:00'}">
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label">Location / Venue</label>
+                  <input type="text" id="ev-location" class="form-control" value="\${eventData ? eventData.location || '' : 'School AVR'}">
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label">Status</label>
+                  <select id="ev-status" class="form-select">
+                    <option value="Upcoming" \${eventData && eventData.status === 'Upcoming' ? 'selected' : ''}>Upcoming</option>
+                    <option value="Active" \${eventData && eventData.status === 'Active' ? 'selected' : ''}>Active (Open Scanning)</option>
+                    <option value="Completed" \${eventData && eventData.status === 'Completed' ? 'selected' : ''}>Completed</option>
+                    <option value="Cancelled" \${eventData && eventData.status === 'Cancelled' ? 'selected' : ''}>Cancelled</option>
+                  </select>
+                </div>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save Activity</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    document.getElementById('modal-container').innerHTML = modalHtml;
+    const modal = new bootstrap.Modal(document.getElementById('eventModal'));
+    modal.show();
+
+    document.getElementById('event-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        name: document.getElementById('ev-name').value,
+        type: document.getElementById('ev-type').value,
+        date: document.getElementById('ev-date').value,
+        start_time: document.getElementById('ev-start').value,
+        end_time: document.getElementById('ev-end').value,
+        location: document.getElementById('ev-location').value,
+        status: document.getElementById('ev-status').value
+      };
+
+      const url = eventData ? \`/api/events/\${eventData.id}\` : '/api/events';
+      const method = eventData ? 'PUT' : 'POST';
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        modal.hide();
+        renderEventsTab();
+      } else {
+        alert('Failed to save event schedule.');
+      }
+    });
+  }
+
+  async function deleteEvent(id) {
+    if (!confirm("Are you sure you want to remove this activity schedule?")) return;
+    const res = await fetch(\`/api/events/\${id}\`, { method: 'DELETE' });
+    if (res.ok) renderEventsTab();
+  }
+
+  // Attendance Logs Tab UI
+  async function renderAttendanceLogsTab() {
+    const res = await fetch('/api/attendance/records');
+    const records = await res.json();
+    const main = document.getElementById('admin-main-content');
+
+    main.innerHTML = \`
+      <h3 class="fw-bold mb-3">Live Attendance System Audit Logs</h3>
+      <div class="card p-3 shadow-sm">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr><th>Student Name</th><th>Position</th><th>Event Title</th><th>Time In</th><th>Time Out</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            \${records.map(r => \`
+              <tr>
+                <td><strong>\${r.full_name}</strong></td>
+                <td><span class="badge bg-secondary">\${r.position_name}</span></td>
+                <td>\${r.event_name}</td>
+                <td>\${r.time_in || '--'}</td>
+                <td>\${r.time_out || '--'}</td>
+                <td><span class="badge bg-\${r.status === 'PRESENT' ? 'success' : r.status === 'LATE' ? 'warning' : 'info'}">\${r.status}</span></td>
+              </tr>
+            \`).join('')}
+          </tbody>
+        </table>
+      </div>
+    \`;
+  }
+
+  // Printable A4 ID Layout Tab UI
   async function renderPrintingTab() {
     const res = await fetch('/api/students');
     const students = await res.json();
@@ -1167,9 +1679,9 @@ const CLIENT_APP_HTML = `
       <div class="d-flex justify-content-between align-items-center mb-3">
         <div>
           <h3 class="fw-bold m-0">A4 Bond Paper ID Layout Printing</h3>
-          <p class="text-muted small m-0">Automatically places 8 Student Club IDs per A4 Page for mass printing.</p>
+          <p class="text-muted small m-0">Arranges 8 Official Student Club IDs per A4 Sheet for batch printing.</p>
         </div>
-        <button class="btn btn-success" onclick="window.print()"><i class="bi bi-printer me-1"></i>Print ID Pages</button>
+        <button class="btn btn-success" onclick="window.print()"><i class="bi bi-printer me-1"></i>Print ID Batch</button>
       </div>
       <div id="printable-area">
         <div class="id-card-grid">
@@ -1201,7 +1713,7 @@ const CLIENT_APP_HTML = `
       </div>
     \`;
 
-    // Render QRs dynamically
+    // Render QR Images onto layout elements
     students.slice(0, 8).forEach(s => {
       const el = document.getElementById(\`qr-id-\${s.student_id}\`);
       if (el) {
@@ -1210,6 +1722,98 @@ const CLIENT_APP_HTML = `
     });
   }
 
+  // Reports & Analytics Tab UI
+  async function renderReportsTab() {
+    const res = await fetch('/api/reports/participation');
+    const report = await res.json();
+    const main = document.getElementById('admin-main-content');
+
+    main.innerHTML = \`
+      <h3 class="fw-bold mb-3">Participation & Attendance Analytics Report</h3>
+      <div class="card p-3 shadow-sm">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr><th>Student ID</th><th>Full Name</th><th>Position</th><th>Total Events</th><th>Attended</th><th>Lates</th><th>Participation Rate</th></tr>
+          </thead>
+          <tbody>
+            \${report.map(r => \`
+              <tr class="\${r.isLow ? 'table-warning' : ''}">
+                <td><strong>\${r.student_id}</strong></td>
+                <td>\${r.full_name}</td>
+                <td><span class="badge bg-secondary">\${r.position_name}</span></td>
+                <td>\${r.totalEvents}</td>
+                <td>\${r.attended}</td>
+                <td>\${r.lates}</td>
+                <td>
+                  <strong class="\${r.isLow ? 'text-danger' : 'text-success'}">\${r.pct}%</strong>
+                  \${r.isLow ? '<span class="badge bg-danger ms-1">Low</span>' : ''}
+                </td>
+              </tr>
+            \`).join('')}
+          </tbody>
+        </table>
+      </div>
+    \`;
+  }
+
+  // System Settings Tab UI
+  async function renderSettingsTab() {
+    const main = document.getElementById('admin-main-content');
+    main.innerHTML = \`
+      <h3 class="fw-bold mb-4">Club System Settings</h3>
+      <div class="card p-4 shadow-sm" style="max-width: 700px;">
+        <form id="settings-form">
+          <div class="mb-3">
+            <label class="form-label fw-bold">School Name</label>
+            <input type="text" id="set-school-name" class="form-control" value="\${systemSettings.school_name || ''}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">Club / Organization Name</label>
+            <input type="text" id="set-club-name" class="form-control" value="\${systemSettings.club_name || ''}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">Club Adviser</label>
+            <input type="text" id="set-adviser" class="form-control" value="\${systemSettings.club_adviser || ''}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">School Year</label>
+            <input type="text" id="set-sy" class="form-control" value="\${systemSettings.school_year || ''}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">Late Threshold (Minutes)</label>
+            <input type="number" id="set-late" class="form-control" value="\${systemSettings.late_threshold_mins || '15'}">
+          </div>
+          <button type="submit" class="btn btn-primary fw-bold">Save System Settings</button>
+        </form>
+      </div>
+    \`;
+
+    document.getElementById('settings-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        school_name: document.getElementById('set-school-name').value,
+        club_name: document.getElementById('set-club-name').value,
+        club_adviser: document.getElementById('set-adviser').value,
+        school_year: document.getElementById('set-sy').value,
+        late_threshold_mins: document.getElementById('set-late').value
+      };
+
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        alert('Settings updated successfully.');
+        initApp();
+      } else {
+        alert('Failed to update settings.');
+      }
+    });
+  }
+
+  // Account Password Management Tab UI
   function renderChangePasswordTab() {
     const main = document.getElementById('admin-main-content');
     main.innerHTML = \`
@@ -1261,6 +1865,7 @@ const CLIENT_APP_HTML = `
     });
   }
 
+  // Mobile QR Scanner Portal Interface
   function renderScannerPortal() {
     document.getElementById('app').innerHTML = \`
       <div class="container py-3" style="max-width: 600px;">
@@ -1284,7 +1889,7 @@ const CLIENT_APP_HTML = `
         </div>
 
         <div id="scan-result-card" class="card p-3 shadow-sm text-center d-none">
-          <!-- Live Scan Results Injected Here -->
+          <!-- Live Scan Display Card -->
         </div>
       </div>
     \`;
@@ -1306,7 +1911,7 @@ const CLIENT_APP_HTML = `
     const res = await fetch('/api/events');
     const events = await res.json();
     const select = document.getElementById('scanner-event-select');
-    select.innerHTML = events.map(e => \`<option value="\${e.id}">\${e.name} (\${e.date})</option>\`).join('') || '<option value="">No Active Events</option>';
+    select.innerHTML = events.map(e => \`<option value="\${e.id}">\${e.name} (\${e.date})</option>\`).join('') || '<option value="">No Active Events Scheduled</option>';
   }
 
   function startCameraScanner() {
@@ -1316,7 +1921,7 @@ const CLIENT_APP_HTML = `
       { fps: 10, qrbox: { width: 250, height: 250 } },
       onScanSuccess
     ).catch(err => {
-      console.error("Camera access denied or missing.", err);
+      console.error("Camera permissions denied or device missing camera.", err);
     });
   }
 
@@ -1379,15 +1984,16 @@ const CLIENT_APP_HTML = `
 </html>
 `;
 
-// Catch-All HTML Delivery
+// App Entry Endpoint Engine
 app.get('*', (req, res) => {
   res.send(CLIENT_APP_HTML);
 });
 
-// Start Node.js Application Server
+// Start Monolithic Express Application Server
 app.listen(PORT, () => {
   console.log(`=======================================================`);
   console.log(` SCHOOL CLUB QR ATTENDANCE SYSTEM RUNNING ON PORT: ${PORT}`);
-  console.log(` Local URL: http://localhost:${PORT}`);
+  console.log(` Local Admin Console: http://localhost:${PORT}`);
+  console.log(` Mobile QR Scanner:  http://localhost:${PORT}/scanner`);
   console.log(`=======================================================`);
 });
