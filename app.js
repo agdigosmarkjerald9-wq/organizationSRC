@@ -1,84 +1,99 @@
 /**
- * COMPLETE QR CODE SCHOOL ATTENDANCE MANAGEMENT SYSTEM
- * Express.js + SQLite3 + Embedded Native SPA Client (Admin, Scanner, Student)
+ * QR CODE SCHOOL ATTENDANCE MANAGEMENT SYSTEM
+ * Complete Single-File Solution (Server, Database, API, Client SPA, Printing, Scanning)
  */
 
 const express = require('express');
-const session = require('express-session');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const cookieParser = require('cookie-parser');
 const QRCode = require('qrcode');
-const crypto = require('crypto');
+const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Setup Uploads Directory
+const uploadDir = path.join(__dirname, 'public', 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Storage Configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, 'student_' + Date.now() + path.extname(file.originalname))
+});
+const upload = multer({ storage });
+
 // Middleware Setup
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cookieParser());
+app.use('/public', express.static(path.join(__dirname, 'public')));
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'qr_school_attendance_secret_key_2026',
+  secret: process.env.SESSION_SECRET || 'qr_school_secret_key_2026',
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 8 * 60 * 60 * 1000 } // 8 hours
+  cookie: { maxAge: 24 * 60 * 60 * 1000 }
 }));
 
 // Initialize SQLite Database
-const dbFile = path.join(__dirname, 'attendance.db');
-const db = new sqlite3.Database(dbFile);
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'attendance.db');
+const db = new sqlite3.Database(dbPath);
 
-// Database Initialization & Migrations
 db.serialize(() => {
-  // Users Table (Admin, Scanner User, Student)
+  // Users Table
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
     password TEXT,
-    role TEXT CHECK(role IN ('admin', 'scanner', 'student')),
-    student_id TEXT,
+    role TEXT,
+    full_name TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
   // Students Table
   db.run(`CREATE TABLE IF NOT EXISTS students (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id TEXT UNIQUE NOT NULL,
-    first_name TEXT NOT NULL,
+    student_id TEXT UNIQUE,
+    first_name TEXT,
     middle_name TEXT,
-    last_name TEXT NOT NULL,
-    full_name TEXT NOT NULL,
-    grade_level TEXT NOT NULL,
-    section TEXT NOT NULL,
+    last_name TEXT,
+    full_name TEXT,
+    grade_level TEXT,
+    section TEXT,
     gender TEXT,
     dob TEXT,
-    contact TEXT,
+    contact_number TEXT,
     email TEXT,
     address TEXT,
     guardian_name TEXT,
     guardian_contact TEXT,
-    profile_picture TEXT,
-    school_year TEXT DEFAULT '2026-2027',
+    photo TEXT,
+    school_year TEXT,
     status TEXT DEFAULT 'Active',
-    qr_token TEXT UNIQUE NOT NULL,
-    qr_active INTEGER DEFAULT 1,
+    qr_token TEXT UNIQUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
   // Events Table
   db.run(`CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
+    name TEXT,
     description TEXT,
-    event_date TEXT NOT NULL,
-    start_time TEXT NOT NULL,
-    end_time TEXT NOT NULL,
+    event_date TEXT,
+    start_time TEXT,
+    end_time TEXT,
     location TEXT,
     organizer TEXT,
-    attendance_type TEXT DEFAULT 'General',
+    attendance_type TEXT,
     status TEXT DEFAULT 'Upcoming',
-    allowed_grade TEXT DEFAULT 'All',
+    target_grade TEXT DEFAULT 'All',
     created_by TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
@@ -86,26 +101,27 @@ db.serialize(() => {
   // Attendance Records Table
   db.run(`CREATE TABLE IF NOT EXISTS attendance (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id TEXT NOT NULL,
-    event_id INTEGER NOT NULL,
-    scan_date TEXT NOT NULL,
+    student_id TEXT,
+    event_id INTEGER,
+    date TEXT,
     time_in TEXT,
     time_out TEXT,
-    status TEXT NOT NULL CHECK(status IN ('Present', 'Late', 'Absent', 'Excused')),
-    scanned_by TEXT DEFAULT 'Scanner Portal',
+    status TEXT,
+    scanned_by TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(student_id, event_id, scan_date)
+    FOREIGN KEY(student_id) REFERENCES students(student_id),
+    FOREIGN KEY(event_id) REFERENCES events(id)
   )`);
 
   // Excuses Table
   db.run(`CREATE TABLE IF NOT EXISTS excuses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id TEXT NOT NULL,
-    event_id INTEGER NOT NULL,
-    reason TEXT NOT NULL,
+    student_id TEXT,
+    event_id INTEGER,
+    date TEXT,
+    reason TEXT,
     notes TEXT,
     approved_by TEXT,
-    date TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
@@ -118,1470 +134,913 @@ db.serialize(() => {
   // Audit Logs Table
   db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    action TEXT NOT NULL,
+    user TEXT,
+    action TEXT,
     details TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  // Insert Default System Settings if not exists
-  const defaultSettings = [
-    ['school_name', 'Global Academy Institute of Technology'],
-    ['school_address', '123 Academic Way, Knowledge City'],
-    ['school_contact', '(02) 8800-1234 | info@globalacademy.edu'],
-    ['current_school_year', '2026-2027'],
-    ['late_threshold_mins', '15'],
-    ['low_attendance_threshold', '75'],
-    ['auto_backup_enabled', '1']
-  ];
-  defaultSettings.forEach(([k, v]) => {
-    db.run(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`, [k, v]);
+  // Seed Default Data
+  db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
+    if (row && row.count === 0) {
+      const hash = bcrypt.hashSync('admin123', 10);
+      db.run("INSERT INTO users (username, password, role, full_name) VALUES ('admin', ?, 'Administrator', 'System Administrator')", [hash]);
+      const scannerHash = bcrypt.hashSync('scanner123', 10);
+      db.run("INSERT INTO users (username, password, role, full_name) VALUES ('scanner', ?, 'Scanner', 'Scanner User')", [scannerHash]);
+    }
   });
 
-  // Seed Default Super Admin Account
-  const defaultPasswordHash = bcrypt.hashSync('admin123', 10);
-  db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`, 
-    ['admin', defaultPasswordHash, 'admin']
-  );
+  db.get("SELECT COUNT(*) as count FROM settings", (err, row) => {
+    if (row && row.count === 0) {
+      const defaults = [
+        ['school_name', 'St. Jude Academy'],
+        ['school_address', '123 Academic Way, Education City'],
+        ['school_year', '2026-2027'],
+        ['late_threshold', '07:30'],
+        ['min_attendance_pct', '75']
+      ];
+      defaults.forEach(([k, v]) => db.run("INSERT INTO settings (key, value) VALUES (?, ?)", [k, v]));
+    }
+  });
 
-  // Seed Default Scanner User
-  const defaultScannerHash = bcrypt.hashSync('scanner123', 10);
-  db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`, 
-    ['scanner', defaultScannerHash, 'scanner']
-  );
+  db.get("SELECT COUNT(*) as count FROM events", (err, row) => {
+    if (row && row.count === 0) {
+      const today = new Date().toISOString().split('T')[0];
+      db.run("INSERT INTO events (name, description, event_date, start_time, end_time, location, status) VALUES ('General Attendance', 'Daily General Attendance', ?, '07:00', '17:00', 'Main Campus', 'Active')", [today]);
+    }
+  });
 
-  // Seed Initial Default General Attendance Event
-  const today = new Date().toISOString().split('T')[0];
-  db.run(`INSERT OR IGNORE INTO events (id, name, description, event_date, start_time, end_time, location, organizer, status) 
-    VALUES (1, 'Daily General Attendance', 'Standard Daily School Check-In', ?, '07:30', '17:00', 'Main Campus Gate', 'Administration', 'Active')`, [today]);
+  db.get("SELECT COUNT(*) as count FROM students", (err, row) => {
+    if (row && row.count === 0) {
+      const sampleStudents = [
+        ['2026-001', 'Juan', 'A.', 'Dela Cruz', 'Juan A. Dela Cruz', 'Grade 11', 'STEM A', 'Male', '2008-05-15', '09123456781', 'juan@school.edu', 'Manila', 'Maria Dela Cruz', '09123456782', '2026-2027', crypto.randomBytes(16).toString('hex')],
+        ['2026-002', 'Maria', 'B.', 'Santos', 'Maria B. Santos', 'Grade 11', 'STEM A', 'Female', '2008-08-20', '09123456783', 'maria@school.edu', 'Quezon City', 'Jose Santos', '09123456784', '2026-2027', crypto.randomBytes(16).toString('hex')],
+        ['2026-003', 'Mark', 'C.', 'Reyes', 'Mark C. Reyes', 'Grade 12', 'ABM B', 'Male', '2007-02-10', '09123456785', 'mark@school.edu', 'Pasig', 'Elena Reyes', '09123456786', '2026-2027', crypto.randomBytes(16).toString('hex')]
+      ];
+      sampleStudents.forEach(s => {
+        db.run(`INSERT INTO students (student_id, first_name, middle_name, last_name, full_name, grade_level, section, gender, dob, contact_number, email, address, guardian_name, guardian_contact, school_year, qr_token) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, s);
+      });
+    }
+  });
 });
 
-// Helper Function for Audit Logging
-function logAudit(username, action, details = '') {
-  db.run(`INSERT INTO audit_logs (username, action, details) VALUES (?, ?, ?)`, [username || 'System', action, details]);
+// Audit Logging Utility
+function logAction(user, action, details) {
+  db.run("INSERT INTO audit_logs (user, action, details) VALUES (?, ?, ?)", [user || 'System', action, details]);
 }
 
-// Authentication Middleware
-function requireAuth(roles = []) {
-  return (req, res, next) => {
-    if (!req.session || !req.session.user) {
-      return res.status(401).json({ error: 'Unauthorized. Please log in.' });
-    }
-    if (roles.length > 0 && !roles.includes(req.session.user.role)) {
-      return res.status(403).json({ error: 'Forbidden. Access denied.' });
-    }
-    next();
-  };
+// Authentication Helpers
+function authRequired(req, res, next) {
+  if (req.session && req.session.user) return next();
+  res.status(401).json({ error: 'Unauthorized access. Please log in.' });
 }
 
-// ==========================================
-// API REST ENDPOINTS
-// ==========================================
+function adminOnly(req, res, next) {
+  if (req.session && req.session.user && req.session.user.role === 'Administrator') return next();
+  res.status(403).json({ error: 'Forbidden. Administrator privileges required.' });
+}
 
-// Auth Routes
+// ---------------------------------------------------------
+// API ROUTES
+// ---------------------------------------------------------
+
+// Auth APIs
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-
-  db.get(`SELECT * FROM users WHERE username = ?`, [username], (err, user) => {
-    if (err || !user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    if (bcrypt.compareSync(password, user.password)) {
-      req.session.user = { id: user.id, username: user.username, role: user.role, student_id: user.student_id };
-      logAudit(user.username, 'LOGIN', `User logged in with role: ${user.role}`);
-      return res.json({ success: true, role: user.role, username: user.username, student_id: user.student_id });
-    } else {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+  db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+    if (err || !user) return res.status(400).json({ error: 'Invalid username or password' });
+    if (!bcrypt.compareSync(password, user.password)) return res.status(400).json({ error: 'Invalid username or password' });
+    
+    req.session.user = { id: user.id, username: user.username, role: user.role, full_name: user.full_name };
+    logAction(user.username, 'Login', 'User logged into system');
+    res.json({ success: true, user: req.session.user });
   });
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  const username = req.session.user ? req.session.user.username : 'User';
-  logAudit(username, 'LOGOUT', 'User logged out');
+  if (req.session.user) logAction(req.session.user.username, 'Logout', 'User logged out');
   req.session.destroy();
   res.json({ success: true });
 });
 
 app.get('/api/auth/me', (req, res) => {
-  if (req.session && req.session.user) {
-    res.json({ authenticated: true, user: req.session.user });
-  } else {
-    res.json({ authenticated: false });
-  }
-});
-
-app.post('/api/auth/change-password', requireAuth(['admin', 'student', 'scanner']), (req, res) => {
-  const { currentPassword, newPassword } = req.body;
-  const userId = req.session.user.id;
-
-  db.get(`SELECT password FROM users WHERE id = ?`, [userId], (err, user) => {
-    if (err || !user) return res.status(500).json({ error: 'Database error' });
-    if (!bcrypt.compareSync(currentPassword, user.password)) {
-      return res.status(400).json({ error: 'Current password incorrect' });
-    }
-    const hashed = bcrypt.hashSync(newPassword, 10);
-    db.run(`UPDATE users SET password = ? WHERE id = ?`, [hashed, userId], (err2) => {
-      if (err2) return res.status(500).json({ error: 'Failed to update password' });
-      logAudit(req.session.user.username, 'CHANGE_PASSWORD', 'Password successfully changed');
-      res.json({ success: true, message: 'Password updated successfully' });
-    });
-  });
+  res.json({ user: req.session.user || null });
 });
 
 // Dashboard Analytics API
-app.get('/api/dashboard/stats', requireAuth(['admin']), (req, res) => {
-  const { eventId, grade, section, date } = req.query;
-  const filterDate = date || new Date().toISOString().split('T')[0];
-
-  const queries = {
-    totalStudents: `SELECT COUNT(*) as count FROM students WHERE status = 'Active'`,
-    totalEvents: `SELECT COUNT(*) as count FROM events`,
-    activeEvent: `SELECT * FROM events WHERE status = 'Active' ORDER BY id DESC LIMIT 1`
-  };
-
-  db.get(queries.totalStudents, [], (err, totalStuRow) => {
-    db.get(queries.totalEvents, [], (err, totalEvtRow) => {
-      db.get(queries.activeEvent, [], (err, activeEvt) => {
-        let attSql = `
-          SELECT a.status, COUNT(*) as count 
-          FROM attendance a
-          JOIN students s ON a.student_id = s.student_id
-          WHERE a.scan_date = ?
-        `;
-        let params = [filterDate];
-
-        if (eventId) { attSql += ` AND a.event_id = ?`; params.push(eventId); }
-        if (grade) { attSql += ` AND s.grade_level = ?`; params.push(grade); }
-        if (section) { attSql += ` AND s.section = ?`; params.push(section); }
-        attSql += ` GROUP BY a.status`;
-
-        db.all(attSql, params, (err, attRows) => {
-          let stats = { Present: 0, Late: 0, Absent: 0, Excused: 0 };
-          (attRows || []).forEach(r => stats[r.status] = r.count);
-
-          const totalScanned = stats.Present + stats.Late + stats.Excused;
-          const totalStudents = totalStuRow ? totalStuRow.count : 0;
-          const calculatedAbsent = Math.max(0, totalStudents - totalScanned);
-          const attPercentage = totalStudents > 0 ? (((stats.Present + stats.Late + stats.Excused) / totalStudents) * 100).toFixed(1) : 0;
-
-          // Fetch Recent Scans
-          db.all(`
-            SELECT a.*, s.full_name, s.grade_level, s.section, s.profile_picture, e.name as event_name
-            FROM attendance a
-            JOIN students s ON a.student_id = s.student_id
-            JOIN events e ON a.event_id = e.id
-            ORDER BY a.id DESC LIMIT 10
-          `, [], (err, recentScans) => {
-            res.json({
-              totalStudents,
-              presentToday: stats.Present,
-              lateToday: stats.Late,
-              absentToday: calculatedAbsent,
-              excusedToday: stats.Excused,
-              attendancePercentage: attPercentage,
-              totalEvents: totalEvtRow ? totalEvtRow.count : 0,
-              activeEvent: activeEvt || null,
-              recentScans: recentScans || []
-            });
-          });
-        });
-      });
-    });
-  });
-});
-
-// Analytics Chart Data Endpoint
-app.get('/api/dashboard/charts', requireAuth(['admin']), (req, res) => {
-  // By Grade Level
-  db.all(`
-    SELECT s.grade_level, COUNT(a.id) as count
-    FROM attendance a
-    JOIN students s ON a.student_id = s.student_id
-    WHERE a.status IN ('Present', 'Late')
-    GROUP BY s.grade_level
-  `, [], (err, gradeData) => {
-    // Trends over time
-    db.all(`
-      SELECT scan_date, status, COUNT(*) as count 
-      FROM attendance 
-      GROUP BY scan_date, status 
-      ORDER BY scan_date DESC LIMIT 30
-    `, [], (err, trendData) => {
+app.get('/api/admin/dashboard', authRequired, adminOnly, (req, res) => {
+  const today = new Date().toISOString().split('T')[0];
+  const query = `
+    SELECT 
+      (SELECT COUNT(*) FROM students WHERE status='Active') as total_students,
+      (SELECT COUNT(DISTINCT student_id) FROM attendance WHERE date=? AND status='PRESENT') as present_today,
+      (SELECT COUNT(DISTINCT student_id) FROM attendance WHERE date=? AND status='LATE') as late_today,
+      (SELECT COUNT(*) FROM events WHERE status='Active') as active_events,
+      (SELECT COUNT(*) FROM events) as total_events
+  `;
+  db.get(query, [today, today], (err, counts) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const absent_today = Math.max(0, counts.total_students - (counts.present_today + counts.late_today));
+    const att_pct = counts.total_students > 0 ? (((counts.present_today + counts.late_today) / counts.total_students) * 100).toFixed(1) : 0;
+    
+    db.all("SELECT a.*, s.full_name, s.grade_level, s.section, e.name as event_name FROM attendance a LEFT JOIN students s ON a.student_id = s.student_id LEFT JOIN events e ON a.event_id = e.id ORDER BY a.id DESC LIMIT 10", (err, recents) => {
       res.json({
-        byGrade: gradeData || [],
-        trends: trendData || []
+        summary: { ...counts, absent_today, attendance_pct: att_pct },
+        recentScans: recents || []
       });
     });
   });
 });
 
-// Student Management APIs
-app.get('/api/students', requireAuth(['admin', 'scanner']), (req, res) => {
-  const { search, grade, section, status } = req.query;
-  let sql = `SELECT * FROM students WHERE 1=1`;
-  let params = [];
+// Students API
+app.get('/api/students', authRequired, (req, res) => {
+  db.all("SELECT * FROM students ORDER BY id DESC", (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
 
-  if (search) {
-    sql += ` AND (student_id LIKE ? OR full_name LIKE ? OR first_name LIKE ? OR last_name LIKE ?)`;
-    const query = `%${search}%`;
-    params.push(query, query, query, query);
+app.post('/api/students', authRequired, adminOnly, upload.single('photo'), (req, res) => {
+  const data = req.body;
+  const photoPath = req.file ? `/public/uploads/${req.file.filename}` : '/public/uploads/default.png';
+  const fullName = `${data.first_name} ${data.middle_name ? data.middle_name + ' ' : ''}${data.last_name}`;
+  const qrToken = crypto.randomBytes(16).toString('hex');
+
+  const sql = `INSERT INTO students (student_id, first_name, middle_name, last_name, full_name, grade_level, section, gender, dob, contact_number, email, address, guardian_name, guardian_contact, photo, school_year, qr_token)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+  const params = [data.student_id, data.first_name, data.middle_name, data.last_name, fullName, data.grade_level, data.section, data.gender, data.dob, data.contact_number, data.email, data.address, data.guardian_name, data.guardian_contact, photoPath, data.school_year || '2026-2027', qrToken];
+
+  db.run(sql, params, function(err) {
+    if (err) return res.status(400).json({ error: 'Student ID or QR code already exists' });
+    logAction(req.session.user.username, 'Create Student', `Registered student ${fullName} (${data.student_id})`);
+    res.json({ success: true, id: this.lastID });
+  });
+});
+
+app.put('/api/students/:id', authRequired, adminOnly, upload.single('photo'), (req, res) => {
+  const data = req.body;
+  const fullName = `${data.first_name} ${data.middle_name ? data.middle_name + ' ' : ''}${data.last_name}`;
+  let sql = `UPDATE students SET first_name=?, middle_name=?, last_name=?, full_name=?, grade_level=?, section=?, gender=?, dob=?, contact_number=?, email=?, address=?, guardian_name=?, guardian_contact=?, school_year=?, status=?`;
+  let params = [data.first_name, data.middle_name, data.last_name, fullName, data.grade_level, data.section, data.gender, data.dob, data.contact_number, data.email, data.address, data.guardian_name, data.guardian_contact, data.school_year, data.status];
+  
+  if (req.file) {
+    sql += `, photo=?`;
+    params.push(`/public/uploads/${req.file.filename}`);
   }
-  if (grade) { sql += ` AND grade_level = ?`; params.push(grade); }
-  if (section) { sql += ` AND section = ?`; params.push(section); }
-  if (status) { sql += ` AND status = ?`; params.push(status); }
+  sql += ` WHERE id=?`;
+  params.push(req.params.id);
 
-  sql += ` ORDER BY full_name ASC`;
+  db.run(sql, params, function(err) {
+    if (err) return res.status(400).json({ error: err.message });
+    logAction(req.session.user.username, 'Update Student', `Updated student ID ${req.params.id}`);
+    res.json({ success: true });
+  });
+});
+
+app.post('/api/students/:id/regenerate-qr', authRequired, adminOnly, (req, res) => {
+  const newToken = crypto.randomBytes(16).toString('hex');
+  db.run("UPDATE students SET qr_token=? WHERE id=?", [newToken, req.params.id], function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    logAction(req.session.user.username, 'Regenerate QR', `Regenerated QR token for student database key ${req.params.id}`);
+    res.json({ success: true, qr_token: newToken });
+  });
+});
+
+// QR Image Generation API Endpoint
+app.get('/api/qr/:token', (req, res) => {
+  QRCode.toDataURL(req.params.token, { margin: 1, width: 250 }, (err, url) => {
+    if (err) return res.status(500).send('Error generating QR');
+    const base64Data = url.replace(/^data:image\/png;base64,/, "");
+    const img = Buffer.from(base64Data, 'base64');
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': img.length });
+    res.end(img);
+  });
+});
+
+// Events API
+app.get('/api/events', authRequired, (req, res) => {
+  db.all("SELECT * FROM events ORDER BY id DESC", (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/events', authRequired, adminOnly, (req, res) => {
+  const d = req.body;
+  const sql = `INSERT INTO events (name, description, event_date, start_time, end_time, location, organizer, attendance_type, status, target_grade, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`;
+  const params = [d.name, d.description, d.event_date, d.start_time, d.end_time, d.location, d.organizer, d.attendance_type, d.status || 'Active', d.target_grade || 'All', req.session.user.username];
+  db.run(sql, params, function(err) {
+    if (err) return res.status(400).json({ error: err.message });
+    logAction(req.session.user.username, 'Create Event', `Created event ${d.name}`);
+    res.json({ success: true, id: this.lastID });
+  });
+});
+
+// SCANNER CORE ROUTE (TIME IN / TIME OUT)
+app.post('/api/scan', (req, res) => {
+  const { qr_token, event_id, scan_mode } = req.body; // scan_mode = 'IN' or 'OUT'
+  const today = new Date().toISOString().split('T')[0];
+  const nowTime = new Date().toTimeString().split(' ')[0].substring(0, 5);
+
+  db.get("SELECT * FROM students WHERE qr_token = ? AND status = 'Active'", [qr_token], (err, student) => {
+    if (err || !student) {
+      return res.status(404).json({ success: false, code: 'INVALID_QR', message: 'Invalid or deactivated QR Code.' });
+    }
+
+    db.get("SELECT * FROM events WHERE id = ?", [event_id], (err, event) => {
+      if (err || !event) {
+        return res.status(404).json({ success: false, code: 'INVALID_EVENT', message: 'Selected event not active or valid.' });
+      }
+
+      // Check Target Grade restriction
+      if (event.target_grade !== 'All' && event.target_grade !== student.grade_level) {
+        return res.status(403).json({ success: false, code: 'NOT_ELIGIBLE', message: `Student is not eligible for this event.` });
+      }
+
+      // Check Existing Attendance
+      db.get("SELECT * FROM attendance WHERE student_id = ? AND event_id = ? AND date = ?", [student.student_id, event_id, today], (err, record) => {
+        if (scan_mode === 'IN') {
+          if (record && record.time_in) {
+            return res.json({ success: false, code: 'DUPLICATE_IN', message: `${student.full_name} is already recorded for Time In.`, student });
+          }
+
+          // Fetch late threshold
+          db.get("SELECT value FROM settings WHERE key='late_threshold'", (err, setting) => {
+            const threshold = (setting && setting.value) || event.start_time || '07:30';
+            const status = nowTime > threshold ? 'LATE' : 'PRESENT';
+
+            if (record) {
+              db.run("UPDATE attendance SET time_in = ?, status = ? WHERE id = ?", [nowTime, status, record.id]);
+            } else {
+              db.run("INSERT INTO attendance (student_id, event_id, date, time_in, status, scanned_by) VALUES (?,?,?,?,?,?)",
+                     [student.student_id, event_id, today, nowTime, status, 'Scanner Portal']);
+            }
+            logAction('Scanner', 'Time In', `${student.full_name} scanned IN for ${event.name}`);
+            res.json({ success: true, type: 'IN', status, student, time: nowTime, event_name: event.name });
+          });
+
+        } else if (scan_mode === 'OUT') {
+          if (!record) {
+            return res.json({ success: false, code: 'NO_IN_RECORD', message: `${student.full_name} has no Time In record yet.`, student });
+          }
+          if (record.time_out) {
+            return res.json({ success: false, code: 'DUPLICATE_OUT', message: `${student.full_name} is already recorded for Time Out.`, student });
+          }
+
+          db.run("UPDATE attendance SET time_out = ? WHERE id = ?", [nowTime, record.id]);
+          logAction('Scanner', 'Time Out', `${student.full_name} scanned OUT for ${event.name}`);
+          res.json({ success: true, type: 'OUT', status: record.status, student, time: nowTime, event_name: event.name });
+        }
+      });
+    });
+  });
+});
+
+// Attendance Records & Reports APIs
+app.get('/api/attendance', authRequired, (req, res) => {
+  const { date, event_id, grade_level, section } = req.query;
+  let sql = `SELECT a.*, s.full_name, s.grade_level, s.section, e.name as event_name 
+             FROM attendance a 
+             JOIN students s ON a.student_id = s.student_id 
+             JOIN events e ON a.event_id = e.id WHERE 1=1`;
+  let params = [];
+  if (date) { sql += ` AND a.date = ?`; params.push(date); }
+  if (event_id) { sql += ` AND a.event_id = ?`; params.push(event_id); }
+  if (grade_level) { sql += ` AND s.grade_level = ?`; params.push(grade_level); }
+  if (section) { sql += ` AND s.section = ?`; params.push(section); }
+  sql += ` ORDER BY a.id DESC`;
+
   db.all(sql, params, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
 });
 
-app.post('/api/students', requireAuth(['admin']), async (req, res) => {
-  const data = req.body;
-  if (!data.student_id || !data.first_name || !data.last_name || !data.grade_level || !data.section) {
-    return res.status(400).json({ error: 'Missing required student details.' });
-  }
-
-  const fullName = `${data.last_name}, ${data.first_name} ${data.middle_name || ''}`.trim();
-  const qrToken = 'QR-' + crypto.randomBytes(8).toString('hex').toUpperCase();
-
-  const sql = `INSERT INTO students 
-    (student_id, first_name, middle_name, last_name, full_name, grade_level, section, gender, dob, contact, email, address, guardian_name, guardian_contact, profile_picture, school_year, status, qr_token)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-
-  const params = [
-    data.student_id, data.first_name, data.middle_name, data.last_name, fullName,
-    data.grade_level, data.section, data.gender, data.dob, data.contact, data.email,
-    data.address, data.guardian_name, data.guardian_contact, data.profile_picture || '',
-    data.school_year || '2026-2027', data.status || 'Active', qrToken
-  ];
-
-  db.run(sql, params, function(err) {
-    if (err) {
-      if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Student ID or QR Code already exists.' });
-      return res.status(500).json({ error: err.message });
-    }
-    
-    // Auto Create Student Login Account
-    const defaultStudentPass = bcrypt.hashSync(data.student_id, 10);
-    db.run(`INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES (?, ?, 'student', ?)`, 
-      [data.student_id, defaultStudentPass, data.student_id]
-    );
-
-    logAudit(req.session.user.username, 'CREATE_STUDENT', `Created student: ${fullName} (${data.student_id})`);
-    res.json({ success: true, id: this.lastID, qr_token: qrToken });
-  });
-});
-
-app.put('/api/students/:id', requireAuth(['admin']), (req, res) => {
-  const data = req.body;
-  const fullName = `${data.last_name}, ${data.first_name} ${data.middle_name || ''}`.trim();
-
-  const sql = `UPDATE students SET 
-    first_name = ?, middle_name = ?, last_name = ?, full_name = ?, grade_level = ?, section = ?,
-    gender = ?, dob = ?, contact = ?, email = ?, address = ?, guardian_name = ?, guardian_contact = ?,
-    profile_picture = ?, school_year = ?, status = ? WHERE id = ?`;
-
-  const params = [
-    data.first_name, data.middle_name, data.last_name, fullName, data.grade_level, data.section,
-    data.gender, data.dob, data.contact, data.email, data.address, data.guardian_name,
-    data.guardian_contact, data.profile_picture, data.school_year, data.status, req.params.id
-  ];
-
-  db.run(sql, params, function(err) {
+// Settings API
+app.get('/api/settings', (req, res) => {
+  db.all("SELECT * FROM settings", (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    logAudit(req.session.user.username, 'UPDATE_STUDENT', `Updated student ID: ${req.params.id}`);
-    res.json({ success: true });
+    const obj = {};
+    rows.forEach(r => obj[r.key] = r.value);
+    res.json(obj);
   });
 });
 
-app.delete('/api/students/:id', requireAuth(['admin']), (req, res) => {
-  db.get(`SELECT student_id, full_name FROM students WHERE id = ?`, [req.params.id], (err, row) => {
-    if (row) {
-      db.run(`DELETE FROM students WHERE id = ?`, [req.params.id]);
-      db.run(`DELETE FROM users WHERE student_id = ?`, [row.student_id]);
-      logAudit(req.session.user.username, 'DELETE_STUDENT', `Deleted student: ${row.full_name} (${row.student_id})`);
-    }
-    res.json({ success: true });
-  });
-});
-
-// QR Code Actions Endpoint
-app.post('/api/students/:id/regenerate-qr', requireAuth(['admin']), (req, res) => {
-  const newQrToken = 'QR-' + crypto.randomBytes(8).toString('hex').toUpperCase();
-  db.run(`UPDATE students SET qr_token = ?, qr_active = 1 WHERE id = ?`, [newQrToken, req.params.id], function(err) {
-    if (err) return res.status(500).json({ error: 'Failed to regenerate QR code' });
-    logAudit(req.session.user.username, 'REGENERATE_QR', `Regenerated QR for student ID: ${req.params.id}`);
-    res.json({ success: true, qr_token: newQrToken });
-  });
-});
-
-app.post('/api/students/:id/toggle-qr', requireAuth(['admin']), (req, res) => {
-  const { active } = req.body;
-  db.run(`UPDATE students SET qr_active = ? WHERE id = ?`, [active ? 1 : 0, req.params.id], function(err) {
-    if (err) return res.status(500).json({ error: 'Failed to update QR state' });
-    logAudit(req.session.user.username, 'TOGGLE_QR', `Set QR active = ${active} for student ID: ${req.params.id}`);
-    res.json({ success: true });
-  });
-});
-
-// Generate Rendered Data URL QR Code
-app.get('/api/qr/render/:token', async (req, res) => {
-  try {
-    const url = await QRCode.toDataURL(req.params.token, { margin: 1, width: 250 });
-    const img = Buffer.from(url.split(',')[1], 'base64');
-    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': img.length });
-    res.end(img);
-  } catch (err) {
-    res.status(500).send('Error generating QR code');
-  }
-});
-
-// Event Management APIs
-app.get('/api/events', requireAuth(['admin', 'scanner']), (req, res) => {
-  db.all(`SELECT * FROM events ORDER BY id DESC`, [], (err, rows) => {
-    res.json(rows || []);
-  });
-});
-
-app.post('/api/events', requireAuth(['admin']), (req, res) => {
-  const { name, description, event_date, start_time, end_time, location, organizer, attendance_type, status, allowed_grade } = req.body;
-  
-  const sql = `INSERT INTO events (name, description, event_date, start_time, end_time, location, organizer, attendance_type, status, allowed_grade, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-  const params = [name, description, event_date, start_time, end_time, location, organizer, attendance_type || 'General', status || 'Upcoming', allowed_grade || 'All', req.session.user.username];
-
-  db.run(sql, params, function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    logAudit(req.session.user.username, 'CREATE_EVENT', `Created event: ${name}`);
-    res.json({ success: true, id: this.lastID });
-  });
-});
-
-app.put('/api/events/:id', requireAuth(['admin']), (req, res) => {
-  const { name, description, event_date, start_time, end_time, location, organizer, attendance_type, status, allowed_grade } = req.body;
-  const sql = `UPDATE events SET name=?, description=?, event_date=?, start_time=?, end_time=?, location=?, organizer=?, attendance_type=?, status=?, allowed_grade=? WHERE id=?`;
-  db.run(sql, [name, description, event_date, start_time, end_time, location, organizer, attendance_type, status, allowed_grade, req.params.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    logAudit(req.session.user.username, 'UPDATE_EVENT', `Updated event ID: ${req.params.id}`);
-    res.json({ success: true });
-  });
-});
-
-app.delete('/api/events/:id', requireAuth(['admin']), (req, res) => {
-  db.run(`DELETE FROM events WHERE id = ?`, [req.params.id], (err) => {
-    logAudit(req.session.user.username, 'DELETE_EVENT', `Deleted event ID: ${req.params.id}`);
-    res.json({ success: true });
-  });
-});
-
-// ATTENDANCE SCANNER CORE ENGINE
-app.post('/api/attendance/scan', requireAuth(['admin', 'scanner']), (req, res) => {
-  const { qr_token, event_id, scan_type } = req.body; // scan_type = 'IN' or 'OUT'
-  const today = new Date().toISOString().split('T')[0];
-  const nowTime = new Date().toLocaleTimeString('en-US', { hour12: false });
-
-  if (!qr_token || !event_id) {
-    return res.status(400).json({ status: 'INVALID', message: 'Missing scan payload.' });
-  }
-
-  // 1. Validate Student QR Token
-  db.get(`SELECT * FROM students WHERE qr_token = ?`, [qr_token], (err, student) => {
-    if (err || !student) {
-      return res.status(404).json({ status: 'INVALID', message: 'Invalid QR Code. Student record not found.' });
-    }
-
-    if (student.qr_active !== 1) {
-      return res.status(403).json({ status: 'DISABLED', message: 'This QR Code has been disabled.' });
-    }
-
-    if (student.status !== 'Active') {
-      return res.status(403).json({ status: 'INACTIVE', message: 'Student account is inactive.' });
-    }
-
-    // 2. Validate Event Restrictions
-    db.get(`SELECT * FROM events WHERE id = ?`, [event_id], (err, event) => {
-      if (err || !event) {
-        return res.status(404).json({ status: 'INVALID_EVENT', message: 'Selected event not found.' });
-      }
-
-      if (event.allowed_grade !== 'All' && event.allowed_grade !== student.grade_level) {
-        return res.status(403).json({ status: 'NOT_ELIGIBLE', message: `Student Grade (${student.grade_level}) not eligible for this event (${event.allowed_grade} required).` });
-      }
-
-      // 3. Check Duplicate or Update Time Out
-      db.get(`SELECT * FROM attendance WHERE student_id = ? AND event_id = ? AND scan_date = ?`, 
-        [student.student_id, event_id, today], (err, record) => {
-        
-        if (scan_type === 'OUT') {
-          if (!record) {
-            return res.status(400).json({ status: 'NO_TIME_IN', message: 'Cannot Time Out without an active Time In record.' });
-          }
-          if (record.time_out) {
-            return res.status(409).json({ status: 'DUPLICATE', message: 'Time Out already recorded for this event.', student });
-          }
-          
-          db.run(`UPDATE attendance SET time_out = ? WHERE id = ?`, [nowTime, record.id], (err) => {
-            logAudit(req.session.user.username, 'TIME_OUT', `${student.full_name} timed out for event ${event.name}`);
-            return res.json({ status: 'SUCCESS_OUT', message: 'Time Out successfully recorded.', student, time_out: nowTime });
-          });
-        } else {
-          // TIME IN Logic
-          if (record) {
-            return res.json({ status: 'DUPLICATE', message: 'Attendance already recorded for this event.', student, record });
-          }
-
-          // Determine Present vs Late based on threshold
-          db.get(`SELECT value FROM settings WHERE key = 'late_threshold_mins'`, [], (err, setting) => {
-            const thresholdMins = parseInt(setting ? setting.value : '15', 10);
-            let attStatus = 'Present';
-
-            if (event.start_time) {
-              const [eHour, eMin] = event.start_time.split(':').map(Number);
-              const eventStart = new Date();
-              eventStart.setHours(eHour, eMin, 0);
-
-              const lateCutoff = new Date(eventStart.getTime() + thresholdMins * 60000);
-              const now = new Date();
-
-              if (now > lateCutoff) {
-                attStatus = 'Late';
-              }
-            }
-
-            db.run(`INSERT INTO attendance (student_id, event_id, scan_date, time_in, status, scanned_by) VALUES (?, ?, ?, ?, ?, ?)`,
-              [student.student_id, event_id, today, nowTime, attStatus, req.session.user.username],
-              function(err) {
-                if (err) return res.status(500).json({ status: 'ERROR', message: 'Failed to record attendance.' });
-                
-                logAudit(req.session.user.username, 'ATTENDANCE_IN', `${student.full_name} scanned IN as ${attStatus}`);
-                return res.json({ 
-                  status: 'SUCCESS_IN', 
-                  message: `Attendance recorded: ${attStatus}`, 
-                  student, 
-                  att_status: attStatus,
-                  time_in: nowTime 
-                });
-              }
-            );
-          });
-        }
-      });
-    });
-  });
-});
-
-// Get Detailed Attendance Records with Filters
-app.get('/api/attendance/records', requireAuth(['admin']), (req, res) => {
-  const { search, grade, section, event_id, date, status } = req.query;
-
-  let sql = `
-    SELECT a.*, s.full_name, s.grade_level, s.section, e.name as event_name
-    FROM attendance a
-    JOIN students s ON a.student_id = s.student_id
-    JOIN events e ON a.event_id = e.id
-    WHERE 1=1
-  `;
-  let params = [];
-
-  if (search) {
-    sql += ` AND (s.student_id LIKE ? OR s.full_name LIKE ?)`;
-    params.push(`%${search}%`, `%${search}%`);
-  }
-  if (grade) { sql += ` AND s.grade_level = ?`; params.push(grade); }
-  if (section) { sql += ` AND s.section = ?`; params.push(section); }
-  if (event_id) { sql += ` AND a.event_id = ?`; params.push(event_id); }
-  if (date) { sql += ` AND a.scan_date = ?`; params.push(date); }
-  if (status) { sql += ` AND a.status = ?`; params.push(status); }
-
-  sql += ` ORDER BY a.id DESC`;
-
-  db.all(sql, params, (err, rows) => {
-    res.json(rows || []);
-  });
-});
-
-app.put('/api/attendance/:id', requireAuth(['admin']), (req, res) => {
-  const { status, time_in, time_out } = req.body;
-  db.run(`UPDATE attendance SET status = ?, time_in = ?, time_out = ? WHERE id = ?`, 
-    [status, time_in, time_out, req.params.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    logAudit(req.session.user.username, 'EDIT_ATTENDANCE', `Updated record ID: ${req.params.id}`);
-    res.json({ success: true });
-  });
-});
-
-app.delete('/api/attendance/:id', requireAuth(['admin']), (req, res) => {
-  db.run(`DELETE FROM attendance WHERE id = ?`, [req.params.id], (err) => {
-    logAudit(req.session.user.username, 'DELETE_ATTENDANCE', `Deleted record ID: ${req.params.id}`);
-    res.json({ success: true });
-  });
-});
-
-// Excuses Management API
-app.post('/api/excuses', requireAuth(['admin']), (req, res) => {
-  const { student_id, event_id, reason, notes, date } = req.body;
-  db.run(`INSERT INTO excuses (student_id, event_id, reason, notes, approved_by, date) VALUES (?, ?, ?, ?, ?, ?)`,
-    [student_id, event_id, reason, notes, req.session.user.username, date], function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-
-      // Upsert Attendance as Excused
-      db.run(`INSERT INTO attendance (student_id, event_id, scan_date, status, scanned_by) 
-        VALUES (?, ?, ?, 'Excused', ?)
-        ON CONFLICT(student_id, event_id, scan_date) DO UPDATE SET status = 'Excused'`,
-        [student_id, event_id, date, req.session.user.username], (err2) => {
-          logAudit(req.session.user.username, 'ADD_EXCUSE', `Added excuse for student ${student_id}`);
-          res.json({ success: true });
-        }
-      );
-    }
-  );
-});
-
-// Reports Generation & Analytics API
-app.get('/api/reports/summary', requireAuth(['admin']), (req, res) => {
-  const { type, startDate, endDate, grade, section, event_id } = req.query;
-
-  let sql = `
-    SELECT 
-      a.scan_date, a.status, COUNT(*) as count,
-      s.grade_level, s.section, e.name as event_name
-    FROM attendance a
-    JOIN students s ON a.student_id = s.student_id
-    JOIN events e ON a.event_id = e.id
-    WHERE 1=1
-  `;
-  let params = [];
-
-  if (startDate && endDate) {
-    sql += ` AND a.scan_date BETWEEN ? AND ?`;
-    params.push(startDate, endDate);
-  }
-  if (grade) { sql += ` AND s.grade_level = ?`; params.push(grade); }
-  if (section) { sql += ` AND s.section = ?`; params.push(section); }
-  if (event_id) { sql += ` AND a.event_id = ?`; params.push(event_id); }
-
-  sql += ` GROUP BY a.scan_date, a.status ORDER BY a.scan_date DESC`;
-
-  db.all(sql, params, (err, rows) => {
-    res.json(rows || []);
-  });
-});
-
-// Low Attendance & Frequent Late Identification
-app.get('/api/reports/insights', requireAuth(['admin']), (req, res) => {
-  db.get(`SELECT value FROM settings WHERE key = 'low_attendance_threshold'`, [], (err, setting) => {
-    const minPct = parseFloat(setting ? setting.value : '75');
-
-    db.all(`
-      SELECT 
-        s.student_id, s.full_name, s.grade_level, s.section,
-        COUNT(CASE WHEN a.status IN ('Present', 'Late', 'Excused') THEN 1 END) as attended,
-        COUNT(a.id) as total_events,
-        COUNT(CASE WHEN a.status = 'Late' THEN 1 END) as late_count
-      FROM students s
-      LEFT JOIN attendance a ON s.student_id = a.student_id
-      WHERE s.status = 'Active'
-      GROUP BY s.student_id
-    `, [], (err, rows) => {
-      const lowAttendance = [];
-      const frequentLate = [];
-
-      (rows || []).forEach(r => {
-        const pct = r.total_events > 0 ? (r.attended / r.total_events) * 100 : 100;
-        if (pct < minPct && r.total_events > 0) {
-          lowAttendance.push({ ...r, percentage: pct.toFixed(1) });
-        }
-        if (r.late_count >= 3) {
-          frequentLate.push(r);
-        }
-      });
-
-      res.json({ lowAttendance, frequentLate });
-    });
-  });
-});
-
-// CSV Export Endpoint
-app.get('/api/export/csv', requireAuth(['admin']), (req, res) => {
-  const type = req.query.type || 'attendance';
-  
-  if (type === 'students') {
-    db.all(`SELECT student_id, full_name, grade_level, section, gender, contact, email, status FROM students`, [], (err, rows) => {
-      let csv = 'Student ID,Full Name,Grade Level,Section,Gender,Contact,Email,Status\n';
-      (rows || []).forEach(r => {
-        csv += `"${r.student_id}","${r.full_name}","${r.grade_level}","${r.section}","${r.gender}","${r.contact}","${r.email}","${r.status}"\n`;
-      });
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="Students_Export.csv"');
-      res.send(csv);
-    });
-  } else {
-    db.all(`
-      SELECT a.scan_date, s.student_id, s.full_name, s.grade_level, s.section, e.name as event_name, a.time_in, a.time_out, a.status
-      FROM attendance a
-      JOIN students s ON a.student_id = s.student_id
-      JOIN events e ON a.event_id = e.id
-      ORDER BY a.scan_date DESC
-    `, [], (err, rows) => {
-      let csv = 'Date,Student ID,Full Name,Grade Level,Section,Event,Time In,Time Out,Status\n';
-      (rows || []).forEach(r => {
-        csv += `"${r.scan_date}","${r.student_id}","${r.full_name}","${r.grade_level}","${r.section}","${r.event_name}","${r.time_in || ''}","${r.time_out || ''}","${r.status}"\n`;
-      });
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="Attendance_Report.csv"');
-      res.send(csv);
-    });
-  }
-});
-
-// Student Portal Profile API
-app.get('/api/student/profile', requireAuth(['student']), (req, res) => {
-  const studentId = req.session.user.student_id;
-
-  db.get(`SELECT * FROM students WHERE student_id = ?`, [studentId], (err, student) => {
-    if (err || !student) return res.status(404).json({ error: 'Student record not found.' });
-
-    db.all(`
-      SELECT a.*, e.name as event_name, e.event_date
-      FROM attendance a
-      JOIN events e ON a.event_id = e.id
-      WHERE a.student_id = ?
-      ORDER BY a.scan_date DESC
-    `, [studentId], (err, history) => {
-      const records = history || [];
-      const presentCount = records.filter(r => r.status === 'Present').length;
-      const lateCount = records.filter(r => r.status === 'Late').length;
-      const excusedCount = records.filter(r => r.status === 'Excused').length;
-      const absentCount = records.filter(r => r.status === 'Absent').length;
-
-      const totalEvents = records.length;
-      const pct = totalEvents > 0 ? (((presentCount + lateCount + excusedCount) / totalEvents) * 100).toFixed(1) : 100;
-
-      res.json({
-        student,
-        stats: { totalEvents, presentCount, lateCount, excusedCount, absentCount, percentage: pct },
-        history: records
-      });
-    });
-  });
-});
-
-// Settings & System Backup APIs
-app.get('/api/settings', requireAuth(['admin']), (req, res) => {
-  db.all(`SELECT * FROM settings`, [], (err, rows) => {
-    let settingsObj = {};
-    (rows || []).forEach(r => settingsObj[r.key] = r.value);
-    res.json(settingsObj);
-  });
-});
-
-app.post('/api/settings', requireAuth(['admin']), (req, res) => {
+app.post('/api/settings', authRequired, adminOnly, (req, res) => {
   const settings = req.body;
   db.serialize(() => {
-    Object.keys(settings).forEach(key => {
-      db.run(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?`, [key, settings[key], settings[key]]);
+    Object.keys(settings).forEach(k => {
+      db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [k, settings[k]]);
     });
-    logAudit(req.session.user.username, 'UPDATE_SETTINGS', 'System settings updated');
+    logAction(req.session.user.username, 'Update Settings', 'Updated application settings');
     res.json({ success: true });
   });
 });
 
-app.get('/api/audit-logs', requireAuth(['admin']), (req, res) => {
-  db.all(`SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100`, [], (err, rows) => {
+// Audit Logs API
+app.get('/api/audit-logs', authRequired, adminOnly, (req, res) => {
+  db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100", (err, rows) => {
     res.json(rows || []);
   });
 });
 
-app.get('/api/backup/download', requireAuth(['admin']), (req, res) => {
-  logAudit(req.session.user.username, 'BACKUP_DB', 'Downloaded database backup');
-  res.download(dbFile, `Attendance_DB_Backup_${new Date().toISOString().split('T')[0]}.sqlite`);
+// Data Backup & Restore API
+app.get('/api/admin/backup', authRequired, adminOnly, (req, res) => {
+  res.download(dbPath, `backup_attendance_${new Date().toISOString().split('T')[0]}.db`);
 });
 
-// ==========================================
-// EMBEDDED FRONTEND APPLICATION ROUTER
-// ==========================================
+// ---------------------------------------------------------
+// HTML CLIENT INTERFACE (ADMIN SPA & SCANNER PORTAL)
+// ---------------------------------------------------------
 
-const CLIENT_HTML = `<!DOCTYPE html>
+app.get('*', (req, res) => {
+  res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QR Code School Attendance System</title>
-  <!-- Tailwind CSS & HTML5-QRCode Libraries -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/html5-qrcode"></script>
+  <title>QR Code School Attendance Management System</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  
+  <script src="https://unpkg.com/html5-qrcode"></script>
   <style>
-    /* Printing Layout Specs: Exact 8 IDs per A4 Page */
+    :root { --primary-color: #1e3a8a; --secondary-color: #0d9488; }
+    body { background-color: #f8fafc; font-family: 'Segoe UI', system-ui, sans-serif; }
+    .sidebar { min-height: 100vh; background: var(--primary-color); color: white; }
+    .sidebar .nav-link { color: #cbd5e1; padding: 12px 20px; font-weight: 500; }
+    .sidebar .nav-link:hover, .sidebar .nav-link.active { color: white; background: rgba(255,255,255,0.1); border-left: 4px solid var(--secondary-color); }
+    .stat-card { border: none; border-radius: 12px; transition: transform 0.2s; }
+    .stat-card:hover { transform: translateY(-3px); }
+    
+    /* Printable ID Card Styling (A4 8-IDs Layout) */
     @media print {
       body * { visibility: hidden; }
-      #print-section, #print-section * { visibility: visible; }
-      #print-section { position: absolute; left: 0; top: 0; width: 100%; }
+      #print-area, #print-area * { visibility: visible; }
+      #print-area { position: absolute; left: 0; top: 0; width: 100%; }
+      .page-break { page-break-after: always; }
       .no-print { display: none !important; }
-      .a4-page {
-        width: 210mm;
-        height: 297mm;
-        padding: 8mm;
-        margin: 0 auto;
-        box-sizing: border-box;
-        page-break-after: always;
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        grid-template-rows: repeat(4, 1fr);
-        gap: 6mm;
-      }
     }
-    .id-card-border {
-      border: 1px dashed #cbd5e1;
-      border-radius: 8px;
-    }
+    .id-card-grid { display: grid; grid-template-columns: repeat(2, 3.375in); grid-gap: 0.2in; justify-content: center; padding: 0.3in; }
+    .id-card { width: 3.375in; height: 2.125in; border: 1.5px solid #000; border-radius: 8px; position: relative; background: #fff; overflow: hidden; box-sizing: border-box; font-size: 10px; display: flex; flex-direction: column; }
+    .id-card-header { background: #1e3a8a; color: white; padding: 4px; text-align: center; font-size: 9px; font-weight: bold; }
+    .id-card-body { display: flex; padding: 6px; gap: 8px; flex-grow: 1; }
+    .id-card-photo { width: 0.9in; height: 1.0in; object-fit: cover; border: 1px solid #ccc; border-radius: 4px; }
+    .id-card-details { flex-grow: 1; }
+    .id-card-qr { width: 0.8in; height: 0.8in; float: right; }
+    .scanner-container { max-width: 600px; margin: 0 auto; }
+    #reader video { border-radius: 12px; }
   </style>
 </head>
-<body class="bg-slate-100 font-sans text-slate-800 antialiased min-h-screen">
+<body>
 
-  <div id="app" class="min-h-screen flex flex-col">
-    <!-- TOP NAVBAR -->
-    <header id="navbar" class="bg-indigo-900 text-white shadow-md no-print hidden">
-      <div class="max-w-7xl mx-auto px-4 py-3 flex justify-between items-center">
-        <div class="flex items-center gap-3">
-          <i class="fa-solid fa-qrcode text-2xl text-indigo-300"></i>
-          <span class="font-bold text-lg tracking-wide" id="nav-school-name">Global Academy System</span>
-        </div>
-        <div id="user-menu" class="flex items-center gap-4 text-sm">
-          <span id="user-badge" class="bg-indigo-800 px-3 py-1 rounded-full text-indigo-200"></span>
-          <button onclick="logout()" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-white font-medium transition">
-            <i class="fa-solid fa-right-from-bracket mr-1"></i> Logout
-          </button>
-        </div>
-      </div>
-    </header>
+<div id="app"></div>
 
-    <!-- CONTENT WRAPPER -->
-    <main class="flex-grow flex flex-col">
-      <!-- LOGIN VIEW -->
-      <section id="view-login" class="flex-grow flex items-center justify-center p-4">
-        <div class="bg-white p-8 rounded-xl shadow-xl max-w-md w-full border border-slate-200">
-          <div class="text-center mb-6">
-            <div class="inline-flex items-center justify-center w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full mb-3">
-              <i class="fa-solid fa-school text-3xl"></i>
-            </div>
-            <h2 class="text-2xl font-bold text-slate-900">Portal Login</h2>
-            <p class="text-sm text-slate-500">Sign in to access Attendance Portal</p>
-          </div>
-          
-          <div id="login-error" class="hidden mb-4 p-3 bg-red-100 text-red-700 text-sm rounded-lg"></div>
+<script>
+  // Global Application State
+  const state = {
+    user: null,
+    settings: {},
+    events: [],
+    students: [],
+    scanner: { activeEvent: null, mode: 'IN', sound: true, voice: true, volume: 1.0 }
+  };
 
-          <form onsubmit="handleLogin(event)" class="space-y-4">
-            <div>
-              <label class="block text-sm font-medium text-slate-700 mb-1">Username / Student ID</label>
-              <input type="text" id="login-username" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-slate-700 mb-1">Password</label>
-              <input type="password" id="login-password" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none">
-            </div>
-            <button type="submit" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition">
-              Sign In
-            </button>
-          </form>
-
-          <div class="mt-6 pt-4 border-t text-center text-xs text-slate-500">
-            <p class="mb-2">Dedicated Portals:</p>
-            <a href="/scanner" class="text-indigo-600 hover:underline font-semibold mx-2"><i class="fa-solid fa-camera"></i> Open Scanner Portal</a>
-          </div>
-        </div>
-      </section>
-
-      <!-- ADMIN DASHBOARD LAYOUT -->
-      <section id="view-admin" class="hidden flex-grow flex flex-col md:flex-row">
-        <!-- SIDEBAR -->
-        <aside class="w-full md:w-64 bg-slate-900 text-slate-300 flex-shrink-0 no-print">
-          <nav class="p-4 space-y-1">
-            <button onclick="switchTab('dash')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-chart-line w-5"></i> Dashboard</button>
-            <button onclick="switchTab('students')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-user-graduate w-5"></i> Students</button>
-            <button onclick="switchTab('events')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-calendar-check w-5"></i> Events</button>
-            <button onclick="switchTab('attendance')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-clock w-5"></i> Attendance Log</button>
-            <button onclick="switchTab('reports')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-file-invoice w-5"></i> Reports</button>
-            <button onclick="switchTab('idcards')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-address-card w-5"></i> Print ID Cards</button>
-            <button onclick="switchTab('settings')" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition"><i class="fa-solid fa-gear w-5"></i> System Settings</button>
-            <a href="/scanner" target="_blank" class="w-full flex items-center gap-3 px-4 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium mt-6 transition"><i class="fa-solid fa-expand w-5"></i> Open Scanner Window</a>
-          </nav>
-        </aside>
-
-        <!-- MAIN DASHBOARD CONTENT AREA -->
-        <div class="flex-grow p-6 overflow-y-auto no-print">
-          
-          <!-- TAB 1: DASHBOARD METRICS -->
-          <div id="tab-dash" class="tab-content space-y-6">
-            <div class="flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-slate-800">System Dashboard</h1>
-              <div class="text-sm text-slate-500 font-medium" id="current-datetime"></div>
-            </div>
-
-            <!-- Dashboard Filters -->
-            <div class="bg-white p-4 rounded-xl shadow-sm border flex flex-wrap gap-4 items-center">
-              <span class="text-sm font-semibold text-slate-600">Filters:</span>
-              <select id="dash-filter-grade" onchange="loadDashboardStats()" class="border px-3 py-1.5 rounded text-sm">
-                <option value="">All Grade Levels</option>
-                <option value="Grade 7">Grade 7</option>
-                <option value="Grade 8">Grade 8</option>
-                <option value="Grade 9">Grade 9</option>
-                <option value="Grade 10">Grade 10</option>
-                <option value="Grade 11">Grade 11</option>
-                <option value="Grade 12">Grade 12</option>
-              </select>
-              <input type="date" id="dash-filter-date" onchange="loadDashboardStats()" class="border px-3 py-1.5 rounded text-sm">
-            </div>
-
-            <!-- KPI Cards -->
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
-                <div class="text-xs text-slate-500 font-bold uppercase">Total Students</div>
-                <div class="text-3xl font-extrabold text-slate-800 mt-2" id="kpi-total-students">0</div>
-              </div>
-              <div class="bg-white p-5 rounded-xl shadow-sm border border-emerald-200 bg-emerald-50/30">
-                <div class="text-xs text-emerald-600 font-bold uppercase">Present Today</div>
-                <div class="text-3xl font-extrabold text-emerald-600 mt-2" id="kpi-present">0</div>
-              </div>
-              <div class="bg-white p-5 rounded-xl shadow-sm border border-amber-200 bg-amber-50/30">
-                <div class="text-xs text-amber-600 font-bold uppercase">Late Today</div>
-                <div class="text-3xl font-extrabold text-amber-600 mt-2" id="kpi-late">0</div>
-              </div>
-              <div class="bg-white p-5 rounded-xl shadow-sm border border-rose-200 bg-rose-50/30">
-                <div class="text-xs text-rose-600 font-bold uppercase">Absent Today</div>
-                <div class="text-3xl font-extrabold text-rose-600 mt-2" id="kpi-absent">0</div>
-              </div>
-            </div>
-
-            <!-- Live Monitor & Recent Scans -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div class="lg:col-span-2 bg-white p-5 rounded-xl shadow-sm border">
-                <h3 class="font-bold text-slate-800 mb-4">Live Attendance Monitor</h3>
-                <div class="overflow-x-auto">
-                  <table class="w-full text-left border-collapse text-sm">
-                    <thead>
-                      <tr class="border-b bg-slate-50 text-slate-600">
-                        <th class="p-3">Student</th>
-                        <th class="p-3">Grade & Section</th>
-                        <th class="p-3">Time In</th>
-                        <th class="p-3">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody id="recent-scans-tbody"></tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div class="bg-white p-5 rounded-xl shadow-sm border space-y-4">
-                <h3 class="font-bold text-slate-800">Active Event</h3>
-                <div id="active-event-card" class="p-4 bg-indigo-50 border border-indigo-100 rounded-lg">
-                  <div class="font-bold text-indigo-900" id="active-evt-title">None Active</div>
-                  <div class="text-xs text-indigo-700 mt-1" id="active-evt-time">-</div>
-                </div>
-
-                <h3 class="font-bold text-slate-800 pt-2">Attendance Rate</h3>
-                <div class="text-center p-4 bg-slate-50 rounded-lg">
-                  <span class="text-4xl font-extrabold text-indigo-600" id="kpi-att-rate">0%</span>
-                  <p class="text-xs text-slate-500 mt-1">Overall Participation</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- TAB 2: STUDENT MANAGEMENT -->
-          <div id="tab-students" class="tab-content hidden space-y-6">
-            <div class="flex flex-wrap justify-between items-center gap-4">
-              <h1 class="text-2xl font-bold text-slate-800">Student Directory</h1>
-              <button onclick="openStudentModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium shadow flex items-center gap-2">
-                <i class="fa-solid fa-plus"></i> Register Student
-              </button>
-            </div>
-
-            <div class="bg-white p-4 rounded-xl shadow-sm border flex flex-wrap gap-4">
-              <input type="text" id="stu-search" placeholder="Search ID or Name..." onkeyup="loadStudents()" class="border px-3 py-2 rounded text-sm w-64">
-              <select id="stu-filter-grade" onchange="loadStudents()" class="border px-3 py-2 rounded text-sm">
-                <option value="">All Grades</option>
-                <option value="Grade 7">Grade 7</option>
-                <option value="Grade 8">Grade 8</option>
-                <option value="Grade 9">Grade 9</option>
-                <option value="Grade 10">Grade 10</option>
-                <option value="Grade 11">Grade 11</option>
-                <option value="Grade 12">Grade 12</option>
-              </select>
-            </div>
-
-            <div class="bg-white rounded-xl shadow-sm border overflow-x-auto">
-              <table class="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr class="border-b bg-slate-50 text-slate-600">
-                    <th class="p-3">Student ID</th>
-                    <th class="p-3">Name</th>
-                    <th class="p-3">Grade & Section</th>
-                    <th class="p-3">Status</th>
-                    <th class="p-3 text-center">Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="students-table-body"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- TAB 3: EVENTS -->
-          <div id="tab-events" class="tab-content hidden space-y-6">
-            <div class="flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-slate-800">Event Management</h1>
-              <button onclick="openEventModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium shadow">
-                <i class="fa-solid fa-plus"></i> Create Event
-              </button>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="events-grid"></div>
-          </div>
-
-          <!-- TAB 4: ATTENDANCE RECORDS -->
-          <div id="tab-attendance" class="tab-content hidden space-y-6">
-            <div class="flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-slate-800">Attendance Log</h1>
-              <a href="/api/export/csv?type=attendance" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">
-                <i class="fa-solid fa-file-csv mr-1"></i> Export CSV
-              </a>
-            </div>
-
-            <div class="bg-white rounded-xl shadow-sm border overflow-x-auto p-4">
-              <table class="w-full text-left text-sm border-collapse">
-                <thead>
-                  <tr class="border-b bg-slate-50">
-                    <th class="p-3">Date</th>
-                    <th class="p-3">Student ID</th>
-                    <th class="p-3">Name</th>
-                    <th class="p-3">Event</th>
-                    <th class="p-3">Time In</th>
-                    <th class="p-3">Time Out</th>
-                    <th class="p-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody id="attendance-log-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- TAB 5: REPORTS & ANALYTICS -->
-          <div id="tab-reports" class="tab-content hidden space-y-6">
-            <h1 class="text-2xl font-bold text-slate-800">Reports & Insights</h1>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div class="bg-white p-5 rounded-xl shadow-sm border">
-                <h3 class="font-bold text-rose-600 mb-3"><i class="fa-solid fa-triangle-exclamation"></i> Low Attendance Alerts (&lt;75%)</h3>
-                <ul id="low-att-list" class="divide-y text-sm"></ul>
-              </div>
-              <div class="bg-white p-5 rounded-xl shadow-sm border">
-                <h3 class="font-bold text-amber-600 mb-3"><i class="fa-solid fa-user-clock"></i> Frequently Late Students</h3>
-                <ul id="freq-late-list" class="divide-y text-sm"></ul>
-              </div>
-            </div>
-          </div>
-
-          <!-- TAB 6: ID CARDS PRINTING ENGINE -->
-          <div id="tab-idcards" class="tab-content hidden space-y-6">
-            <div class="flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-slate-800">A4 Student ID Printing (8/Page)</h1>
-              <button onclick="window.print()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg shadow">
-                <i class="fa-solid fa-print"></i> Print ID Sheet
-              </button>
-            </div>
-
-            <div class="bg-white p-4 rounded-xl shadow-sm border flex gap-4">
-              <select id="id-print-grade" onchange="renderIDCardsForPrint()" class="border px-3 py-2 rounded text-sm">
-                <option value="">All Grade Levels</option>
-                <option value="Grade 7">Grade 7</option>
-                <option value="Grade 8">Grade 8</option>
-                <option value="Grade 9">Grade 9</option>
-                <option value="Grade 10">Grade 10</option>
-                <option value="Grade 11">Grade 11</option>
-                <option value="Grade 12">Grade 12</option>
-              </select>
-            </div>
-
-            <div id="id-cards-preview" class="space-y-8"></div>
-          </div>
-
-          <!-- TAB 7: SETTINGS -->
-          <div id="tab-settings" class="tab-content hidden space-y-6">
-            <h1 class="text-2xl font-bold text-slate-800">System Configuration</h1>
-            <div class="bg-white p-6 rounded-xl shadow-sm border max-w-xl space-y-4">
-              <div>
-                <label class="block text-sm font-medium text-slate-700">School Name</label>
-                <input type="text" id="set-school-name" class="w-full border px-3 py-2 rounded mt-1">
-              </div>
-              <div>
-                <label class="block text-sm font-medium text-slate-700">Late Threshold (Minutes)</label>
-                <input type="number" id="set-late-threshold" class="w-full border px-3 py-2 rounded mt-1">
-              </div>
-              <button onclick="saveSettings()" class="bg-indigo-600 text-white px-4 py-2 rounded shadow">Save Settings</button>
-            </div>
-          </div>
-
-        </div>
-      </section>
-
-      <!-- DEDICATED MOBILE-FIRST SCANNER PORTAL VIEW -->
-      <section id="view-scanner" class="hidden flex-grow flex flex-col bg-slate-900 text-white p-4">
-        <div class="max-w-md mx-auto w-full flex-grow flex flex-col justify-between space-y-4">
-          
-          <!-- Scanner Header -->
-          <div class="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700">
-            <div>
-              <h2 class="font-bold text-lg text-indigo-400">QR Scanner Portal</h2>
-              <span id="scanner-status" class="text-xs text-emerald-400">● Scanner Ready</span>
-            </div>
-            <a href="/" class="text-xs bg-slate-700 px-3 py-1.5 rounded text-slate-300">Admin Portal</a>
-          </div>
-
-          <!-- Event & Mode Controls -->
-          <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
-            <div>
-              <label class="block text-xs font-semibold text-slate-400 mb-1">Select Active Event</label>
-              <select id="scanner-event-select" class="w-full bg-slate-900 border border-slate-700 text-white px-3 py-2 rounded-lg text-sm"></select>
-            </div>
-            <div class="flex gap-2">
-              <button id="btn-mode-in" onclick="setScanMode('IN')" class="flex-1 py-2 bg-emerald-600 text-white font-bold rounded-lg shadow text-center">TIME IN</button>
-              <button id="btn-mode-out" onclick="setScanMode('OUT')" class="flex-1 py-2 bg-slate-700 text-slate-300 font-bold rounded-lg text-center">TIME OUT</button>
-            </div>
-          </div>
-
-          <!-- Live Camera Viewfinder -->
-          <div class="relative bg-black rounded-xl overflow-hidden border-2 border-indigo-500 aspect-square flex items-center justify-center shadow-2xl">
-            <div id="reader" class="w-full h-full"></div>
-          </div>
-
-          <!-- Real-Time Scan Result Popover Card -->
-          <div id="scan-result-card" class="hidden bg-slate-800 border-2 p-4 rounded-xl text-center space-y-2">
-            <div id="scan-result-icon" class="text-4xl"></div>
-            <h3 id="scan-result-name" class="font-bold text-xl text-white"></h3>
-            <p id="scan-result-details" class="text-xs text-slate-300"></p>
-          </div>
-
-          <!-- Audio Voice Announcement Toggle Controls -->
-          <div class="flex items-center justify-between text-xs text-slate-400 px-2">
-            <span>Voice Speech Announcement</span>
-            <input type="checkbox" id="voice-toggle" checked class="w-4 h-4 accent-indigo-500">
-          </div>
-
-        </div>
-      </section>
-
-      <!-- STUDENT PORTAL VIEW -->
-      <section id="view-student" class="hidden flex-grow p-6 bg-slate-50">
-        <div class="max-w-4xl mx-auto space-y-6">
-          <div class="bg-white p-6 rounded-xl shadow-sm border flex flex-col md:flex-row gap-6 items-center">
-            <img id="stu-portal-img" class="w-32 h-32 rounded-xl object-cover bg-slate-100 border">
-            <div class="space-y-1 text-center md:text-left">
-              <h2 class="text-2xl font-bold text-slate-800" id="stu-portal-name"></h2>
-              <p class="text-sm text-slate-500" id="stu-portal-id"></p>
-              <p class="text-sm text-indigo-600 font-medium" id="stu-portal-class"></p>
-            </div>
-            <div class="ml-auto text-center p-4 bg-indigo-50 rounded-xl">
-              <div class="text-3xl font-extrabold text-indigo-600" id="stu-portal-pct">0%</div>
-              <div class="text-xs text-indigo-800 font-semibold">Attendance Rate</div>
-            </div>
-          </div>
-
-          <!-- Digital ID & QR Display -->
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div class="bg-white p-6 rounded-xl shadow-sm border text-center space-y-4">
-              <h3 class="font-bold text-slate-800">Your Digital Student QR</h3>
-              <img id="stu-portal-qr" class="w-48 h-48 mx-auto border p-2 rounded-lg">
-            </div>
-            <div class="bg-white p-6 rounded-xl shadow-sm border space-y-3">
-              <h3 class="font-bold text-slate-800 mb-2">Attendance Summary</h3>
-              <div class="flex justify-between text-sm py-2 border-b"><span>Events Attended</span><span id="stu-stat-attended" class="font-bold">0</span></div>
-              <div class="flex justify-between text-sm py-2 border-b"><span>Present</span><span id="stu-stat-present" class="font-bold text-emerald-600">0</span></div>
-              <div class="flex justify-between text-sm py-2 border-b"><span>Late Arrived</span><span id="stu-stat-late" class="font-bold text-amber-600">0</span></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-    </main>
-  </div>
-
-  <!-- PRINT CONTAINER FOR EXACT A4 PAGE LAYOUT -->
-  <div id="print-section"></div>
-
-  <!-- CLIENT APPLICATION ENGINE SCRIPT -->
-  <script>
-    let currentUser = null;
-    let currentScanMode = 'IN';
-    let html5QrCode = null;
-
-    // Page Load Router
-    window.addEventListener('DOMContentLoaded', async () => {
-      const path = window.location.pathname;
-      const res = await fetch('/api/auth/me');
-      const auth = await res.json();
-
-      if (path === '/scanner') {
-        showView('view-scanner');
-        initScannerPortal();
-        return;
-      }
-
-      if (auth.authenticated) {
-        currentUser = auth.user;
-        setupUserSessionView();
+  // --- Router & View Renderer ---
+  function navigate() {
+    const hash = window.location.hash || '#/scanner';
+    fetch('/api/auth/me').then(r => r.json()).then(data => {
+      state.user = data.user;
+      if (hash.startsWith('#/admin') && (!state.user || state.user.role !== 'Administrator')) {
+        renderLogin();
+      } else if (hash === '#/scanner') {
+        renderScannerPortal();
+      } else if (hash === '#/admin/dashboard') {
+        renderAdminLayout(renderDashboardContent);
+      } else if (hash === '#/admin/students') {
+        renderAdminLayout(renderStudentsContent);
+      } else if (hash === '#/admin/print-ids') {
+        renderAdminLayout(renderPrintIDsContent);
+      } else if (hash === '#/admin/events') {
+        renderAdminLayout(renderEventsContent);
+      } else if (hash === '#/admin/attendance') {
+        renderAdminLayout(renderAttendanceContent);
+      } else if (hash === '#/admin/reports') {
+        renderAdminLayout(renderReportsContent);
+      } else if (hash === '#/admin/settings') {
+        renderAdminLayout(renderSettingsContent);
       } else {
-        showView('view-login');
+        renderScannerPortal();
       }
     });
+  }
+  window.addEventListener('hashchange', navigate);
+  window.addEventListener('DOMContentLoaded', () => {
+    fetch('/api/settings').then(r => r.json()).then(s => state.settings = s);
+    navigate();
+  });
 
-    function showView(viewId) {
-      ['view-login', 'view-admin', 'view-scanner', 'view-student'].forEach(id => {
-        document.getElementById(id).classList.add('hidden');
-      });
-      document.getElementById(viewId).classList.remove('hidden');
-      document.getElementById('navbar').classList.toggle('hidden', viewId === 'view-login' || viewId === 'view-scanner');
-    }
+  // --- Voice Announcement Utility ---
+  function announceVoice(text) {
+    if (!state.scanner.voice || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.volume = parseFloat(state.scanner.volume || 1.0);
+    window.speechSynthesis.speak(utter);
+  }
 
-    function setupUserSessionView() {
-      document.getElementById('user-badge').innerText = currentUser.username + ' (' + currentUser.role + ')';
-      if (currentUser.role === 'admin') {
-        showView('view-admin');
-        switchTab('dash');
-      } else if (currentUser.role === 'student') {
-        showView('view-student');
-        loadStudentPortalData();
-      } else if (currentUser.role === 'scanner') {
-        window.location.href = '/scanner';
-      }
-    }
-
-    async function handleLogin(e) {
+  // --- LOGIN VIEW ---
+  function renderLogin() {
+    document.getElementById('app').innerHTML = \`
+      <div class="container d-flex justify-content-center align-items-center vh-100">
+        <div class="card shadow-lg p-4" style="width: 400px; border-radius: 16px;">
+          <div class="text-center mb-4">
+            <i class="bi bi-qr-code-scan text-primary display-4"></i>
+            <h4 class="mt-2 fw-bold">Admin Portal Login</h4>
+            <p class="text-muted fs-7">School Attendance Management System</p>
+          </div>
+          <form id="loginForm">
+            <div class="mb-3">
+              <label class="form-label">Username</label>
+              <input type="text" id="loginUser" class="form-control" required value="admin">
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" id="loginPass" class="form-control" required value="admin123">
+            </div>
+            <button type="submit" class="btn btn-primary w-100 py-2 fw-bold">Login to Admin</button>
+          </form>
+          <div class="mt-3 text-center">
+            <a href="#/scanner" class="text-decoration-none text-secondary"><i class="bi bi-camera"></i> Open Scanner Portal API</a>
+          </div>
+        </div>
+      </div>
+    \`;
+    document.getElementById('loginForm').onsubmit = async (e) => {
       e.preventDefault();
-      const u = document.getElementById('login-username').value;
-      const p = document.getElementById('login-password').value;
-
       const res = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: u, password: p })
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ username: loginUser.value, password: loginPass.value })
       });
       const data = await res.json();
-
-      if (res.ok) {
-        currentUser = data;
-        setupUserSessionView();
+      if (data.success) {
+        window.location.hash = '#/admin/dashboard';
       } else {
-        const err = document.getElementById('login-error');
-        err.innerText = data.error;
-        err.classList.remove('hidden');
+        alert(data.error);
       }
-    }
+    };
+  }
 
-    async function logout() {
-      await fetch('/api/auth/logout', { method: 'POST' });
-      window.location.href = '/';
-    }
+  // --- SCANNER PORTAL VIEW (Standalone & Mobile Optimized) ---
+  let html5QrcodeScanner = null;
+  async function renderScannerPortal() {
+    const eventsRes = await fetch('/api/events');
+    const events = await eventsRes.json();
+    const activeEvents = events.filter(e => e.status === 'Active');
 
-    // TAB SWITCHING
-    function switchTab(tabId) {
-      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-      document.getElementById('tab-' + tabId).classList.remove('hidden');
-
-      if (tabId === 'dash') loadDashboardStats();
-      if (tabId === 'students') loadStudents();
-      if (tabId === 'events') loadEvents();
-      if (tabId === 'attendance') loadAttendanceLog();
-      if (tabId === 'reports') loadReports();
-      if (tabId === 'idcards') renderIDCardsForPrint();
-    }
-
-    // DASHBOARD DATA FETCH
-    async function loadDashboardStats() {
-      const grade = document.getElementById('dash-filter-grade').value;
-      const date = document.getElementById('dash-filter-date').value;
-      const res = await fetch(\`/api/dashboard/stats?grade=\${grade}&date=\${date}\`);
-      const data = await res.json();
-
-      document.getElementById('kpi-total-students').innerText = data.totalStudents;
-      document.getElementById('kpi-present').innerText = data.presentToday;
-      document.getElementById('kpi-late').innerText = data.lateToday;
-      document.getElementById('kpi-absent').innerText = data.absentToday;
-      document.getElementById('kpi-att-rate').innerText = data.attendancePercentage + '%';
-
-      if (data.activeEvent) {
-        document.getElementById('active-evt-title').innerText = data.activeEvent.name;
-        document.getElementById('active-evt-time').innerText = data.activeEvent.start_time + ' - ' + data.activeEvent.end_time;
-      }
-
-      const tbody = document.getElementById('recent-scans-tbody');
-      tbody.innerHTML = data.recentScans.map(s => \`
-        <tr class="border-b">
-          <td class="p-3 font-semibold">\${s.full_name}</td>
-          <td class="p-3 text-slate-500">\${s.grade_level} - \${s.section}</td>
-          <td class="p-3">\${s.time_in || '-'}</td>
-          <td class="p-3"><span class="px-2 py-1 rounded text-xs font-bold \${s.status==='Present'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}">\${s.status}</span></td>
-        </tr>
-      \`).join('');
-    }
-
-    // STUDENTS MANAGEMENT ENGINE
-    async function loadStudents() {
-      const search = document.getElementById('stu-search').value;
-      const grade = document.getElementById('stu-filter-grade').value;
-      const res = await fetch(\`/api/students?search=\${search}&grade=\${grade}\`);
-      const students = await res.json();
-
-      const tbody = document.getElementById('students-table-body');
-      tbody.innerHTML = students.map(s => \`
-        <tr class="border-b">
-          <td class="p-3 font-mono font-bold text-indigo-600">\${s.student_id}</td>
-          <td class="p-3 font-medium">\${s.full_name}</td>
-          <td class="p-3 text-slate-500">\${s.grade_level} - \${s.section}</td>
-          <td class="p-3"><span class="px-2 py-0.5 text-xs rounded bg-slate-100">\${s.status}</span></td>
-          <td class="p-3 text-center space-x-2">
-            <button onclick="regenerateQR(\${s.id})" class="text-xs bg-indigo-50 text-indigo-600 px-2 py-1 rounded font-semibold">Reset QR</button>
-            <button onclick="deleteStudent(\${s.id})" class="text-xs bg-rose-50 text-rose-600 px-2 py-1 rounded font-semibold">Delete</button>
-          </td>
-        </tr>
-      \`).join('');
-    }
-
-    async function regenerateQR(id) {
-      if (confirm('Regenerate QR Code? The old QR code will immediately stop working.')) {
-        await fetch(\`/api/students/\${id}/regenerate-qr\`, { method: 'POST' });
-        alert('QR Code updated successfully.');
-        loadStudents();
-      }
-    }
-
-    async function deleteStudent(id) {
-      if (confirm('Are you sure you want to delete this student?')) {
-        await fetch(\`/api/students/\${id}\`, { method: 'DELETE' });
-        loadStudents();
-      }
-    }
-
-    // EVENT MANAGEMENT
-    async function loadEvents() {
-      const res = await fetch('/api/events');
-      const events = await res.json();
-      const grid = document.getElementById('events-grid');
-      grid.innerHTML = events.map(e => \`
-        <div class="bg-white p-5 rounded-xl shadow-sm border space-y-2">
-          <div class="flex justify-between items-start">
-            <h3 class="font-bold text-lg text-slate-800">\${e.name}</h3>
-            <span class="px-2 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded">\${e.status}</span>
-          </div>
-          <p class="text-xs text-slate-500">\${e.description || 'No description'}</p>
-          <div class="text-xs text-slate-600 pt-2"><i class="fa-regular fa-calendar"></i> \${e.event_date} (\${e.start_time} - \${e.end_time})</div>
+    document.getElementById('app').innerHTML = \`
+      <nav class="navbar navbar-dark bg-dark px-3">
+        <span class="navbar-brand fw-bold"><i class="bi bi-qr-code-scan me-2"></i> Attendance Scanner Portal</span>
+        <div>
+          \${state.user ? '<a href="#/admin/dashboard" class="btn btn-outline-light btn-sm">Admin Dashboard</a>' : '<a href="#/admin/dashboard" class="btn btn-outline-light btn-sm">Admin Login</a>'}
         </div>
-      \`).join('');
-    }
+      </nav>
 
-    // ATTENDANCE LOG
-    async function loadAttendanceLog() {
-      const res = await fetch('/api/attendance/records');
-      const logs = await res.json();
-      const tbody = document.getElementById('attendance-log-tbody');
-      tbody.innerHTML = logs.map(l => \`
-        <tr class="border-b">
-          <td class="p-3">\${l.scan_date}</td>
-          <td class="p-3 font-mono font-bold">\${l.student_id}</td>
-          <td class="p-3">\${l.full_name}</td>
-          <td class="p-3">\${l.event_name}</td>
-          <td class="p-3 text-emerald-600 font-medium">\${l.time_in || '-'}</td>
-          <td class="p-3 text-slate-500">\${l.time_out || '-'}</td>
-          <td class="p-3"><span class="px-2 py-1 text-xs rounded font-bold bg-slate-100">\${l.status}</span></td>
-        </tr>
-      \`).join('');
-    }
-
-    // REPORTS & INSIGHTS
-    async function loadReports() {
-      const res = await fetch('/api/reports/insights');
-      const data = await res.json();
-
-      document.getElementById('low-att-list').innerHTML = data.lowAttendance.map(s => \`
-        <li class="py-2 flex justify-between">
-          <span>\${s.full_name} (\${s.grade_level})</span>
-          <span class="font-bold text-rose-600">\${s.percentage}%</span>
-        </li>
-      \`).join('') || '<li class="py-2 text-slate-400">No low attendance alerts</li>';
-
-      document.getElementById('freq-late-list').innerHTML = data.frequentLate.map(s => \`
-        <li class="py-2 flex justify-between">
-          <span>\${s.full_name} (\${s.section})</span>
-          <span class="font-bold text-amber-600">\${s.late_count} Times Late</span>
-        </li>
-      \`).join('') || '<li class="py-2 text-slate-400">No late warnings</li>';
-    }
-
-    // PRINTING SYSTEM: Render Exactly 8 ID Cards Per A4 Page Sheet
-    async function renderIDCardsForPrint() {
-      const grade = document.getElementById('id-print-grade').value;
-      const res = await fetch(\`/api/students?grade=\${grade}\`);
-      const students = await res.json();
-
-      const previewContainer = document.getElementById('id-cards-preview');
-      const printSection = document.getElementById('print-section');
-      
-      previewContainer.innerHTML = '';
-      printSection.innerHTML = '';
-
-      // Chunk array into groups of 8
-      for (let i = 0; i < students.length; i += 8) {
-        const chunk = students.slice(i, i + 8);
-        const pageElem = document.createElement('div');
-        pageElem.className = 'a4-page bg-white shadow-lg border my-4';
-
-        chunk.forEach(s => {
-          pageElem.innerHTML += \`
-            <div class="id-card-border p-3 flex flex-col justify-between bg-white relative overflow-hidden">
-              <div class="text-center border-b pb-1">
-                <div class="font-bold text-xs uppercase text-indigo-900 tracking-wider">Global Academy</div>
-                <div class="text-[9px] text-slate-500">Official Student Identification</div>
-              </div>
-              <div class="flex gap-2 items-center my-2">
-                <img src="\${s.profile_picture || 'https://via.placeholder.com/80'}" class="w-16 h-16 rounded object-cover border">
-                <div class="text-left space-y-0.5">
-                  <div class="font-bold text-xs text-slate-800 leading-tight">\${s.full_name}</div>
-                  <div class="text-[10px] text-indigo-600 font-mono font-bold">\${s.student_id}</div>
-                  <div class="text-[9px] text-slate-500">\${s.grade_level} - \${s.section}</div>
-                </div>
-              </div>
-              <div class="flex justify-between items-end border-t pt-1">
-                <img src="/api/qr/render/\${s.qr_token}" class="w-12 h-12">
-                <span class="text-[8px] text-slate-400">SY 2026-2027</span>
-              </div>
+      <div class="container py-4 scanner-container">
+        <div class="card shadow-sm border-0 mb-3">
+          <div class="card-body">
+            <div class="mb-3">
+              <label class="form-label fw-bold">Select Active Event</label>
+              <select id="scannerEventSelect" class="form-select form-select-lg">
+                \${activeEvents.map(e => \`<option value="\${e.id}">\${e.name} (\${e.event_date})</option>\`).join('')}
+              </select>
             </div>
-          \`;
-        });
 
-        previewContainer.appendChild(pageElem.cloneNode(true));
-        printSection.appendChild(pageElem);
-      }
-    }
+            <div class="d-flex justify-content-center gap-2 mb-3">
+              <button id="btnModeIn" class="btn btn-success btn-lg flex-fill fw-bold active">TIME IN</button>
+              <button id="btnModeOut" class="btn btn-warning btn-lg flex-fill fw-bold">TIME OUT</button>
+            </div>
 
-    // SCANNER PORTAL CORE LOGIC
-    async function initScannerPortal() {
-      // Load Active Events into dropdown
-      const res = await fetch('/api/events');
-      const events = await res.json();
-      const select = document.getElementById('scanner-event-select');
-      select.innerHTML = events.map(e => \`<option value="\${e.id}">\${e.name} (\${e.event_date})</option>\`).join('');
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="voiceToggle" checked>
+              <label class="form-check-label fw-bold" for="voiceToggle">Enable Voice Announcement</label>
+            </div>
 
-      // Start HTML5 QR Reader
-      html5QrCode = new Html5Qrcode("reader");
-      html5QrCode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 220, height: 220 } },
-        onScanSuccess
-      ).catch(err => {
-        document.getElementById('scanner-status').innerText = '● Camera Error / Denied';
-      });
-    }
+            <div id="reader" style="width: 100%;"></div>
 
-    function setScanMode(mode) {
-      currentScanMode = mode;
-      document.getElementById('btn-mode-in').className = mode === 'IN' ? 'flex-1 py-2 bg-emerald-600 text-white font-bold rounded-lg shadow text-center' : 'flex-1 py-2 bg-slate-700 text-slate-300 font-bold rounded-lg text-center';
-      document.getElementById('btn-mode-out').className = mode === 'OUT' ? 'flex-1 py-2 bg-emerald-600 text-white font-bold rounded-lg shadow text-center' : 'flex-1 py-2 bg-slate-700 text-slate-300 font-bold rounded-lg text-center';
-    }
+            <!-- Scan Result Display Card -->
+            <div id="scanResultCard" class="mt-3 d-none"></div>
+          </div>
+        </div>
+      </div>
+    \`;
 
+    // Toggle Modes
+    const btnIn = document.getElementById('btnModeIn');
+    const btnOut = document.getElementById('btnModeOut');
+    btnIn.onclick = () => { state.scanner.mode = 'IN'; btnIn.classList.add('active'); btnOut.classList.remove('active'); };
+    btnOut.onclick = () => { state.scanner.mode = 'OUT'; btnOut.classList.add('active'); btnIn.classList.remove('active'); };
+
+    document.getElementById('voiceToggle').onchange = (e) => state.scanner.voice = e.target.checked;
+
+    // Initialize QR Camera Scanner
+    if (html5QrcodeScanner) html5QrcodeScanner.clear();
+    html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: { width: 250, height: 250 } }, false);
+    
     let isProcessing = false;
-    async function onScanSuccess(decodedText) {
+    html5QrcodeScanner.render(async (qrCodeMessage) => {
       if (isProcessing) return;
       isProcessing = true;
+      const eventId = document.getElementById('scannerEventSelect').value;
+      
+      try {
+        const res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ qr_token: qrCodeMessage, event_id: eventId, scan_mode: state.scanner.mode })
+        });
+        const data = await res.json();
+        const card = document.getElementById('scanResultCard');
+        card.classList.remove('d-none');
 
-      const eventId = document.getElementById('scanner-event-select').value;
-      const res = await fetch('/api/attendance/scan', {
+        if (data.success) {
+          const msg = \`\${data.student.full_name}, \${data.type === 'IN' ? 'Time In' : 'Time Out'} recorded.\`;
+          card.className = "card border-success bg-success-subtle p-3 text-center";
+          card.innerHTML = \`
+            <h3 class="text-success fw-bold">✓ \${data.type} SUCCESSFUL</h3>
+            <img src="\${data.student.photo}" class="rounded-circle my-2" style="width:100px; height:100px; object-fit:cover;">
+            <h4>\${data.student.full_name}</h4>
+            <p class="mb-0">\${data.student.grade_level} - \${data.student.section} | Status: <strong>\${data.status}</strong></p>
+            <p class="text-muted fs-7">Time: \${data.time}</p>
+          \`;
+          announceVoice(msg);
+        } else {
+          card.className = "card border-danger bg-danger-subtle p-3 text-center";
+          card.innerHTML = \`<h4 class="text-danger fw-bold"><i class="bi bi-x-circle"></i> \${data.message}</h4>\`;
+          announceVoice(data.code === 'INVALID_QR' ? "Invalid QR code" : data.message);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      setTimeout(() => { isProcessing = false; }, 3000); // 3-Second delay before next auto-scan
+    });
+  }
+
+  // --- ADMIN LAYOUT SCAFFOLD ---
+  function renderAdminLayout(contentFn) {
+    document.getElementById('app').innerHTML = \`
+      <div class="d-flex">
+        <div class="sidebar d-flex flex-column flex-shrink-0 p-3" style="width: 250px;">
+          <a href="#/admin/dashboard" class="d-flex align-items-center mb-3 mb-md-0 me-md-auto color-white text-white text-decoration-none">
+            <i class="bi bi-shield-check fs-4 me-2"></i>
+            <span class="fs-5 fw-bold">Admin Portal</span>
+          </a>
+          <hr>
+          <ul class="nav nav-pills flex-column mb-auto">
+            <li><a href="#/admin/dashboard" class="nav-link"><i class="bi bi-speedometer2 me-2"></i> Dashboard</a></li>
+            <li><a href="#/admin/students" class="nav-link"><i class="bi bi-people me-2"></i> Students</a></li>
+            <li><a href="#/admin/print-ids" class="nav-link"><i class="bi bi-card-heading me-2"></i> Print Student IDs</a></li>
+            <li><a href="#/admin/events" class="nav-link"><i class="bi bi-calendar-event me-2"></i> Events</a></li>
+            <li><a href="#/admin/attendance" class="nav-link"><i class="bi bi-clock-history me-2"></i> Attendance Log</a></li>
+            <li><a href="#/admin/reports" class="nav-link"><i class="bi bi-file-earmark-bar-graph me-2"></i> Reports</a></li>
+            <li><a href="#/admin/settings" class="nav-link"><i class="bi bi-gear me-2"></i> Settings</a></li>
+          </ul>
+          <hr>
+          <div class="dropdown">
+            <button class="btn btn-outline-light w-100 btn-sm" id="btnLogout"><i class="bi bi-box-arrow-right"></i> Logout</button>
+          </div>
+        </div>
+        <div class="flex-grow-1 p-4" style="height: 100vh; overflow-y: auto;">
+          <div id="admin-content"></div>
+        </div>
+      </div>
+    \`;
+    document.getElementById('btnLogout').onclick = () => {
+      fetch('/api/auth/logout', { method: 'POST' }).then(() => window.location.hash = '#/scanner');
+    };
+    contentFn();
+  }
+
+  // --- ADMIN DASHBOARD VIEW ---
+  async function renderDashboardContent() {
+    const res = await fetch('/api/admin/dashboard');
+    const data = await res.json();
+    const s = data.summary;
+
+    document.getElementById('admin-content').innerHTML = \`
+      <h3 class="fw-bold mb-4">Dashboard Overview</h3>
+      <div class="row g-3 mb-4">
+        <div class="col-md-3">
+          <div class="card stat-card bg-primary text-white p-3">
+            <h6>Total Active Students</h6>
+            <h2 class="fw-bold">\${s.total_students}</h2>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card stat-card bg-success text-white p-3">
+            <h6>Present Today</h6>
+            <h2 class="fw-bold">\${s.present_today}</h2>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card stat-card bg-warning text-dark p-3">
+            <h6>Late Today</h6>
+            <h2 class="fw-bold">\${s.late_today}</h2>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card stat-card bg-danger text-white p-3">
+            <h6>Absent Today</h6>
+            <h2 class="fw-bold">\${s.absent_today}</h2>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-3 mb-4">
+        <div class="col-md-8">
+          <div class="card border-0 shadow-sm p-3">
+            <h5>Attendance Analytics</h5>
+            <canvas id="dashboardChart" style="max-height: 250px;"></canvas>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="card border-0 shadow-sm p-3">
+            <h5>Quick Actions</h5>
+            <div class="d-grid gap-2 mt-3">
+              <a href="#/admin/students" class="btn btn-outline-primary"><i class="bi bi-person-plus"></i> Register Student</a>
+              <a href="#/admin/print-ids" class="btn btn-outline-secondary"><i class="bi bi-printer"></i> Print 8-ID Layout</a>
+              <a href="#/scanner" target="_blank" class="btn btn-success"><i class="bi bi-camera"></i> Launch Live Scanner</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    // Render Chart
+    const ctx = document.getElementById('dashboardChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Present', 'Late', 'Absent'],
+        datasets: [{
+          data: [s.present_today, s.late_today, s.absent_today],
+          backgroundColor: ['#10b981', '#f59e0b', '#ef4444']
+        }]
+      }
+    });
+  }
+
+  // --- STUDENTS MANAGEMENT VIEW ---
+  async function renderStudentsContent() {
+    const res = await fetch('/api/students');
+    const students = await res.json();
+    state.students = students;
+
+    document.getElementById('admin-content').innerHTML = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3 class="fw-bold">Student Directory</h3>
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#studentModal"><i class="bi bi-plus-lg"></i> Register New Student</button>
+      </div>
+
+      <div class="card border-0 shadow-sm p-3">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Photo</th>
+              <th>Name</th>
+              <th>Grade Level & Section</th>
+              <th>Gender</th>
+              <th>QR Code</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            \${students.map(s => \`
+              <tr>
+                <td><strong>\${s.student_id}</strong></td>
+                <td><img src="\${s.photo || '/public/uploads/default.png'}" style="width:40px;height:40px;object-fit:cover;" class="rounded-circle"></td>
+                <td>\${s.full_name}</td>
+                <td>\${s.grade_level} - \${s.section}</td>
+                <td>\${s.gender}</td>
+                <td><img src="/api/qr/\${s.qr_token}" style="width:40px;height:40px;"></td>
+                <td>
+                  <button class="btn btn-sm btn-outline-info me-1" onclick="viewStudentQR('\${s.qr_token}', '\${s.full_name}')"><i class="bi bi-qr-code"></i></button>
+                  <button class="btn btn-sm btn-outline-warning" onclick="regenQR(\${s.id})"><i class="bi bi-arrow-repeat"></i></button>
+                </td>
+              </tr>
+            \`).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Registration Modal -->
+      <div class="modal fade" id="studentModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <form id="studentForm">
+              <div class="modal-header">
+                <h5 class="modal-title">Register Student</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+              </div>
+              <div class="modal-body row g-3">
+                <div class="col-md-4"><label class="form-label">Student ID</label><input type="text" name="student_id" class="form-control" required></div>
+                <div class="col-md-4"><label class="form-label">First Name</label><input type="text" name="first_name" class="form-control" required></div>
+                <div class="col-md-4"><label class="form-label">Last Name</label><input type="text" name="last_name" class="form-control" required></div>
+                <div class="col-md-6">
+                  <label class="form-label">Grade Level</label>
+                  <select name="grade_level" class="form-select" required>
+                    <option>Grade 7</option><option>Grade 8</option><option>Grade 9</option>
+                    <option>Grade 10</option><option>Grade 11</option><option>Grade 12</option>
+                  </select>
+                </div>
+                <div class="col-md-6"><label class="form-label">Section</label><input type="text" name="section" class="form-control" required></div>
+                <div class="col-md-6"><label class="form-label">Gender</label><select name="gender" class="form-select"><option>Male</option><option>Female</option></select></div>
+                <div class="col-md-6"><label class="form-label">Photo Upload</label><input type="file" name="photo" class="form-control"></div>
+              </div>
+              <div class="modal-footer">
+                <button type="submit" class="btn btn-primary">Save Student</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    document.getElementById('studentForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const res = await fetch('/api/students', { method: 'POST', body: formData });
+      if (res.ok) { alert('Student Registered Successfully!'); renderStudentsContent(); }
+    };
+  }
+
+  window.viewStudentQR = (token, name) => {
+    alert(\`Showing QR Token: \${token} for \${name}\`);
+  };
+
+  window.regenQR = async (id) => {
+    if (confirm('Regenerate QR Token? The existing physical card QR will stop working.')) {
+      await fetch(\`/api/students/\${id}/regenerate-qr\`, { method: 'POST' });
+      renderStudentsContent();
+    }
+  };
+
+  // --- PRINTABLE A4 ID CARDS VIEW (8 IDs PER A4 PAGE) ---
+  async function renderPrintIDsContent() {
+    const res = await fetch('/api/students');
+    const students = await res.json();
+
+    document.getElementById('admin-content').innerHTML = \`
+      <div class="d-flex justify-content-between align-items-center mb-3 no-print">
+        <h3 class="fw-bold">Printable ID Cards (8 IDs / A4 Page)</h3>
+        <button class="btn btn-success" onclick="window.print()"><i class="bi bi-printer"></i> Print A4 Pages</button>
+      </div>
+
+      <div id="print-area">
+        \${renderA4Pages(students)}
+      </div>
+    \`;
+  }
+
+  function renderA4Pages(students) {
+    let pagesHTML = '';
+    for (let i = 0; i < students.length; i += 8) {
+      const pageStudents = students.slice(i, i + 8);
+      pagesHTML += \`
+        <div class="page-break">
+          <div class="id-card-grid">
+            \${pageStudents.map(s => \`
+              <div class="id-card">
+                <div class="id-card-header">\${state.settings.school_name || 'ST. JUDE ACADEMY'}</div>
+                <div class="id-card-body">
+                  <img src="\${s.photo || '/public/uploads/default.png'}" class="id-card-photo">
+                  <div class="id-card-details">
+                    <img src="/api/qr/\${s.qr_token}" class="id-card-qr">
+                    <div style="font-weight:bold; font-size:11px;">\${s.full_name}</div>
+                    <div class="text-muted">ID: \${s.student_id}</div>
+                    <div>\${s.grade_level} - \${s.section}</div>
+                    <div style="font-size:8px; margin-top:4px;">SY: \${s.school_year}</div>
+                  </div>
+                </div>
+              </div>
+            \`).join('')}
+          </div>
+        </div>
+      \`;
+    }
+    return pagesHTML;
+  }
+
+  // --- EVENTS MANAGEMENT VIEW ---
+  async function renderEventsContent() {
+    const res = await fetch('/api/events');
+    const events = await res.json();
+
+    document.getElementById('admin-content').innerHTML = \`
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3 class="fw-bold">Event Management</h3>
+        <button class="btn btn-primary" onclick="showCreateEventModal()"><i class="bi bi-plus-lg"></i> Create Event</button>
+      </div>
+      <div class="card border-0 shadow-sm p-3">
+        <table class="table table-hover">
+          <thead><tr><th>Event Name</th><th>Date</th><th>Time</th><th>Target Grade</th><th>Status</th></tr></thead>
+          <tbody>
+            \${events.map(e => \`
+              <tr>
+                <td><strong>\${e.name}</strong></td>
+                <td>\${e.event_date}</td>
+                <td>\${e.start_time} - \${e.end_time}</td>
+                <td>\${e.target_grade}</td>
+                <td><span class="badge bg-success">\${e.status}</span></td>
+              </tr>
+            \`).join('')}
+          </tbody>
+        </table>
+      </div>
+    \`;
+  }
+
+  // --- ATTENDANCE LOG VIEW ---
+  async function renderAttendanceContent() {
+    const res = await fetch('/api/attendance');
+    const logs = await res.json();
+
+    document.getElementById('admin-content').innerHTML = \`
+      <h3 class="fw-bold mb-4">Live Attendance Logs</h3>
+      <div class="card border-0 shadow-sm p-3">
+        <table class="table table-striped align-middle">
+          <thead><tr><th>Date</th><th>Student ID</th><th>Name</th><th>Event</th><th>Time In</th><th>Time Out</th><th>Status</th></tr></thead>
+          <tbody>
+            \${logs.map(l => \`
+              <tr>
+                <td>\${l.date}</td>
+                <td>\${l.student_id}</td>
+                <td>\${l.full_name}</td>
+                <td>\${l.event_name}</td>
+                <td><span class="badge bg-info">\${l.time_in || '--'}</span></td>
+                <td><span class="badge bg-secondary">\${l.time_out || '--'}</span></td>
+                <td><span class="badge bg-\${l.status === 'PRESENT' ? 'success' : 'warning'}">\${l.status}</span></td>
+              </tr>
+            \`).join('')}
+          </tbody>
+        </table>
+      </div>
+    \`;
+  }
+
+  // --- REPORTS VIEW ---
+  function renderReportsContent() {
+    document.getElementById('admin-content').innerHTML = \`
+      <h3 class="fw-bold mb-4">System Reports</h3>
+      <div class="card border-0 shadow-sm p-4">
+        <p>Export options and automated daily, weekly, and monthly attendance reports.</p>
+        <button class="btn btn-outline-primary" onclick="alert('Exporting CSV...')"><i class="bi bi-file-earmark-spreadsheet"></i> Export Attendance Log to CSV</button>
+      </div>
+    \`;
+  }
+
+  // --- SETTINGS VIEW ---
+  function renderSettingsContent() {
+    document.getElementById('admin-content').innerHTML = \`
+      <h3 class="fw-bold mb-4">System Configurations</h3>
+      <div class="card border-0 shadow-sm p-4" style="max-width: 600px;">
+        <form id="settingsForm">
+          <div class="mb-3">
+            <label class="form-label">School / Institution Name</label>
+            <input type="text" id="setSchoolName" class="form-control" value="\${state.settings.school_name || ''}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Late Time Threshold (HH:MM)</label>
+            <input type="time" id="setLate" class="form-control" value="\${state.settings.late_threshold || '07:30'}">
+          </div>
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+        </form>
+      </div>
+    \`;
+    document.getElementById('settingsForm').onsubmit = async (e) => {
+      e.preventDefault();
+      await fetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr_token: decodedText, event_id: eventId, scan_type: currentScanMode })
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ school_name: setSchoolName.value, late_threshold: setLate.value })
       });
-      const data = await res.json();
+      alert('Settings Saved!');
+    };
+  }
 
-      const card = document.getElementById('scan-result-card');
-      const icon = document.getElementById('scan-result-icon');
-      const name = document.getElementById('scan-result-name');
-      const details = document.getElementById('scan-result-details');
-
-      card.classList.remove('hidden');
-
-      if (res.ok && (data.status === 'SUCCESS_IN' || data.status === 'SUCCESS_OUT')) {
-        card.className = "bg-emerald-900/80 border-2 border-emerald-500 p-4 rounded-xl text-center space-y-1";
-        icon.innerHTML = '✓';
-        name.innerText = data.student.full_name;
-        details.innerText = \`\${data.student.student_id} | \${data.message}\`;
-        speakName(\`\${data.student.first_name} \${data.student.last_name}, \${currentScanMode === 'IN' ? 'Attendance recorded' : 'Time out recorded'}\`);
-      } else if (data.status === 'DUPLICATE') {
-        card.className = "bg-amber-900/80 border-2 border-amber-500 p-4 rounded-xl text-center space-y-1";
-        icon.innerHTML = '⚠️';
-        name.innerText = data.student ? data.student.full_name : 'Already Recorded';
-        details.innerText = data.message;
-        speakName(\`\${data.student ? data.student.first_name : 'Student'}, you are already recorded.\`);
-      } else {
-        card.className = "bg-rose-900/80 border-2 border-rose-500 p-4 rounded-xl text-center space-y-1";
-        icon.innerHTML = '✕';
-        name.innerText = 'Invalid Scan';
-        details.innerText = data.message;
-        speakName('Invalid QR Code');
-      }
-
-      // Auto Reset Scanner View after 3.5 seconds
-      setTimeout(() => {
-        card.classList.add('hidden');
-        isProcessing = false;
-      }, 3500);
-    }
-
-    // Voice Announcement Engine
-    function speakName(text) {
-      if (!document.getElementById('voice-toggle').checked) return;
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 0.9;
-        window.speechSynthesis.speak(utterance);
-      }
-    }
-
-    // STUDENT PORTAL LOADER
-    async function loadStudentPortalData() {
-      const res = await fetch('/api/student/profile');
-      const data = await res.json();
-
-      document.getElementById('stu-portal-name').innerText = data.student.full_name;
-      document.getElementById('stu-portal-id').innerText = 'ID: ' + data.student.student_id;
-      document.getElementById('stu-portal-class').innerText = data.student.grade_level + ' - ' + data.student.section;
-      document.getElementById('stu-portal-pct').innerText = data.stats.percentage + '%';
-      document.getElementById('stu-portal-qr').src = '/api/qr/render/' + data.student.qr_token;
-      document.getElementById('stu-portal-img').src = data.student.profile_picture || 'https://via.placeholder.com/150';
-
-      document.getElementById('stu-stat-attended').innerText = data.stats.totalEvents;
-      document.getElementById('stu-stat-present').innerText = data.stats.presentCount;
-      document.getElementById('stu-stat-late').innerText = data.stats.lateCount;
-    }
-  </script>
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
-</html>`;
-
-// Serve Frontend SPA Application
-app.get('*', (req, res) => {
-  res.send(CLIENT_HTML);
+</html>`);
 });
 
 // Start Express Server
 app.listen(PORT, () => {
-  console.log(`===================================================`);
-  console.log(` QR Code School Attendance System Server Running`);
-  console.log(` URL: http://localhost:${PORT}`);
-  console.log(` Admin Portal: http://localhost:${PORT}`);
-  console.log(` Scanner Portal: http://localhost:${PORT}/scanner`);
-  console.log(` Default Admin User: admin | Pass: admin123`);
-  console.log(`===================================================`);
+  console.log(`=======================================================`);
+  console.log(` SCHOOL QR ATTENDANCE SYSTEM IS RUNNING ON PORT: ${PORT}`);
+  console.log(` Admin Portal:    http://localhost:${PORT}/#/admin/dashboard`);
+  console.log(` Scanner Portal:  http://localhost:${PORT}/#/scanner`);
+  console.log(`=======================================================`);
 });
