@@ -257,14 +257,23 @@ function renderPage(title, content, user = null) {
         body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
         .card { border: none; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        /* Standard CR80 / ID-1 Size Dimensions (85.6mm x 53.98mm Ratio) */
         .id-card-frame {
-          width: 1012px; height: 638px; border: 2px solid #2c3e50; border-radius: 8px;
-          background: #ffffff; padding: 8px; position: relative; box-sizing: border-box; display: inline-block;
+          width: 323px; 
+          height: 204px; 
+          border: 2px solid #1a252f; 
+          border-radius: 8px;
+          background: #ffffff; 
+          padding: 8px 10px; 
+          position: relative; 
+          box-sizing: border-box; 
+          display: inline-block;
+          overflow: hidden;
         }
         @media print {
           .no-print { display: none !important; }
           .a4-page { width: 210mm; height: 297mm; padding: 10mm; margin: auto; page-break-after: always; }
-          .grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15mm; }
+          .grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10mm; }
         }
       </style>
     </head>
@@ -1245,12 +1254,12 @@ app.post("/admin/database/restore", requireAuth(["admin"]), upload.single("backu
   });
 });
 
-// --- PRINTING ENGINE WITH ENLARGED QR CODE & CREDENTIALS ---
+// --- PRINTING ENGINE WITH STANDARD ID SIZE & ENLARGED QR CODE ---
 
 app.get("/api/qr/:token", async (req, res) => {
   try {
     const qrDataUrl = await QRCode.toDataURL(req.params.token, {
-      width: 500, // High-resolution QR code image output
+      width: 600, // High-definition resolution for crisp printing
       margin: 1,
       color: { dark: "#000000", light: "#ffffff" }
     });
@@ -1263,7 +1272,7 @@ app.get("/api/qr/:token", async (req, res) => {
   }
 });
 
-// UPDATED: Print IDs Route with Enlarged QR Code Layout and Temporary Credentials
+// UPDATED: Print IDs Route with Standard ID Dimensions (323px x 204px) & High-Res Enlarged QR Code Layout
 app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
   db.get(`SELECT * FROM settings WHERE id = 1`, [], (err, settings) => {
     db.all(
@@ -1280,35 +1289,35 @@ app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
           <div class="id-card-frame m-2">
             <!-- Header Section -->
             <div class="d-flex justify-content-between align-items-center mb-1 border-bottom pb-1">
-              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="20">
+              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="22" style="max-width:30px; object-fit:contain;">
               <div class="text-center" style="font-size: 8px; font-weight: bold; line-height: 1.1;">
                 <div>${settings.school_name}</div>
                 <div class="text-primary">${settings.club_name}</div>
               </div>
-              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="20">
+              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="22" style="max-width:30px; object-fit:contain;">
             </div>
 
             <!-- Student Info Section -->
             <div class="row g-1 align-items-center">
               <div class="col-3 text-center">
-                <img src="${s.photo_path}" style="width: 50px; height: 50px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
+                <img src="${s.photo_path}" style="width: 55px; height: 55px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
               </div>
-              <div class="col-9" style="font-size: 8.5px; line-height: 1.2;">
-                <div><strong>Name:</strong> ${s.first_name} ${s.last_name}</div>
+              <div class="col-9" style="font-size: 8.5px; line-height: 1.2; padding-left: 5px;">
+                <div class="text-truncate"><strong>Name:</strong> ${s.first_name} ${s.last_name}</div>
                 <div><strong>ID No:</strong> ${s.student_number}</div>
-                <div><strong>Position:</strong> ${s.position_name || 'Member'}</div>
+                <div class="text-truncate"><strong>Position:</strong> ${s.position_name || 'Member'}</div>
                 <div><strong>S.Y.:</strong> ${settings.school_year}</div>
               </div>
             </div>
 
             <!-- Enlarged QR Code & Credentials Section -->
             <div class="d-flex justify-content-between align-items-center mt-1 border-top pt-1">
-              <div style="font-size: 8px; background: #f8f9fa; padding: 3px 5px; border-radius: 3px; border: 1px solid #ddd; max-width: 140px;">
-                <div><strong>User:</strong> ${s.username || 'N/A'}</div>
-                <div><strong>Pass:</strong> ${s.raw_temp_password || 'N/A'}</div>
+              <div style="font-size: 8px; background: #f8f9fa; padding: 4px 6px; border-radius: 4px; border: 1px solid #ddd; max-width: 145px; width: 145px;">
+                <div class="text-truncate"><strong>User:</strong> ${s.username || 'N/A'}</div>
+                <div class="text-truncate"><strong>Pass:</strong> ${s.raw_temp_password || 'N/A'}</div>
               </div>
               <div class="text-center">
-                <img src="/api/qr/${s.qr_token}" style="height: 85px; width: 85px; display: block;">
+                <img src="/api/qr/${s.qr_token}" style="height: 95px; width: 95px; display: block; object-fit: contain;">
               </div>
             </div>
           </div>
