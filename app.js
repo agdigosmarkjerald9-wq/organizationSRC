@@ -176,6 +176,25 @@ async function runMigrations() {
   const intType = 'INTEGER';
   const timeStampType = dbType === 'pg' ? 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' : 'DATETIME DEFAULT CURRENT_TIMESTAMP';
 
+  // Auto-migration helper: Automatic column rename from email to username if present
+  try {
+    if (dbType === 'sqlite') {
+      const userCols = await DB.getAll("PRAGMA table_info(users)");
+      if (userCols.some(col => col.name === 'email')) {
+        await DB.query("ALTER TABLE users RENAME COLUMN email TO username");
+      }
+      const studentCols = await DB.getAll("PRAGMA table_info(students)");
+      if (studentCols.some(col => col.name === 'email')) {
+        await DB.query("ALTER TABLE students RENAME COLUMN email TO username");
+      }
+    } else if (dbType === 'pg') {
+      await DB.query("ALTER TABLE users RENAME COLUMN email TO username").catch(() => {});
+      await DB.query("ALTER TABLE students RENAME COLUMN email TO username").catch(() => {});
+    }
+  } catch (e) {
+    // Column might already be renamed or tables not yet created
+  }
+
   // 1. Settings Table
   await DB.query(`
     CREATE TABLE IF NOT EXISTS system_settings (
@@ -199,11 +218,11 @@ async function runMigrations() {
     )
   `);
 
-  // 2. Users Table
+  // 2. Users Table (Updated: username)
   await DB.query(`
     CREATE TABLE IF NOT EXISTS users (
       id ${autoInc},
-      email ${textType} UNIQUE NOT NULL,
+      username ${textType} UNIQUE NOT NULL,
       password ${textType} NOT NULL,
       role ${textType} NOT NULL,
       full_name ${textType} NOT NULL,
@@ -222,7 +241,7 @@ async function runMigrations() {
     )
   `);
 
-  // 4. Students Table
+  // 4. Students Table (Updated: username)
   await DB.query(`
     CREATE TABLE IF NOT EXISTS students (
       id ${autoInc},
@@ -230,7 +249,7 @@ async function runMigrations() {
       first_name ${textType} NOT NULL,
       middle_name ${textType} DEFAULT '',
       last_name ${textType} NOT NULL,
-      email ${textType} UNIQUE NOT NULL,
+      username ${textType} UNIQUE NOT NULL,
       contact_number ${textType} DEFAULT '',
       position_id ${intType} NOT NULL,
       photo_path ${textType} NOT NULL,
@@ -354,20 +373,20 @@ async function seedInitialData() {
   if (parseInt(adminCount.cnt) === 0) {
     const hashedPassword = await bcrypt.hash('admin123', 10);
     await DB.query(`
-      INSERT INTO users (email, password, role, full_name)
+      INSERT INTO users (username, password, role, full_name)
       VALUES ($1, $2, $3, $4)
-    `, ['admin@school.edu', hashedPassword, 'ADMIN', 'Club Adviser Admin']);
-    console.log('🔑 Initial Admin Created: Email: admin@school.edu | Password: admin123');
+    `, ['admin', hashedPassword, 'ADMIN', 'Club Adviser Admin']);
+    console.log('🔑 Initial Admin Created: Username: admin | Password: admin123');
   }
 
   const scannerCount = await DB.getOne('SELECT COUNT(*) as cnt FROM users WHERE role = $1', ['SCANNER']);
   if (parseInt(scannerCount.cnt) === 0) {
     const hashedPassword = await bcrypt.hash('scanner123', 10);
     await DB.query(`
-      INSERT INTO users (email, password, role, full_name)
+      INSERT INTO users (username, password, role, full_name)
       VALUES ($1, $2, $3, $4)
-    `, ['scanner@school.edu', hashedPassword, 'SCANNER', 'Official Gate Scanner']);
-    console.log('🔑 Initial Scanner User Created: Email: scanner@school.edu | Password: scanner123');
+    `, ['scanner', hashedPassword, 'SCANNER', 'Official Gate Scanner']);
+    console.log('🔑 Initial Scanner User Created: Username: scanner | Password: scanner123');
   }
 }
 
@@ -462,12 +481,12 @@ async function autoProcessAbsentStudents(eventId) {
 // --- AUTHENTICATION ---
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password are required.' });
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ success: false, message: 'Username and password are required.' });
     }
 
-    const user = await DB.getOne('SELECT * FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+    const user = await DB.getOne('SELECT * FROM users WHERE username = $1', [username.toLowerCase().trim()]);
     if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
     }
@@ -479,13 +498,13 @@ app.post('/api/auth/login', async (req, res) => {
 
     req.session.user = {
       id: user.id,
-      email: user.email,
+      username: user.username,
       role: user.role,
       full_name: user.full_name,
       student_id: user.student_id
     };
 
-    await logAudit(req, 'USER_LOGIN', `User ${user.email} logged in successfully.`);
+    await logAudit(req, 'USER_LOGIN', `User ${user.username} logged in successfully.`);
     return res.json({ success: true, user: req.session.user });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -494,7 +513,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/auth/logout', async (req, res) => {
   if (req.session?.user) {
-    await logAudit(req, 'USER_LOGOUT', `User ${req.session.user.email} logged out.`);
+    await logAudit(req, 'USER_LOGOUT', `User ${req.session.user.username} logged out.`);
   }
   req.session.destroy();
   return res.json({ success: true, message: 'Logged out successfully.' });
@@ -515,15 +534,15 @@ app.post('/api/public/register', upload.single('student_photo'), async (req, res
       return res.status(403).json({ success: false, message: 'Registration is currently closed by the Club Adviser.' });
     }
 
-    const { first_name, middle_name, last_name, email, contact_number, position_id } = req.body;
+    const { first_name, middle_name, last_name, username, contact_number, position_id } = req.body;
 
-    if (!first_name || !last_name || !email || !position_id || !req.file) {
+    if (!first_name || !last_name || !username || !position_id || !req.file) {
       return res.status(400).json({ success: false, message: 'Missing mandatory fields or photo upload.' });
     }
 
-    const existingStudent = await DB.getOne('SELECT id FROM students WHERE email = $1', [email.toLowerCase().trim()]);
+    const existingStudent = await DB.getOne('SELECT id FROM students WHERE username = $1', [username.toLowerCase().trim()]);
     if (existingStudent) {
-      return res.status(400).json({ success: false, message: 'An account with this email address already exists.' });
+      return res.status(400).json({ success: false, message: 'An account with this username already exists.' });
     }
 
     const photoPath = `/uploads/photos/${req.file.filename}`;
@@ -532,12 +551,12 @@ app.post('/api/public/register', upload.single('student_photo'), async (req, res
 
     const insertResult = await DB.query(`
       INSERT INTO students (
-        student_number, first_name, middle_name, last_name, email,
+        student_number, first_name, middle_name, last_name, username,
         contact_number, position_id, photo_path, qr_token, registration_status, membership_status
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', 'ACTIVE')
     `, [
       autoStudentNum, first_name.trim(), (middle_name || '').trim(), last_name.trim(),
-      email.toLowerCase().trim(), (contact_number || '').trim(), parseInt(position_id), photoPath, qrToken
+      username.toLowerCase().trim(), (contact_number || '').trim(), parseInt(position_id), photoPath, qrToken
     ]);
 
     const pos = await DB.getOne('SELECT title FROM positions WHERE id = $1', [position_id]);
@@ -676,7 +695,7 @@ app.get('/api/students', requireAuth, async (req, res) => {
 
     if (search) {
       params.push(`%${search}%`);
-      sql += ` AND (s.student_number LIKE $${params.length} OR s.first_name LIKE $${params.length} OR s.last_name LIKE $${params.length} OR s.email LIKE $${params.length})`;
+      sql += ` AND (s.student_number LIKE $${params.length} OR s.first_name LIKE $${params.length} OR s.last_name LIKE $${params.length} OR s.username LIKE $${params.length})`;
     }
     if (position_id) {
       params.push(position_id);
@@ -724,13 +743,13 @@ app.post('/api/students/:id/approve', requireAuth, requireRole(['ADMIN']), async
 
     await DB.query("UPDATE students SET registration_status = 'APPROVED' WHERE id = $1", [req.params.id]);
 
-    const existingUser = await DB.getOne('SELECT id FROM users WHERE email = $1', [student.email]);
+    const existingUser = await DB.getOne('SELECT id FROM users WHERE username = $1', [student.username]);
     if (!existingUser) {
       const defaultPassword = await bcrypt.hash('student123', 10);
       await DB.query(`
-        INSERT INTO users (email, password, role, full_name, student_id)
+        INSERT INTO users (username, password, role, full_name, student_id)
         VALUES ($1, $2, 'STUDENT', $3, $4)
-      `, [student.email, defaultPassword, `${student.first_name} ${student.last_name}`, student.id]);
+      `, [student.username, defaultPassword, `${student.first_name} ${student.last_name}`, student.id]);
     }
 
     await logAudit(req, 'STUDENT_APPROVE', `Approved student: ${student.first_name} ${student.last_name}`);
@@ -753,7 +772,7 @@ app.post('/api/students/:id/reject', requireAuth, requireRole(['ADMIN']), async 
 app.put('/api/students/:id', requireAuth, requireRole(['ADMIN']), upload.single('student_photo'), async (req, res) => {
   try {
     const studentId = req.params.id;
-    const { first_name, middle_name, last_name, email, contact_number, position_id, membership_status } = req.body;
+    const { first_name, middle_name, last_name, username, contact_number, position_id, membership_status } = req.body;
 
     const currentStudent = await DB.getOne('SELECT * FROM students WHERE id = $1', [studentId]);
     if (!currentStudent) return res.status(404).json({ success: false, message: 'Student not found.' });
@@ -774,13 +793,13 @@ app.put('/api/students/:id', requireAuth, requireRole(['ADMIN']), upload.single(
 
     await DB.query(`
       UPDATE students SET
-        first_name = $1, middle_name = $2, last_name = $3, email = $4,
+        first_name = $1, middle_name = $2, last_name = $3, username = $4,
         contact_number = $5, position_id = $6, photo_path = $7, membership_status = $8
       WHERE id = $9
-    `, [first_name, middle_name, last_name, email, contact_number, parseInt(position_id), photoPath, membership_status, studentId]);
+    `, [first_name, middle_name, last_name, username, contact_number, parseInt(position_id), photoPath, membership_status, studentId]);
 
-    await DB.query('UPDATE users SET email = $1, full_name = $2 WHERE student_id = $3', [
-      email, `${first_name} ${last_name}`, studentId
+    await DB.query('UPDATE users SET username = $1, full_name = $2 WHERE student_id = $3', [
+      username, `${first_name} ${last_name}`, studentId
     ]);
 
     await logAudit(req, 'STUDENT_UPDATE', `Updated profile for ID: ${studentId}`);
@@ -1078,7 +1097,7 @@ app.get('/api/reports/attendance', requireAuth, async (req, res) => {
   try {
     const { event_id, position_id, status } = req.query;
     let sql = `
-      SELECT a.*, s.student_number, s.first_name, s.last_name, s.email, p.title as position_title, e.event_name, e.event_date
+      SELECT a.*, s.student_number, s.first_name, s.last_name, s.username, p.title as position_title, e.event_name, e.event_date
       FROM attendance a
       JOIN students s ON a.student_id = s.id
       JOIN positions p ON s.position_id = p.id
@@ -1434,7 +1453,7 @@ app.get('*', (req, res) => {
                     <form id="publicRegForm" onsubmit="handlePublicRegister(event)">
                       <div class="mb-3"><label class="form-label">First Name *</label><input type="text" class="form-control" name="first_name" required></div>
                       <div class="mb-3"><label class="form-label">Last Name *</label><input type="text" class="form-control" name="last_name" required></div>
-                      <div class="mb-3"><label class="form-label">Email *</label><input type="email" class="form-control" name="email" required></div>
+                      <div class="mb-3"><label class="form-label">Username *</label><input type="text" class="form-control" name="username" required></div>
                       <div class="mb-3">
                         <label class="form-label">Position *</label>
                         <select class="form-select" name="position_id" required>
@@ -1466,7 +1485,7 @@ app.get('*', (req, res) => {
               <div class="card shadow-lg border-0 rounded-4 p-4" style="max-width: 400px; width:100%;">
                 <h4 class="fw-bold text-center mb-3">System Login</h4>
                 <form onsubmit="handleLogin(event)">
-                  <div class="mb-3"><label class="form-label">Email</label><input type="email" id="loginEmail" class="form-control" required placeholder="admin@school.edu"></div>
+                  <div class="mb-3"><label class="form-label">Username</label><input type="text" id="loginUsername" class="form-control" required placeholder="admin"></div>
                   <div class="mb-3"><label class="form-label">Password</label><input type="password" id="loginPassword" class="form-control" required placeholder="••••••••"></div>
                   <button type="submit" class="btn btn-primary w-100 py-2 fw-bold">Login</button>
                 </form>
@@ -1477,9 +1496,9 @@ app.get('*', (req, res) => {
 
         async function handleLogin(e) {
           e.preventDefault();
-          const email = document.getElementById('loginEmail').value;
+          const username = document.getElementById('loginUsername').value;
           const password = document.getElementById('loginPassword').value;
-          const res = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+          const res = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
           const data = await res.json();
           if (data.success) { state.user = data.user; router(); } else alert(data.message);
         }
@@ -1596,13 +1615,13 @@ app.get('*', (req, res) => {
               <a href="/print/student-ids" target="_blank" class="btn btn-primary"><i class="bi bi-printer"></i> Print All IDs</a>
             </div>
             <table class="table table-striped table-hover bg-white rounded shadow-sm">
-              <thead><tr><th>Student No</th><th>Name</th><th>Email</th><th>Position</th><th>Status</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Student No</th><th>Name</th><th>Username</th><th>Position</th><th>Status</th><th>Actions</th></tr></thead>
               <tbody>
                 \${list.map(s => \`
                   <tr>
                     <td>\${s.student_number}</td>
                     <td>\${s.first_name} \${s.last_name}</td>
-                    <td>\${s.email}</td>
+                    <td>\${s.username}</td>
                     <td>\${s.position_title}</td>
                     <td><span class="badge bg-\${s.registration_status === 'APPROVED' ? 'success' : 'warning'}">\${s.registration_status}</span></td>
                     <td>
