@@ -258,7 +258,7 @@ function renderPage(title, content, user = null) {
         .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
         .card { border: none; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
         .id-card-frame {
-          width: 323px; height: 204px; border: 2px solid #2c3e50; border-radius: 8px;
+          width: 323px; height: 215px; border: 2px solid #2c3e50; border-radius: 8px;
           background: #ffffff; padding: 8px; position: relative; box-sizing: border-box; display: inline-block;
         }
         @media print {
@@ -533,7 +533,7 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
                         <div class="col-md-3">
                           <div class="card bg-primary text-white p-3">
                             <h5>Active Students</h5>
-                            2>${stats.activeStudents}</h2>
+                            <h2>${stats.activeStudents}</h2>
                           </div>
                         </div>
                         <div class="col-md-3">
@@ -585,7 +585,6 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// STUDENT MANAGEMENT WITH TEMPORARY CREDENTIALS DISPLAY
 app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
   db.all(
     `SELECT s.*, p.name as position_name, u.username, u.raw_temp_password 
@@ -1246,7 +1245,7 @@ app.post("/admin/database/restore", requireAuth(["admin"]), upload.single("backu
   });
 });
 
-// --- PRINTING ENGINE, STUDENT PORTAL, SETTINGS & REPORTS ---
+// --- PRINTING ENGINE WITH CREDENTIALS PRINTED ON ID CARD ---
 
 app.get("/api/qr/:token", async (req, res) => {
   try {
@@ -1264,10 +1263,15 @@ app.get("/api/qr/:token", async (req, res) => {
   }
 });
 
+// UPDATED: Print IDs Route including Temporary Username & Password directly on the printed ID Layout
 app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
   db.get(`SELECT * FROM settings WHERE id = 1`, [], (err, settings) => {
     db.all(
-      `SELECT s.*, p.name as position_name FROM students s LEFT JOIN positions p ON s.position_id = p.id WHERE s.status = 'approved'`,
+      `SELECT s.*, p.name as position_name, u.username, u.raw_temp_password 
+       FROM students s 
+       LEFT JOIN positions p ON s.position_id = p.id 
+       LEFT JOIN users u ON u.student_id = s.id 
+       WHERE s.status = 'approved'`,
       [],
       (err, students) => {
         const idCardsHtml = students
@@ -1275,26 +1279,30 @@ app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
             (s) => `
           <div class="id-card-frame m-2">
             <div class="d-flex justify-content-between align-items-center mb-1 border-bottom pb-1">
-              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="25">
-              <div class="text-center" style="font-size: 8px; font-weight: bold; line-height: 1;">
+              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="22">
+              <div class="text-center" style="font-size: 8px; font-weight: bold; line-height: 1.1;">
                 <div>${settings.school_name}</div>
                 <div class="text-primary">${settings.club_name}</div>
               </div>
-              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="25">
+              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="22">
             </div>
             <div class="row g-1 align-items-center">
               <div class="col-4 text-center">
-                <img src="${s.photo_path}" style="width: 65px; height: 65px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
+                <img src="${s.photo_path}" style="width: 55px; height: 55px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
               </div>
-              <div class="col-8" style="font-size: 10px;">
+              <div class="col-8" style="font-size: 9px; line-height: 1.2;">
                 <div><strong>Name:</strong> ${s.first_name} ${s.last_name}</div>
                 <div><strong>ID No:</strong> ${s.student_number}</div>
                 <div><strong>Position:</strong> ${s.position_name || 'Member'}</div>
                 <div><strong>S.Y.:</strong> ${settings.school_year}</div>
               </div>
             </div>
-            <div class="text-center mt-1 border-top pt-1">
-              <img src="/api/qr/${s.qr_token}" style="height: 55px; width: 55px;">
+            <div class="d-flex justify-content-between align-items-center mt-1 border-top pt-1">
+              <div style="font-size: 8px; background: #f8f9fa; padding: 2px 4px; border-radius: 3px; border: 1px solid #ddd;">
+                <div><strong>User:</strong> ${s.username || 'N/A'}</div>
+                <div><strong>Pass:</strong> ${s.raw_temp_password || 'N/A'}</div>
+              </div>
+              <img src="/api/qr/${s.qr_token}" style="height: 48px; width: 48px;">
             </div>
           </div>
         `
