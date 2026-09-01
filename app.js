@@ -258,7 +258,7 @@ function renderPage(title, content, user = null) {
         .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
         .card { border: none; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
         .id-card-frame {
-          width: 323px; height: 215px; border: 2px solid #2c3e50; border-radius: 8px;
+          width: 323px; height: 230px; border: 2px solid #2c3e50; border-radius: 8px;
           background: #ffffff; padding: 8px; position: relative; box-sizing: border-box; display: inline-block;
         }
         @media print {
@@ -1245,12 +1245,12 @@ app.post("/admin/database/restore", requireAuth(["admin"]), upload.single("backu
   });
 });
 
-// --- PRINTING ENGINE WITH CREDENTIALS PRINTED ON ID CARD ---
+// --- PRINTING ENGINE WITH ENLARGED QR CODE & CREDENTIALS ---
 
 app.get("/api/qr/:token", async (req, res) => {
   try {
     const qrDataUrl = await QRCode.toDataURL(req.params.token, {
-      width: 300,
+      width: 500, // High-resolution QR code image output
       margin: 1,
       color: { dark: "#000000", light: "#ffffff" }
     });
@@ -1263,7 +1263,7 @@ app.get("/api/qr/:token", async (req, res) => {
   }
 });
 
-// UPDATED: Print IDs Route including Temporary Username & Password directly on the printed ID Layout
+// UPDATED: Print IDs Route with Enlarged QR Code Layout and Temporary Credentials
 app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
   db.get(`SELECT * FROM settings WHERE id = 1`, [], (err, settings) => {
     db.all(
@@ -1278,31 +1278,38 @@ app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
           .map(
             (s) => `
           <div class="id-card-frame m-2">
+            <!-- Header Section -->
             <div class="d-flex justify-content-between align-items-center mb-1 border-bottom pb-1">
-              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="22">
+              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="20">
               <div class="text-center" style="font-size: 8px; font-weight: bold; line-height: 1.1;">
                 <div>${settings.school_name}</div>
                 <div class="text-primary">${settings.club_name}</div>
               </div>
-              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="22">
+              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="20">
             </div>
+
+            <!-- Student Info Section -->
             <div class="row g-1 align-items-center">
-              <div class="col-4 text-center">
-                <img src="${s.photo_path}" style="width: 55px; height: 55px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
+              <div class="col-3 text-center">
+                <img src="${s.photo_path}" style="width: 50px; height: 50px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
               </div>
-              <div class="col-8" style="font-size: 9px; line-height: 1.2;">
+              <div class="col-9" style="font-size: 8.5px; line-height: 1.2;">
                 <div><strong>Name:</strong> ${s.first_name} ${s.last_name}</div>
                 <div><strong>ID No:</strong> ${s.student_number}</div>
                 <div><strong>Position:</strong> ${s.position_name || 'Member'}</div>
                 <div><strong>S.Y.:</strong> ${settings.school_year}</div>
               </div>
             </div>
+
+            <!-- Enlarged QR Code & Credentials Section -->
             <div class="d-flex justify-content-between align-items-center mt-1 border-top pt-1">
-              <div style="font-size: 8px; background: #f8f9fa; padding: 2px 4px; border-radius: 3px; border: 1px solid #ddd;">
+              <div style="font-size: 8px; background: #f8f9fa; padding: 3px 5px; border-radius: 3px; border: 1px solid #ddd; max-width: 140px;">
                 <div><strong>User:</strong> ${s.username || 'N/A'}</div>
                 <div><strong>Pass:</strong> ${s.raw_temp_password || 'N/A'}</div>
               </div>
-              <img src="/api/qr/${s.qr_token}" style="height: 48px; width: 48px;">
+              <div class="text-center">
+                <img src="/api/qr/${s.qr_token}" style="height: 85px; width: 85px; display: block;">
+              </div>
             </div>
           </div>
         `
@@ -1357,7 +1364,7 @@ app.get("/member", requireAuth(["student"]), (req, res) => {
                   <p class="text-muted mb-1">${student.position_name || 'Member'}</p>
                   <p class="badge bg-secondary mb-3">${student.student_number}</p>
                   <div class="border p-2 rounded bg-light">
-                    <img src="/api/qr/${student.qr_token}" class="img-fluid" style="max-width: 180px;">
+                    <img src="/api/qr/${student.qr_token}" class="img-fluid" style="max-width: 220px;">
                     <div class="small text-muted mt-1">Official Member QR Token</div>
                   </div>
                 </div>
