@@ -250,30 +250,183 @@ function renderPage(title, content, user = null) {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>${title} - QR Attendance System</title>
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
       <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
       <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
       <style>
-        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body { background-color: #f4f6f9; font-family: 'Inter', sans-serif; }
         .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
-        .card { border: none; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-        /* Standard CR80 / ID-1 Size Dimensions (85.6mm x 53.98mm Ratio) */
+        .card { border: none; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+
+        /* Standard CR80 Size ID Card Styling (85.6mm x 53.9mm) */
         .id-card-frame {
-          width: 323px; 
-          height: 204px; 
-          border: 2px solid #1a252f; 
-          border-radius: 8px;
-          background: #ffffff; 
-          padding: 8px 10px; 
-          position: relative; 
-          box-sizing: border-box; 
+          width: 85.6mm;
+          height: 54mm;
+          border-radius: 4mm;
+          background: #ffffff;
+          box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+          position: relative;
+          box-sizing: border-box;
           display: inline-block;
           overflow: hidden;
+          border: 1px solid #e0e0e0;
+          margin: 6px;
+          color: #1a202c;
+          vertical-align: top;
         }
+
+        .id-card-header {
+          background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%);
+          color: white;
+          padding: 4px 8px;
+          height: 14mm;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border-bottom: 2px solid #ffc107;
+        }
+
+        .id-card-header img {
+          height: 10mm;
+          width: 10mm;
+          object-fit: contain;
+          background: #fff;
+          border-radius: 50%;
+          padding: 1px;
+        }
+
+        .id-header-title {
+          text-align: center;
+          flex-grow: 1;
+          padding: 0 4px;
+        }
+
+        .id-header-title .school-name {
+          font-size: 7.5pt;
+          font-weight: 800;
+          line-height: 1;
+          text-transform: uppercase;
+          letter-spacing: 0.3px;
+        }
+
+        .id-header-title .club-name {
+          font-size: 6.5pt;
+          color: #ffc107;
+          font-weight: 600;
+          margin-top: 1px;
+        }
+
+        .id-card-body {
+          display: flex;
+          padding: 3mm 4mm;
+          height: 31mm;
+          align-items: center;
+          justify-content: space-between;
+          gap: 2mm;
+        }
+
+        .id-photo-wrapper {
+          width: 22mm;
+          height: 26mm;
+          border-radius: 2mm;
+          overflow: hidden;
+          border: 1.5px solid #0d6efd;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+          flex-shrink: 0;
+        }
+
+        .id-photo-wrapper img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .id-details {
+          flex-grow: 1;
+          font-size: 6.5pt;
+          line-height: 1.25;
+        }
+
+        .id-details .student-name {
+          font-size: 8pt;
+          font-weight: 800;
+          color: #0d6efd;
+          line-height: 1.1;
+          margin-bottom: 2px;
+          text-transform: uppercase;
+        }
+
+        .id-details .detail-item {
+          margin-bottom: 1px;
+          color: #495057;
+        }
+
+        .id-details .detail-item strong {
+          color: #212529;
+        }
+
+        .id-qr-box {
+          width: 24mm;
+          height: 26mm;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: #f8f9fa;
+          border: 1px dashed #cbd5e1;
+          border-radius: 2mm;
+          padding: 1mm;
+          flex-shrink: 0;
+        }
+
+        .id-qr-box img {
+          width: 20mm;
+          height: 20mm;
+          display: block;
+        }
+
+        .id-qr-box .qr-label {
+          font-size: 4.5pt;
+          font-weight: 700;
+          color: #6c757d;
+          margin-top: 1px;
+          text-transform: uppercase;
+        }
+
+        .id-card-footer {
+          background: #212529;
+          color: #ffffff;
+          height: 9mm;
+          padding: 0 6mm;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          font-size: 5.5pt;
+        }
+
+        .id-card-footer .cred-badge {
+          background: rgba(255, 255, 255, 0.15);
+          padding: 1px 4px;
+          border-radius: 2px;
+          font-family: monospace;
+        }
+
         @media print {
+          body { background: white !important; }
           .no-print { display: none !important; }
-          .a4-page { width: 210mm; height: 297mm; padding: 10mm; margin: auto; page-break-after: always; }
-          .grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10mm; }
+          .a4-page {
+            width: 210mm;
+            padding: 5mm;
+            margin: auto;
+          }
+          .id-card-frame {
+            page-break-inside: avoid;
+            box-shadow: none !important;
+            border: 1px solid #ccc !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
         }
       </style>
     </head>
@@ -338,7 +491,7 @@ app.get("/login", (req, res) => {
   const html = `
     <div class="row justify-content-center mt-5">
       <div class="col-md-4">
-        <div class="card shadow">
+        <div class="card shadow-lg">
           <div class="card-header bg-primary text-white text-center py-3">
             <h4 class="mb-0"><i class="bi bi-lock-fill me-2"></i>System Login</h4>
           </div>
@@ -352,7 +505,7 @@ app.get("/login", (req, res) => {
                 <label class="form-label">Password</label>
                 <input type="password" name="password" class="form-control" placeholder="Enter password" required>
               </div>
-              <button type="submit" class="btn btn-primary w-100">Sign In</button>
+              <button type="submit" class="btn btn-primary w-100 py-2">Sign In</button>
             </form>
             <hr>
             <div class="text-center">
@@ -407,7 +560,7 @@ app.get("/register", (req, res) => {
     const html = `
       <div class="row justify-content-center my-4">
         <div class="col-md-6">
-          <div class="card shadow">
+          <div class="card shadow-lg">
             <div class="card-header bg-success text-white py-3">
               <h4 class="mb-0"><i class="bi bi-person-plus-fill me-2"></i>Student Club Registration</h4>
             </div>
@@ -446,7 +599,7 @@ app.get("/register", (req, res) => {
                   <label class="form-label">Student Photo *</label>
                   <input type="file" name="student_photo" class="form-control" accept="image/*" required>
                 </div>
-                <button type="submit" class="btn btn-success w-100">Submit Registration Request</button>
+                <button type="submit" class="btn btn-success w-100 py-2">Submit Registration Request</button>
               </form>
               <div class="text-center mt-3">
                 <a href="/login" class="text-decoration-none">Return to Login</a>
@@ -479,7 +632,7 @@ app.post("/register", upload.single("student_photo"), (req, res) => {
       const html = `
         <div class="row justify-content-center mt-5">
           <div class="col-md-6 text-center">
-            <div class="card p-5 shadow">
+            <div class="card p-5 shadow-lg">
               <i class="bi bi-check-circle-fill text-success display-1 mb-3"></i>
               <h3>Registration Submitted Successfully!</h3>
               <p class="text-muted">Your registration is pending approval from the club administrator. Once approved, your account credentials and QR ID will be generated.</p>
@@ -540,25 +693,25 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
                       <h2 class="mb-4">Admin Dashboard</h2>
                       <div class="row g-3 mb-4">
                         <div class="col-md-3">
-                          <div class="card bg-primary text-white p-3">
+                          <div class="card bg-primary text-white p-3 shadow-sm">
                             <h5>Active Students</h5>
                             <h2>${stats.activeStudents}</h2>
                           </div>
                         </div>
                         <div class="col-md-3">
-                          <div class="card bg-warning text-dark p-3">
+                          <div class="card bg-warning text-dark p-3 shadow-sm">
                             <h5>Pending Requests</h5>
                             <h2>${stats.pendingStudents}</h2>
                           </div>
                         </div>
                         <div class="col-md-3">
-                          <div class="card bg-success text-white p-3">
+                          <div class="card bg-success text-white p-3 shadow-sm">
                             <h5>Active Events</h5>
                             <h2>${stats.activeEvents}</h2>
                           </div>
                         </div>
                         <div class="col-md-3">
-                          <div class="card bg-info text-white p-3">
+                          <div class="card bg-info text-white p-3 shadow-sm">
                             <h5>Attendance Rate</h5>
                             <h2>${attendanceRate}%</h2>
                           </div>
@@ -572,7 +725,7 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
                         <div class="col-md-3"><div class="card p-3 border-start border-secondary border-4">Excused: <strong>${stats.excused}</strong></div></div>
                       </div>
 
-                      <div class="card">
+                      <div class="card shadow-sm">
                         <div class="card-header bg-dark text-white">Recent Attendance Logs</div>
                         <div class="card-body p-0">
                           <table class="table table-striped mb-0">
@@ -631,7 +784,7 @@ app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
         <div class="d-flex justify-content-between align-items-center mb-3">
           <h2>Student & Credentials Management</h2>
         </div>
-        <div class="card">
+        <div class="card shadow-sm">
           <div class="card-body p-0">
             <table class="table table-striped align-middle mb-0">
               <thead>
@@ -676,7 +829,7 @@ app.get("/admin/students/approve/:id", requireAuth(["admin"]), (req, res) => {
         function (err) {
           logAudit(req.session.user.username, "APPROVE_STUDENT", `Approved Student ID: ${studentId}, Generated User: ${username}`, req.ip);
           const html = `
-            <div class="card p-4 mx-auto mt-5" style="max-width: 500px;">
+            <div class="card p-4 mx-auto mt-5 shadow-lg" style="max-width: 500px;">
               <h4 class="text-success"><i class="bi bi-check-circle me-2"></i>Student Approved!</h4>
               <p>Generated Credentials:</p>
               <ul>
@@ -728,7 +881,7 @@ app.get("/admin/positions", requireAuth(["admin"]), (req, res) => {
     const html = `
       <div class="row">
         <div class="col-md-4">
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-primary text-white">Add Position</div>
             <div class="card-body">
               <form action="/admin/positions/add" method="POST">
@@ -746,7 +899,7 @@ app.get("/admin/positions", requireAuth(["admin"]), (req, res) => {
           </div>
         </div>
         <div class="col-md-8">
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-dark text-white">Club Positions</div>
             <div class="card-body p-0">
               <table class="table table-striped mb-0">
@@ -800,7 +953,7 @@ app.get("/admin/events", requireAuth(["admin"]), (req, res) => {
     const html = `
       <div class="row">
         <div class="col-md-4">
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-success text-white">Create Event</div>
             <div class="card-body">
               <form action="/admin/events/add" method="POST">
@@ -823,7 +976,7 @@ app.get("/admin/events", requireAuth(["admin"]), (req, res) => {
           </div>
         </div>
         <div class="col-md-8">
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-dark text-white">Event List</div>
             <div class="card-body p-0">
               <table class="table table-striped mb-0">
@@ -880,7 +1033,7 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
     const html = `
       <div class="row justify-content-center">
         <div class="col-md-8">
-          <div class="card shadow">
+          <div class="card shadow-lg">
             <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
               <h4 class="mb-0"><i class="bi bi-qr-code-scan me-2"></i>Attendance QR Scanner</h4>
               <span class="badge bg-success">Live Mode</span>
@@ -1181,7 +1334,7 @@ app.get("/admin/database", requireAuth(["admin"]), (req, res) => {
     const html = `
       <div class="row">
         <div class="col-md-6">
-          <div class="card mb-4">
+          <div class="card mb-4 shadow-sm">
             <div class="card-header bg-dark text-white">Create Database Backup</div>
             <div class="card-body">
               <p class="text-muted">Download a complete SQLite snapshot of your system to prevent data loss.</p>
@@ -1190,7 +1343,7 @@ app.get("/admin/database", requireAuth(["admin"]), (req, res) => {
               </a>
             </div>
           </div>
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-danger text-white">Restore Database</div>
             <div class="card-body">
               <form action="/admin/database/restore" method="POST" enctype="multipart/form-data">
@@ -1207,7 +1360,7 @@ app.get("/admin/database", requireAuth(["admin"]), (req, res) => {
         </div>
 
         <div class="col-md-6">
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-secondary text-white">Local System Backups</div>
             <div class="card-body p-0">
               <table class="table table-striped mb-0">
@@ -1254,14 +1407,14 @@ app.post("/admin/database/restore", requireAuth(["admin"]), upload.single("backu
   });
 });
 
-// --- PRINTING ENGINE WITH STANDARD ID SIZE & ENLARGED QR CODE ---
+// --- PRINTING ENGINE WITH ENLARGED QR CODE & HIGH QUALITY CARDS ---
 
 app.get("/api/qr/:token", async (req, res) => {
   try {
     const qrDataUrl = await QRCode.toDataURL(req.params.token, {
-      width: 600, // High-definition resolution for crisp printing
+      width: 600, // HD QR Code output
       margin: 1,
-      color: { dark: "#000000", light: "#ffffff" }
+      color: { dark: "#0f172a", light: "#ffffff" }
     });
     const base64Data = qrDataUrl.replace(/^data:image\/png;base64,/, "");
     const img = Buffer.from(base64Data, "base64");
@@ -1272,7 +1425,7 @@ app.get("/api/qr/:token", async (req, res) => {
   }
 });
 
-// UPDATED: Print IDs Route with Standard ID Dimensions (323px x 204px) & High-Res Enlarged QR Code Layout
+// UPDATED: Standard ID Card Layout (CR80 Dimension: 85.6mm x 54mm)
 app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
   db.get(`SELECT * FROM settings WHERE id = 1`, [], (err, settings) => {
     db.all(
@@ -1286,39 +1439,40 @@ app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
         const idCardsHtml = students
           .map(
             (s) => `
-          <div class="id-card-frame m-2">
-            <!-- Header Section -->
-            <div class="d-flex justify-content-between align-items-center mb-1 border-bottom pb-1">
-              <img src="${settings.school_logo || 'https://via.placeholder.com/30'}" height="22" style="max-width:30px; object-fit:contain;">
-              <div class="text-center" style="font-size: 8px; font-weight: bold; line-height: 1.1;">
-                <div>${settings.school_name}</div>
-                <div class="text-primary">${settings.club_name}</div>
+          <div class="id-card-frame">
+            <!-- Top Header Banner -->
+            <div class="id-card-header">
+              <img src="${settings.school_logo || 'https://via.placeholder.com/40'}" alt="School Logo">
+              <div class="id-header-title">
+                <div class="school-name">${settings.school_name}</div>
+                <div class="club-name">${settings.club_name}</div>
               </div>
-              <img src="${settings.club_logo || 'https://via.placeholder.com/30'}" height="22" style="max-width:30px; object-fit:contain;">
+              <img src="${settings.club_logo || 'https://via.placeholder.com/40'}" alt="Club Logo">
             </div>
 
-            <!-- Student Info Section -->
-            <div class="row g-1 align-items-center">
-              <div class="col-3 text-center">
-                <img src="${s.photo_path}" style="width: 55px; height: 55px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc;">
+            <!-- Body Section: Photo, Info, and Enlarged QR Code -->
+            <div class="id-card-body">
+              <div class="id-photo-wrapper">
+                <img src="${s.photo_path}" alt="Student Photo">
               </div>
-              <div class="col-9" style="font-size: 8.5px; line-height: 1.2; padding-left: 5px;">
-                <div class="text-truncate"><strong>Name:</strong> ${s.first_name} ${s.last_name}</div>
-                <div><strong>ID No:</strong> ${s.student_number}</div>
-                <div class="text-truncate"><strong>Position:</strong> ${s.position_name || 'Member'}</div>
-                <div><strong>S.Y.:</strong> ${settings.school_year}</div>
+
+              <div class="id-details">
+                <div class="student-name">${s.first_name}<br>${s.last_name}</div>
+                <div class="detail-item"><strong>ID No:</strong> ${s.student_number || 'N/A'}</div>
+                <div class="detail-item"><strong>Role:</strong> ${s.position_name || 'Member'}</div>
+                <div class="detail-item"><strong>S.Y.:</strong> ${settings.school_year}</div>
+              </div>
+
+              <div class="id-qr-box">
+                <img src="/api/qr/${s.qr_token}" alt="QR Token">
+                <span class="qr-label">SCAN ME</span>
               </div>
             </div>
 
-            <!-- Enlarged QR Code & Credentials Section -->
-            <div class="d-flex justify-content-between align-items-center mt-1 border-top pt-1">
-              <div style="font-size: 8px; background: #f8f9fa; padding: 4px 6px; border-radius: 4px; border: 1px solid #ddd; max-width: 145px; width: 145px;">
-                <div class="text-truncate"><strong>User:</strong> ${s.username || 'N/A'}</div>
-                <div class="text-truncate"><strong>Pass:</strong> ${s.raw_temp_password || 'N/A'}</div>
-              </div>
-              <div class="text-center">
-                <img src="/api/qr/${s.qr_token}" style="height: 95px; width: 95px; display: block; object-fit: contain;">
-              </div>
+            <!-- Bottom Credentials Footer Bar -->
+            <div class="id-card-footer">
+              <span>USER: <strong class="cred-badge">${s.username || 'N/A'}</strong></span>
+              <span>PASS: <strong class="cred-badge">${s.raw_temp_password || 'N/A'}</strong></span>
             </div>
           </div>
         `
@@ -1326,12 +1480,12 @@ app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
           .join("");
 
         const html = `
-          <div class="no-print mb-3">
-            <button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer me-2"></i>Print A4 Sheet Page</button>
+          <div class="no-print mb-4">
+            <button onclick="window.print()" class="btn btn-primary btn-lg"><i class="bi bi-printer me-2"></i>Print A4 Sheet Page</button>
           </div>
           <div class="a4-page">
-            <div class="d-flex flex-wrap justify-content-start">
-              ${idCardsHtml || '<div>No approved students available for printing.</div>'}
+            <div class="d-flex flex-wrap align-content-start">
+              ${idCardsHtml || '<div class="alert alert-info">No approved students available for printing.</div>'}
             </div>
           </div>
         `;
@@ -1367,19 +1521,19 @@ app.get("/member", requireAuth(["student"]), (req, res) => {
           const html = `
             <div class="row">
               <div class="col-md-4">
-                <div class="card text-center p-3">
-                  <img src="${student.photo_path}" class="rounded-circle mx-auto mb-3" style="width: 120px; height: 120px; object-fit: cover;">
+                <div class="card text-center p-3 shadow-sm">
+                  <img src="${student.photo_path}" class="rounded-circle mx-auto mb-3" style="width: 120px; height: 120px; object-fit: cover; border: 3px solid #0d6efd;">
                   <h4>${student.first_name} ${student.last_name}</h4>
                   <p class="text-muted mb-1">${student.position_name || 'Member'}</p>
                   <p class="badge bg-secondary mb-3">${student.student_number}</p>
-                  <div class="border p-2 rounded bg-light">
+                  <div class="border p-3 rounded bg-light">
                     <img src="/api/qr/${student.qr_token}" class="img-fluid" style="max-width: 220px;">
-                    <div class="small text-muted mt-1">Official Member QR Token</div>
+                    <div class="small text-muted mt-2">Official Member QR Token</div>
                   </div>
                 </div>
               </div>
               <div class="col-md-8">
-                <div class="card mb-4">
+                <div class="card mb-4 shadow-sm">
                   <div class="card-header bg-primary text-white">Attendance History</div>
                   <div class="card-body p-0">
                     <table class="table table-striped mb-0">
@@ -1389,7 +1543,7 @@ app.get("/member", requireAuth(["student"]), (req, res) => {
                   </div>
                 </div>
 
-                <div class="card">
+                <div class="card shadow-sm">
                   <div class="card-header bg-dark text-white">Change Account Password</div>
                   <div class="card-body">
                     <form action="/member/change-password" method="POST">
@@ -1425,7 +1579,7 @@ app.get("/admin/settings", requireAuth(["admin"]), (req, res) => {
     const html = `
       <div class="row justify-content-center">
         <div class="col-md-6">
-          <div class="card">
+          <div class="card shadow-sm">
             <div class="card-header bg-dark text-white">School & Club Branding Settings</div>
             <div class="card-body">
               <form action="/admin/settings" method="POST" enctype="multipart/form-data">
@@ -1495,7 +1649,7 @@ app.get("/admin/reports", requireAuth(["admin"]), (req, res) => {
     const eventOptions = events.map((e) => `<option value="${e.id}">${e.name}</option>`).join("");
 
     const html = `
-      <div class="card mb-4">
+      <div class="card mb-4 shadow-sm">
         <div class="card-header bg-dark text-white">Generate Attendance & Audit Reports</div>
         <div class="card-body">
           <form action="/admin/reports/export" method="GET" class="row g-3">
@@ -1576,7 +1730,7 @@ app.get("/admin/audit", requireAuth(["admin"]), (req, res) => {
       .join("");
 
     const html = `
-      <div class="card">
+      <div class="card shadow-sm">
         <div class="card-header bg-dark text-white">System Security & Action Audit Logs</div>
         <div class="card-body p-0">
           <table class="table table-striped mb-0" style="font-size: 13px;">
