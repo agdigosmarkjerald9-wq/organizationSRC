@@ -178,7 +178,7 @@ app.use(
     secret: process.env.SESSION_SECRET || "super-secret-club-key-2026",
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 8 } // 8 hours duration
+    cookie: { maxAge: 1000 * 60 * 60 * 8 }
   })
 );
 
@@ -309,7 +309,6 @@ function renderPage(title, content, user = null) {
 
 // --- PUBLIC & AUTHENTICATION ROUTES ---
 
-// Redirect root to appropriate destination
 app.get("/", (req, res) => {
   if (!req.session.user) return res.redirect("/login");
   if (req.session.user.role === "admin") return res.redirect("/admin/dashboard");
@@ -317,7 +316,6 @@ app.get("/", (req, res) => {
   if (req.session.user.role === "student") return res.redirect("/member");
 });
 
-// Login Page
 app.get("/login", (req, res) => {
   const html = `
     <div class="row justify-content-center mt-5">
@@ -350,7 +348,6 @@ app.get("/login", (req, res) => {
   res.send(renderPage("Login", html));
 });
 
-// Execute Login
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
   db.get(`SELECT * FROM users WHERE username = ?`, [username], (err, user) => {
@@ -377,7 +374,6 @@ app.post("/login", (req, res) => {
   });
 });
 
-// Logout
 app.get("/logout", (req, res) => {
   if (req.session.user) {
     logAudit(req.session.user.username, "LOGOUT", "User logged out", req.ip);
@@ -387,7 +383,6 @@ app.get("/logout", (req, res) => {
   });
 });
 
-// Public Student Registration Page (/register)
 app.get("/register", (req, res) => {
   db.all(`SELECT * FROM positions ORDER BY name ASC`, [], (err, positions) => {
     let positionOptions = positions.map((p) => `<option value="${p.id}">${p.name}</option>`).join("");
@@ -447,7 +442,6 @@ app.get("/register", (req, res) => {
   });
 });
 
-// Process Public Student Registration
 app.post("/register", upload.single("student_photo"), (req, res) => {
   const { first_name, middle_name, last_name, email, contact_number, position_id } = req.body;
   if (!req.file) {
@@ -480,9 +474,9 @@ app.post("/register", upload.single("student_photo"), (req, res) => {
     }
   );
 });
+
 // --- ADMIN DASHBOARD & MANAGEMENT ROUTES ---
 
-// Admin Dashboard
 app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
   const stats = {};
   db.get(`SELECT COUNT(*) as total FROM students WHERE status='approved'`, [], (e, r) => {
@@ -503,7 +497,6 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
                 const totalMarked = stats.present + stats.late + stats.absent + stats.excused;
                 const attendanceRate = totalMarked > 0 ? (((stats.present + stats.late) / totalMarked) * 100).toFixed(1) : "0.0";
 
-                // Fetch recent attendance scans
                 db.all(
                   `SELECT a.*, s.first_name, s.last_name, e.name as event_name 
                    FROM attendance a 
@@ -583,7 +576,6 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Student Management Page
 app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
   db.all(
     `SELECT s.*, p.name as position_name FROM students s LEFT JOIN positions p ON s.position_id = p.id ORDER BY s.id DESC`,
@@ -593,7 +585,7 @@ app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
         .map(
           (s) => `
         <tr>
-          <td><img src="${s.photo_path}" width="40" height="40" class="rounded-circle"></td>
+          <td><img src="${s.photo_path}" width="40" height="40" class="rounded-circle" style="object-fit: cover;"></td>
           <td>${s.student_number || 'N/A'}</td>
           <td>${s.first_name} ${s.last_name}</td>
           <td>${s.email}</td>
@@ -630,7 +622,6 @@ app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
   );
 });
 
-// Approve Pending Student
 app.get("/admin/students/approve/:id", requireAuth(["admin"]), (req, res) => {
   const studentId = req.params.id;
   const studentNum = "STU-" + Math.floor(100000 + Math.random() * 900000);
@@ -669,7 +660,6 @@ app.get("/admin/students/approve/:id", requireAuth(["admin"]), (req, res) => {
   );
 });
 
-// Regenerate QR Code Token
 app.get("/admin/students/regenerate-qr/:id", requireAuth(["admin"]), (req, res) => {
   const newToken = "QR-" + Date.now() + "-" + Math.random().toString(36).substring(2, 9);
   db.run(`UPDATE students SET qr_token = ? WHERE id = ?`, [newToken, req.params.id], function (err) {
@@ -678,7 +668,6 @@ app.get("/admin/students/regenerate-qr/:id", requireAuth(["admin"]), (req, res) 
   });
 });
 
-// Delete Student
 app.get("/admin/students/delete/:id", requireAuth(["admin"]), (req, res) => {
   db.run(`DELETE FROM students WHERE id = ?`, [req.params.id], function (err) {
     logAudit(req.session.user.username, "DELETE_STUDENT", `Deleted Student ID: ${req.params.id}`, req.ip);
@@ -686,7 +675,6 @@ app.get("/admin/students/delete/:id", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Customizable Position Management Page
 app.get("/admin/positions", requireAuth(["admin"]), (req, res) => {
   db.all(`SELECT * FROM positions ORDER BY id DESC`, [], (err, positions) => {
     const listHtml = positions
@@ -740,7 +728,6 @@ app.get("/admin/positions", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Add Position Engine
 app.post("/admin/positions/add", requireAuth(["admin"]), (req, res) => {
   const { name, description } = req.body;
   db.run(`INSERT INTO positions (name, description) VALUES (?, ?)`, [name, description], function (err) {
@@ -749,7 +736,6 @@ app.post("/admin/positions/add", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Delete Position Engine
 app.get("/admin/positions/delete/:id", requireAuth(["admin"]), (req, res) => {
   db.run(`DELETE FROM positions WHERE id = ?`, [req.params.id], function (err) {
     logAudit(req.session.user.username, "DELETE_POSITION", `Deleted Position ID: ${req.params.id}`, req.ip);
@@ -757,7 +743,6 @@ app.get("/admin/positions/delete/:id", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Events Management Route
 app.get("/admin/events", requireAuth(["admin"]), (req, res) => {
   db.all(`SELECT * FROM events ORDER BY id DESC`, [], (err, events) => {
     const eventRows = events
@@ -820,7 +805,6 @@ app.get("/admin/events", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Add Event
 app.post("/admin/events/add", requireAuth(["admin"]), (req, res) => {
   const { name, type, event_date, start_time, end_time, location, late_threshold_minutes } = req.body;
   db.run(
@@ -833,14 +817,12 @@ app.post("/admin/events/add", requireAuth(["admin"]), (req, res) => {
   );
 });
 
-// Update Event Status & Automatic Absence Sync
 app.get("/admin/events/status/:id", requireAuth(["admin"]), (req, res) => {
   const { status } = req.query;
   const eventId = req.params.id;
 
   db.run(`UPDATE events SET status = ? WHERE id = ?`, [status, eventId], function (err) {
     if (status === "completed") {
-      // Automatically register un-scanned students as Absent
       db.all(`SELECT id FROM students WHERE status='approved'`, [], (err, students) => {
         students.forEach((s) => {
           db.run(
@@ -854,9 +836,9 @@ app.get("/admin/events/status/:id", requireAuth(["admin"]), (req, res) => {
     res.redirect("/admin/events");
   });
 });
-// --- CAMERA QR SCANNER & VOICE FEEDBACK ENGINE ---
 
-// Scanner Page Interface
+// --- CAMERA QR SCANNER & VOICE FEEDBACK ENGINE (WITH STUDENT PHOTO DISPLAY) ---
+
 app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
   db.all(`SELECT * FROM events WHERE status = 'active'`, [], (err, activeEvents) => {
     let eventOptions = activeEvents.map((e) => `<option value="${e.id}">${e.name} (${e.type})</option>`).join("");
@@ -887,8 +869,10 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
                 </div>
               </div>
 
+              <!-- Camera Viewport Frame -->
               <div id="reader" style="width: 100%; border-radius: 8px; overflow: hidden; background: #000;" class="mb-3"></div>
 
+              <!-- Voice & Audio Configuration Bar -->
               <div class="p-3 bg-light rounded border mb-3">
                 <h6>Voice & Sound Settings</h6>
                 <div class="form-check form-check-inline">
@@ -901,9 +885,26 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
                 </div>
               </div>
 
-              <div id="scanResult" class="alert alert-secondary text-center d-none" role="alert">
-                Awaiting QR Code Scan...
+              <!-- Realtime Scan Notification Banner with Student Photo -->
+              <div id="scanCard" class="card d-none border-2">
+                <div class="card-body">
+                  <div class="row align-items-center">
+                    <div class="col-md-4 text-center mb-3 mb-md-0">
+                      <img id="studentPhoto" src="" alt="Student Photo" class="img-thumbnail rounded-circle" style="width: 150px; height: 150px; object-fit: cover; border: 3px solid #0d6efd;">
+                    </div>
+                    <div class="col-md-8">
+                      <h3 id="studentName" class="mb-1 text-primary">Student Name</h3>
+                      <p class="mb-1"><strong>Student No:</strong> <span id="studentNumber">-</span></p>
+                      <p class="mb-1"><strong>Position:</strong> <span id="studentPosition">-</span></p>
+                      <p class="mb-2"><strong>Status:</strong> <span id="attendanceBadge" class="badge bg-success fs-6">Present</span></p>
+                      <div id="scanMessage" class="alert alert-info py-2 mb-0" role="alert">
+                        Attendance recorded successfully.
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
+
             </div>
           </div>
         </div>
@@ -949,7 +950,7 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
         function onScanSuccess(decodedText) {
           const now = Date.now();
           if (decodedText === lastScannedToken && (now - lastScanTime) < 4000) {
-            return; // Throttle redundant immediate frames
+            return;
           }
           lastScannedToken = decodedText;
           lastScanTime = now;
@@ -971,23 +972,50 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
           })
           .then(res => res.json())
           .then(data => {
-            const resultDiv = document.getElementById('scanResult');
-            resultDiv.classList.remove('d-none', 'alert-success', 'alert-warning', 'alert-danger', 'alert-secondary');
+            const scanCard = document.getElementById('scanCard');
+            const studentPhoto = document.getElementById('studentPhoto');
+            const studentName = document.getElementById('studentName');
+            const studentNumber = document.getElementById('studentNumber');
+            const studentPosition = document.getElementById('studentPosition');
+            const attendanceBadge = document.getElementById('attendanceBadge');
+            const scanMessage = document.getElementById('scanMessage');
 
-            if (data.status === 'success') {
-              playAudioSignal('success');
-              resultDiv.classList.add('alert-success');
-              resultDiv.innerHTML = '<strong>' + data.student_name + '</strong> - ' + data.message + ' (' + data.attendance_status + ')';
-              speakPhrase(data.student_name + ', ' + data.message);
-            } else if (data.status === 'duplicate') {
-              playAudioSignal('error');
-              resultDiv.classList.add('alert-warning');
-              resultDiv.innerHTML = '<strong>' + data.student_name + '</strong> - ' + data.message;
-              speakPhrase(data.student_name + ', you are already recorded.');
+            scanCard.classList.remove('d-none');
+
+            if (data.status === 'success' || data.status === 'duplicate') {
+              studentPhoto.src = data.student_photo || 'https://via.placeholder.com/150';
+              studentName.innerText = data.student_name;
+              studentNumber.innerText = data.student_number || 'N/A';
+              studentPosition.innerText = data.student_position || 'Member';
+
+              if (data.status === 'success') {
+                playAudioSignal('success');
+                scanCard.className = 'card border-2 border-success';
+                attendanceBadge.className = 'badge fs-6 bg-' + (data.attendance_status === 'Present' ? 'success' : data.attendance_status === 'Late' ? 'warning' : 'info');
+                attendanceBadge.innerText = data.attendance_status;
+                scanMessage.className = 'alert alert-success py-2 mb-0';
+                scanMessage.innerText = data.message;
+                speakPhrase(data.student_name + ', ' + data.message);
+              } else {
+                playAudioSignal('error');
+                scanCard.className = 'card border-2 border-warning';
+                attendanceBadge.className = 'badge fs-6 bg-warning text-dark';
+                attendanceBadge.innerText = 'Duplicate';
+                scanMessage.className = 'alert alert-warning py-2 mb-0';
+                scanMessage.innerText = data.message;
+                speakPhrase(data.student_name + ', you are already recorded.');
+              }
             } else {
               playAudioSignal('error');
-              resultDiv.classList.add('alert-danger');
-              resultDiv.innerHTML = data.message;
+              scanCard.className = 'card border-2 border-danger';
+              studentPhoto.src = 'https://via.placeholder.com/150?text=Invalid';
+              studentName.innerText = 'Unknown Student';
+              studentNumber.innerText = '-';
+              studentPosition.innerText = '-';
+              attendanceBadge.className = 'badge fs-6 bg-danger';
+              attendanceBadge.innerText = 'Error';
+              scanMessage.className = 'alert alert-danger py-2 mb-0';
+              scanMessage.innerText = data.message;
               speakPhrase('Invalid QR code.');
             }
           })
@@ -1006,73 +1034,91 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
   });
 });
 
-// Process Attendance API Endpoint
+// Process Attendance API Endpoint (Includes Student Details & Photo)
 app.post("/api/process-scan", (req, res) => {
   const { qr_token, event_id, mode } = req.body;
 
-  db.get(`SELECT * FROM students WHERE qr_token = ? AND status = 'approved'`, [qr_token], (err, student) => {
-    if (err || !student) {
-      return res.json({ status: "invalid", message: "Invalid QR code." });
-    }
-
-    db.get(`SELECT * FROM events WHERE id = ?`, [event_id], (err, event) => {
-      if (err || !event) {
-        return res.json({ status: "error", message: "Event not found." });
+  db.get(
+    `SELECT s.*, p.name as position_name 
+     FROM students s 
+     LEFT JOIN positions p ON s.position_id = p.id 
+     WHERE s.qr_token = ? AND s.status = 'approved'`,
+    [qr_token],
+    (err, student) => {
+      if (err || !student) {
+        return res.json({ status: "invalid", message: "Invalid QR code." });
       }
 
-      const fullName = `${student.first_name} ${student.last_name}`;
-      const now = new Date();
-      const currentTimeStr = now.toTimeString().split(" ")[0];
+      db.get(`SELECT * FROM events WHERE id = ?`, [event_id], (err, event) => {
+        if (err || !event) {
+          return res.json({ status: "error", message: "Event not found." });
+        }
 
-      if (mode === "time_in") {
-        db.get(`SELECT * FROM attendance WHERE event_id = ? AND student_id = ?`, [event_id, student.id], (err, record) => {
-          if (record && record.time_in) {
-            return res.json({ status: "duplicate", student_name: fullName, message: "Already recorded." });
-          }
+        const fullName = `${student.first_name} ${student.last_name}`;
+        const now = new Date();
 
-          // Compute Present vs Late Status
-          const eventStart = new Date(`${event.event_date}T${event.start_time}`);
-          const thresholdMs = (event.late_threshold_minutes || 15) * 60 * 1000;
-          const status = now.getTime() > eventStart.getTime() + thresholdMs ? "Late" : "Present";
+        if (mode === "time_in") {
+          db.get(`SELECT * FROM attendance WHERE event_id = ? AND student_id = ?`, [event_id, student.id], (err, record) => {
+            if (record && record.time_in) {
+              return res.json({
+                status: "duplicate",
+                student_name: fullName,
+                student_number: student.student_number,
+                student_position: student.position_name,
+                student_photo: student.photo_path,
+                message: "You are already recorded."
+              });
+            }
 
+            const eventStart = new Date(`${event.event_date}T${event.start_time}`);
+            const thresholdMs = (event.late_threshold_minutes || 15) * 60 * 1000;
+            const status = now.getTime() > eventStart.getTime() + thresholdMs ? "Late" : "Present";
+
+            db.run(
+              `INSERT INTO attendance (event_id, student_id, time_in, status)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(event_id, student_id) DO UPDATE SET time_in = excluded.time_in, status = excluded.status`,
+              [event_id, student.id, now.toISOString(), status],
+              function (err) {
+                if (err) return res.json({ status: "error", message: "Database failure recording scan." });
+                logAudit("Scanner", "TIME_IN", `Scanned ${fullName} for Event ID ${event_id}`, req.ip);
+                return res.json({
+                  status: "success",
+                  student_name: fullName,
+                  student_number: student.student_number,
+                  student_position: student.position_name,
+                  student_photo: student.photo_path,
+                  attendance_status: status,
+                  message: "attendance recorded"
+                });
+              }
+            );
+          });
+        } else if (mode === "time_out") {
           db.run(
-            `INSERT INTO attendance (event_id, student_id, time_in, status)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(event_id, student_id) DO UPDATE SET time_in = excluded.time_in, status = excluded.status`,
-            [event_id, student.id, now.toISOString(), status],
+            `UPDATE attendance SET time_out = ? WHERE event_id = ? AND student_id = ?`,
+            [now.toISOString(), event_id, student.id],
             function (err) {
-              if (err) return res.json({ status: "error", message: "Database failure recording scan." });
-              logAudit("Scanner", "TIME_IN", `Scanned ${fullName} for Event ID ${event_id}`, req.ip);
+              logAudit("Scanner", "TIME_OUT", `Time Out for ${fullName} on Event ID ${event_id}`, req.ip);
               return res.json({
                 status: "success",
                 student_name: fullName,
-                attendance_status: status,
-                message: "attendance recorded"
+                student_number: student.student_number,
+                student_position: student.position_name,
+                student_photo: student.photo_path,
+                attendance_status: "Time Out",
+                message: "time out recorded"
               });
             }
           );
-        });
-      } else if (mode === "time_out") {
-        db.run(
-          `UPDATE attendance SET time_out = ? WHERE event_id = ? AND student_id = ?`,
-          [now.toISOString(), event_id, student.id],
-          function (err) {
-            logAudit("Scanner", "TIME_OUT", `Time Out for ${fullName} on Event ID ${event_id}`, req.ip);
-            return res.json({
-              status: "success",
-              student_name: fullName,
-              attendance_status: "Time Out",
-              message: "time out recorded"
-            });
-          }
-        );
-      }
-    });
-  });
+        }
+      });
+    }
+  );
 });
+
 // --- A4 PRINTING ENGINE, STUDENT PORTAL & SETTINGS ---
 
-// Generate Dynamic Dynamic High-Resolution Base64 QR Image Route
 app.get("/api/qr/:token", async (req, res) => {
   try {
     const qrDataUrl = await QRCode.toDataURL(req.params.token, {
@@ -1089,7 +1135,6 @@ app.get("/api/qr/:token", async (req, res) => {
   }
 });
 
-// A4 Multi-ID Printing Route (Fits exactly 8 standard-size IDs per A4 Sheet)
 app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
   db.get(`SELECT * FROM settings WHERE id = 1`, [], (err, settings) => {
     db.all(
@@ -1143,7 +1188,6 @@ app.get("/admin/print-ids", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Student Member Portal
 app.get("/member", requireAuth(["student"]), (req, res) => {
   const studentId = req.session.user.student_id;
   db.get(
@@ -1214,7 +1258,6 @@ app.get("/member", requireAuth(["student"]), (req, res) => {
   );
 });
 
-// Student Password Modification
 app.post("/member/change-password", requireAuth(["student"]), (req, res) => {
   const { new_password } = req.body;
   const passwordHash = bcrypt.hashSync(new_password, 10);
@@ -1224,7 +1267,6 @@ app.post("/member/change-password", requireAuth(["student"]), (req, res) => {
   });
 });
 
-// Global School Settings & Logo Uploader Page
 app.get("/admin/settings", requireAuth(["admin"]), (req, res) => {
   db.get(`SELECT * FROM settings WHERE id = 1`, [], (err, settings) => {
     const html = `
@@ -1265,7 +1307,6 @@ app.get("/admin/settings", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Process Branding Settings Updates
 app.post(
   "/admin/settings",
   requireAuth(["admin"]),
@@ -1295,9 +1336,9 @@ app.post(
     });
   }
 );
+
 // --- REPORTING, AUDIT LOGS, BACKUPS & SERVER INITIALIZATION ---
 
-// Reports Center Route
 app.get("/admin/reports", requireAuth(["admin"]), (req, res) => {
   db.all(`SELECT * FROM events ORDER BY id DESC`, [], (err, events) => {
     const eventOptions = events.map((e) => `<option value="${e.id}">${e.name}</option>`).join("");
@@ -1335,7 +1376,6 @@ app.get("/admin/reports", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Export Excel-Compatible CSV Reports
 app.get("/admin/reports/export", requireAuth(["admin"]), (req, res) => {
   const { event_id, status } = req.query;
   let query = `
@@ -1368,7 +1408,6 @@ app.get("/admin/reports/export", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Audit Trail Route
 app.get("/admin/audit", requireAuth(["admin"]), (req, res) => {
   db.all(`SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100`, [], (err, logs) => {
     const rows = logs
@@ -1400,7 +1439,6 @@ app.get("/admin/audit", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Database Backup Endpoint
 app.get("/admin/backup", requireAuth(["admin"]), (req, res) => {
   const backupFileName = `backup-data-${Date.now()}.sqlite`;
   const backupPath = path.join(__dirname, "backups", backupFileName);
@@ -1412,12 +1450,10 @@ app.get("/admin/backup", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// Global 404 Route Handler
 app.use((req, res) => {
   res.status(404).send(renderPage("Page Not Found", `<div class="text-center mt-5"><h1>404</h1><p>Requested endpoint does not exist.</p><a href="/">Return Home</a></div>`));
 });
 
-// Launch Server
 app.listen(PORT, () => {
   console.log(`=================================================`);
   console.log(`Server successfully started on port ${PORT}`);
