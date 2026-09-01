@@ -1,33 +1,25 @@
 {
-  "name": "school-club-qr-attendance-system",
+  "name": "qr-club-attendance-system",
   "version": "1.0.0",
-  "description": "Comprehensive, Production-Ready School Student Club QR Code Attendance Management System",
+  "description": "Production School Student Club QR Code Attendance Web System",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
-    "dev": "node --watch app.js"
+    "dev": "nodemon app.js"
   },
-  "keywords": [
-    "qr-code",
-    "attendance-system",
-    "express",
-    "sqlite3",
-    "student-club"
-  ],
-  "author": "School Systems Engineering Team",
-  "license": "MIT",
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "canvas": "^2.11.2",
-    "cors": "^2.8.5",
+    "connect-sqlite3": "^0.9.13",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
     "multer": "^1.4.5-lts.1",
-    "pg": "^8.11.5",
     "qrcode": "^1.5.3",
-    "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
