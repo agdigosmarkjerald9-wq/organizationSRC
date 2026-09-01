@@ -715,23 +715,25 @@ app.get('/api/analytics/dashboard', requireAuth, (req, res) => {
   const pendingRegistrations = db.prepare('SELECT COUNT(*) as count FROM students WHERE status = "Pending"').get().count;
   const totalOfficers = db.prepare('SELECT COUNT(*) as count FROM students WHERE status = "Active" AND position != "Member"').get().count;
 
+  // Accurate overall and today calculations
   const today = new Date().toISOString().split('T')[0];
-  const todayScans = db.prepare(`
+  const activeEvent = db.prepare("SELECT * FROM events WHERE status = 'Active' ORDER BY event_date DESC, id DESC LIMIT 1").get();
+  
+  // Overall system scan breakdown
+  const overallScans = db.prepare(`
     SELECT 
-      SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) as present,
-      SUM(CASE WHEN a.status = 'Late' THEN 1 ELSE 0 END) as late,
-      SUM(CASE WHEN a.status = 'Absent' THEN 1 ELSE 0 END) as absent,
-      SUM(CASE WHEN a.status = 'Excused' THEN 1 ELSE 0 END) as excused
-    FROM attendance a
-    JOIN events e ON a.event_id = e.id
-    WHERE e.event_date = ?
-  `).get(today) || { present: 0, late: 0, absent: 0, excused: 0 };
+      SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) as present,
+      SUM(CASE WHEN status = 'Late' THEN 1 ELSE 0 END) as late,
+      SUM(CASE WHEN status = 'Absent' THEN 1 ELSE 0 END) as absent,
+      SUM(CASE WHEN status = 'Excused' THEN 1 ELSE 0 END) as excused,
+      COUNT(id) as total_records
+    FROM attendance
+  `).get() || { present: 0, late: 0, absent: 0, excused: 0, total_records: 0 };
 
-  const totalAttended = (todayScans.present || 0) + (todayScans.late || 0);
-  const totalExpected = totalAttended + (todayScans.absent || 0) + (todayScans.excused || 0);
-  const attendanceRate = totalExpected > 0 ? Math.round((totalAttended / totalExpected) * 100) : 0;
+  const totalAttended = (overallScans.present || 0) + (overallScans.late || 0);
+  const totalExpected = overallScans.total_records || 0;
+  const attendanceRate = totalExpected > 0 ? Math.round((totalAttended / totalExpected) * 100) : 100;
 
-  const activeEvent = db.prepare("SELECT * FROM events WHERE status = 'Active' LIMIT 1").get();
   const recentScans = db.prepare(`
     SELECT a.*, s.first_name, s.last_name, s.position, e.title as event_title
     FROM attendance a
@@ -775,10 +777,10 @@ app.get('/api/analytics/dashboard', requireAuth, (req, res) => {
       inactiveStudents,
       pendingRegistrations,
       totalOfficers,
-      presentToday: todayScans.present || 0,
-      lateToday: todayScans.late || 0,
-      absentToday: todayScans.absent || 0,
-      excusedToday: todayScans.excused || 0,
+      presentToday: overallScans.present || 0,
+      lateToday: overallScans.late || 0,
+      absentToday: overallScans.absent || 0,
+      excusedToday: overallScans.excused || 0,
       attendanceRate
     },
     activeEvent,
@@ -924,7 +926,7 @@ app.get('/api/qr/generate', async (req, res) => {
   const { text } = req.query;
   if (!text) return res.status(400).send('Text query required');
   try {
-    const url = await QRCode.toDataURL(text, { margin: 1, width: 250 });
+    const url = await QRCode.toDataURL(text, { margin: 1, width: 300 });
     res.json({ dataUrl: url });
   } catch (e) {
     res.status(500).json({ error: 'QR Generation failed' });
@@ -1011,13 +1013,13 @@ app.get('*', (req, res) => {
     .card-dashboard:hover {
       transform: translateY(-2px);
     }
-    /* ID Card Standard Dimensions for A4 Layout (8 per page) */
+    /* ID Card Standard Dimensions - Large Prominent QR Code */
     .id-card-printable {
       width: 85.6mm;
-      height: 53.98mm;
-      border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      padding: 6px;
+      height: 54mm;
+      border: 1.5px solid #0f172a;
+      border-radius: 8px;
+      padding: 8px;
       box-sizing: border-box;
       background: #ffffff;
       display: inline-flex;
@@ -1365,13 +1367,13 @@ app.get('*', (req, res) => {
         </div>
         <div class="col-md-3">
           <div class="card card-dashboard p-3 bg-success text-white">
-            <div class="small opacity-75">Present Today</div>
+            <div class="small opacity-75">Present Scans</div>
             <div class="display-6 fw-bold">\${data.metrics.presentToday}</div>
           </div>
         </div>
         <div class="col-md-3">
           <div class="card card-dashboard p-3 bg-info text-white">
-            <div class="small opacity-75">Attendance Rate</div>
+            <div class="small opacity-75">Overall Attendance Rate</div>
             <div class="display-6 fw-bold">\${data.metrics.attendanceRate}%</div>
           </div>
         </div>
@@ -1380,7 +1382,7 @@ app.get('*', (req, res) => {
       <div class="row g-3">
         <div class="col-md-8">
           <div class="card shadow-sm border-0 p-3 mb-4">
-            <h5 class="fw-bold mb-3">Recent Scans</h5>
+            <h5 class="fw-bold mb-3">Recent Attendance Activity</h5>
             <table class="table table-hover table-sm">
               <thead>
                 <tr>
@@ -1400,7 +1402,7 @@ app.get('*', (req, res) => {
                     <td>\${s.time_in || '-'}</td>
                     <td><span class="badge bg-\${s.status==='Present'?'success':s.status==='Late'?'warning':'danger'}">\${s.status}</span></td>
                   </tr>
-                \`).join('') || '<tr><td colspan="5" class="text-center text-muted">No attendance activity today</td></tr>'}
+                \`).join('') || '<tr><td colspan="5" class="text-center text-muted">No attendance activity recorded yet</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -1410,18 +1412,18 @@ app.get('*', (req, res) => {
             <h5 class="fw-bold text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i> Low Participation Alert</h5>
             <ul class="list-group list-group-flush small">
               \${data.alerts.lowParticipation.map(st => \`
-                <li class="list-group-item d-flex justify-between align-items-center">
+                <li class="list-group-item d-flex justify-content-between align-items-center">
                   \${st.first_name} \${st.last_name}
                   <span class="badge bg-danger ms-auto">\${st.rate}% Rate</span>
                 </li>
-              \`).join('') || '<li class="list-group-item text-muted">All active students meet criteria</li>'}
+              \`).join('') || '<li class="list-group-item text-muted">All active students meet participation criteria</li>'}
             </ul>
           </div>
           <div class="card shadow-sm border-0 p-3">
             <h5 class="fw-bold text-warning"><i class="fa-solid fa-clock me-1"></i> Frequently Late Students</h5>
             <ul class="list-group list-group-flush small">
               \${data.alerts.frequentlyLate.map(st => \`
-                <li class="list-group-item d-flex justify-between align-items-center">
+                <li class="list-group-item d-flex justify-content-between align-items-center">
                   \${st.first_name} \${st.last_name}
                   <span class="badge bg-warning text-dark ms-auto">\${st.late_count} Times</span>
                 </li>
@@ -1506,7 +1508,7 @@ app.get('*', (req, res) => {
           <div class="modal-content text-center p-4">
             <h4 class="fw-bold">Student Registration QR Code</h4>
             <p class="text-muted small">Scan this QR code using a mobile phone to access the self-registration page.</p>
-            <img src="\${res.dataUrl}" class="mx-auto my-3" style="width: 200px;">
+            <img src="\${res.dataUrl}" class="mx-auto my-3" style="width: 220px; height: 220px;">
             <button class="btn btn-secondary w-100" onclick="this.closest('.modal').remove()">Close</button>
           </div>
         </div>
@@ -1524,7 +1526,7 @@ app.get('*', (req, res) => {
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="fw-bold">Active Student Directory</h3>
         <div>
-          <button class="btn btn-primary btn-sm me-2" onclick="printA4IDs()"><i class="fa-solid fa-print me-1"></i> Print Batch IDs (8 per A4)</button>
+          <button class="btn btn-primary btn-sm me-2" onclick="printA4IDs()"><i class="fa-solid fa-print me-1"></i> Print Batch IDs (High-Res QR)</button>
         </div>
       </div>
       <div class="card shadow-sm border-0 p-3">
@@ -1560,6 +1562,49 @@ app.get('*', (req, res) => {
     \`;
   }
 
+  async function showStudentCardModal(id) {
+    const students = await api('/api/students?status=Active');
+    const s = students.find(item => item.id === id);
+    if (!s) return;
+    const qrRes = await api('/api/qr/generate?text=' + encodeURIComponent(s.qr_token));
+
+    const modal = document.createElement('div');
+    modal.className = 'modal fade show d-block';
+    modal.style.background = 'rgba(0,0,0,0.5)';
+    modal.innerHTML = \`
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content p-4 text-center">
+          <h5 class="fw-bold mb-3">Student ID Preview</h5>
+          <div class="id-card-printable mx-auto shadow-sm">
+            <div class="d-flex align-items-center mb-1">
+              <i class="fa-solid fa-graduation-cap fa-lg me-1 text-primary"></i>
+              <div class="text-start">
+                <div style="font-size: 8px; font-weight: bold; line-height: 1;">\${state.settings.school_name || 'School Name'}</div>
+                <div style="font-size: 7px; color: #555;">\${state.settings.student_club_name || 'Club'}</div>
+              </div>
+            </div>
+            <div class="d-flex align-items-center my-1 text-start">
+              <div style="width: 32px; height: 32px; background: #e2e8f0; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-right: 6px;">
+                <i class="fa-solid fa-user text-secondary"></i>
+              </div>
+              <div style="flex-grow: 1;">
+                <div style="font-size: 10px; font-weight: bold;">\${s.first_name} \${s.last_name}</div>
+                <div style="font-size: 8px; color: #0284c7; font-weight: 600;">\${s.position}</div>
+                <div style="font-size: 7px; color: #64748b;">ID: \${s.student_id}</div>
+              </div>
+              <img src="\${qrRes.dataUrl}" style="width: 52px; height: 52px; border: 1px solid #ddd; padding: 1px;">
+            </div>
+            <div class="d-flex justify-content-between align-items-end mt-1">
+              <div style="font-size: 6px; color: #94a3b8;">SY \${s.school_year}</div>
+            </div>
+          </div>
+          <button class="btn btn-secondary mt-3 w-100" onclick="this.closest('.modal').remove()">Close</button>
+        </div>
+      </div>
+    \`;
+    document.body.appendChild(modal);
+  }
+
   async function regenerateQR(id) {
     if (confirm('Regenerating QR will invalidate the old student QR Code. Continue?')) {
       await api('/api/students/' + id + '/regenerate-qr', { method: 'POST' });
@@ -1575,7 +1620,7 @@ app.get('*', (req, res) => {
     }
   }
 
-  // PRINTING 8 IDS PER A4 SHEET
+  // PRINTING ID CARDS WITH PROMINENT QR CODE
   async function printA4IDs() {
     const students = await api('/api/students?status=Active');
     if (!students.length) return alert('No active students available to print.');
@@ -1595,18 +1640,18 @@ app.get('*', (req, res) => {
             </div>
           </div>
           <div class="d-flex align-items-center my-1">
-            <div style="width: 38px; height: 38px; background: #e2e8f0; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 18px; margin-right: 6px;">
+            <div style="width: 32px; height: 32px; background: #e2e8f0; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-right: 6px;">
               <i class="fa-solid fa-user text-secondary"></i>
             </div>
-            <div>
+            <div style="flex-grow: 1;">
               <div style="font-size: 10px; font-weight: bold;">\${s.first_name} \${s.last_name}</div>
               <div style="font-size: 8px; color: #0284c7; font-weight: 600;">\${s.position}</div>
               <div style="font-size: 7px; color: #64748b;">ID: \${s.student_id}</div>
             </div>
+            <img src="\${qrRes.dataUrl}" style="width: 52px; height: 52px; border: 1px solid #ccc; padding: 1px;">
           </div>
           <div class="d-flex justify-content-between align-items-end mt-1">
             <div style="font-size: 6px; color: #94a3b8;">SY \${s.school_year}</div>
-            <img src="\${qrRes.dataUrl}" style="width: 32px; height: 32px;">
           </div>
         </div>
       \`;
@@ -2029,7 +2074,7 @@ app.get('*', (req, res) => {
               <p class="badge bg-primary mx-auto mb-2">\${student.position}</p>
               <p class="small text-muted mb-3">ID: \${student.student_id}</p>
               
-              <img src="\${qrRes.dataUrl}" class="mx-auto my-2" style="width: 180px;">
+              <img src="\${qrRes.dataUrl}" class="mx-auto my-2" style="width: 220px; height: 220px; border: 1px solid #ddd; padding: 4px;">
               <p class="small text-muted">Show this Digital QR Code at event entry</p>
             </div>
           </div>
