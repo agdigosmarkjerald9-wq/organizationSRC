@@ -27,7 +27,7 @@ uploadDirs.forEach((dir) => {
   }
 });
 
-// Database Initialization (Persistent SQLite Storage)
+// Database Initialization (Persistent SQLite Storage with WAL Mode)
 const dbPath = path.join(__dirname, "data.sqlite");
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
@@ -37,7 +37,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
   }
 });
 
-// Enable SQLite Foreign Key Constraints
+// Enable SQLite WAL Mode & Foreign Key Constraints to prevent data loss on restarts
+db.run("PRAGMA journal_mode = WAL;");
+db.run("PRAGMA synchronous = NORMAL;");
 db.run("PRAGMA foreign_keys = ON;");
 
 // Initialize Database Tables
@@ -66,6 +68,7 @@ db.serialize(() => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      raw_temp_password TEXT DEFAULT '',
       role TEXT CHECK(role IN ('admin', 'scanner', 'student')) NOT NULL,
       student_id INTEGER UNIQUE,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -103,7 +106,7 @@ db.serialize(() => {
       qr_token TEXT UNIQUE,
       status TEXT CHECK(status IN ('pending', 'approved', 'rejected')) DEFAULT 'pending',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE SET NULL
+      FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE CASCADE
     )
   `);
 
@@ -151,19 +154,19 @@ db.serialize(() => {
     )
   `);
 
-  // Create Default Accounts if they do not exist
+  // Create Default Accounts if missing
   const salt = bcrypt.genSaltSync(10);
   const adminPasswordHash = bcrypt.hashSync("admin123", salt);
   const scannerPasswordHash = bcrypt.hashSync("scanner123", salt);
 
   db.run(`
-    INSERT OR IGNORE INTO users (username, password_hash, role)
-    VALUES ('admin', ?, 'admin')
+    INSERT OR IGNORE INTO users (username, password_hash, raw_temp_password, role)
+    VALUES ('admin', ?, 'admin123', 'admin')
   `, [adminPasswordHash]);
 
   db.run(`
-    INSERT OR IGNORE INTO users (username, password_hash, role)
-    VALUES ('scanner', ?, 'scanner')
+    INSERT OR IGNORE INTO users (username, password_hash, raw_temp_password, role)
+    VALUES ('scanner', ?, 'scanner123', 'scanner')
   `, [scannerPasswordHash]);
 });
 
@@ -189,6 +192,8 @@ const storage = multer.diskStorage({
       cb(null, "uploads/photos/");
     } else if (file.fieldname === "school_logo" || file.fieldname === "club_logo") {
       cb(null, "uploads/logos/");
+    } else if (file.fieldname === "backup_file") {
+      cb(null, "backups/");
     } else {
       cb(null, "uploads/");
     }
@@ -202,6 +207,9 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
+    if (file.fieldname === "backup_file") {
+      return cb(null, true);
+    }
     const allowedTypes = /jpeg|jpg|png|webp/;
     const extName = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimeType = allowedTypes.test(file.mimetype);
@@ -276,11 +284,12 @@ function renderPage(title, content, user = null) {
                 user.role === "admin"
                   ? `
                 <li class="nav-item"><a class="nav-link" href="/admin/dashboard">Dashboard</a></li>
-                <li class="nav-item"><a class="nav-link" href="/admin/students">Students</a></li>
+                <li class="nav-item"><a class="nav-link" href="/admin/students">Students & Credentials</a></li>
                 <li class="nav-item"><a class="nav-link" href="/admin/positions">Positions</a></li>
                 <li class="nav-item"><a class="nav-link" href="/admin/events">Events</a></li>
                 <li class="nav-item"><a class="nav-link" href="/admin/print-ids">Print IDs</a></li>
                 <li class="nav-item"><a class="nav-link" href="/admin/reports">Reports</a></li>
+                <li class="nav-item"><a class="nav-link" href="/admin/database">Database Backup</a></li>
                 <li class="nav-item"><a class="nav-link" href="/admin/settings">Settings</a></li>
                 <li class="nav-item"><a class="nav-link" href="/admin/audit">Audit Logs</a></li>
               `
@@ -524,7 +533,7 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
                         <div class="col-md-3">
                           <div class="card bg-primary text-white p-3">
                             <h5>Active Students</h5>
-                            <h2>${stats.activeStudents}</h2>
+                            2>${stats.activeStudents}</h2>
                           </div>
                         </div>
                         <div class="col-md-3">
@@ -576,9 +585,14 @@ app.get("/admin/dashboard", requireAuth(["admin"]), (req, res) => {
   });
 });
 
+// STUDENT MANAGEMENT WITH TEMPORARY CREDENTIALS DISPLAY
 app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
   db.all(
-    `SELECT s.*, p.name as position_name FROM students s LEFT JOIN positions p ON s.position_id = p.id ORDER BY s.id DESC`,
+    `SELECT s.*, p.name as position_name, u.username, u.raw_temp_password 
+     FROM students s 
+     LEFT JOIN positions p ON s.position_id = p.id 
+     LEFT JOIN users u ON u.student_id = s.id
+     ORDER BY s.id DESC`,
     [],
     (err, students) => {
       const rows = students
@@ -588,8 +602,9 @@ app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
           <td><img src="${s.photo_path}" width="40" height="40" class="rounded-circle" style="object-fit: cover;"></td>
           <td>${s.student_number || 'N/A'}</td>
           <td>${s.first_name} ${s.last_name}</td>
-          <td>${s.email}</td>
           <td>${s.position_name || 'Unassigned'}</td>
+          <td><span class="badge bg-dark">${s.username || 'N/A'}</span></td>
+          <td><span class="badge bg-info text-dark">${s.raw_temp_password || 'N/A'}</span></td>
           <td><span class="badge bg-${s.status === 'approved' ? 'success' : s.status === 'pending' ? 'warning' : 'danger'}">${s.status}</span></td>
           <td>
             ${
@@ -606,18 +621,29 @@ app.get("/admin/students", requireAuth(["admin"]), (req, res) => {
 
       const html = `
         <div class="d-flex justify-content-between align-items-center mb-3">
-          <h2>Student Management</h2>
+          <h2>Student & Credentials Management</h2>
         </div>
         <div class="card">
           <div class="card-body p-0">
             <table class="table table-striped align-middle mb-0">
-              <thead><tr><th>Photo</th><th>Student #</th><th>Name</th><th>Email</th><th>Position</th><th>Status</th><th>Actions</th></tr></thead>
-              <tbody>${rows || '<tr><td colspan="7" class="text-center">No students registered yet.</td></tr>'}</tbody>
+              <thead>
+                <tr>
+                  <th>Photo</th>
+                  <th>Student #</th>
+                  <th>Name</th>
+                  <th>Position</th>
+                  <th>Username</th>
+                  <th>Temp Password</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>${rows || '<tr><td colspan="8" class="text-center">No students registered yet.</td></tr>'}</tbody>
             </table>
           </div>
         </div>
       `;
-      res.send(renderPage("Student Management", html, req.session.user));
+      res.send(renderPage("Student & Credentials Management", html, req.session.user));
     }
   );
 });
@@ -637,8 +663,8 @@ app.get("/admin/students/approve/:id", requireAuth(["admin"]), (req, res) => {
       if (err) return res.status(500).send("Approval failed.");
 
       db.run(
-        `INSERT INTO users (username, password_hash, role, student_id) VALUES (?, ?, 'student', ?)`,
-        [username, passwordHash, studentId],
+        `INSERT INTO users (username, password_hash, raw_temp_password, role, student_id) VALUES (?, ?, ?, 'student', ?)`,
+        [username, passwordHash, rawPassword, studentId],
         function (err) {
           logAudit(req.session.user.username, "APPROVE_STUDENT", `Approved Student ID: ${studentId}, Generated User: ${username}`, req.ip);
           const html = `
@@ -837,7 +863,7 @@ app.get("/admin/events/status/:id", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-// --- CAMERA QR SCANNER & VOICE FEEDBACK ENGINE (WITH STUDENT PHOTO DISPLAY) ---
+// --- CAMERA SCANNER INTERFACE ---
 
 app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
   db.all(`SELECT * FROM events WHERE status = 'active'`, [], (err, activeEvents) => {
@@ -911,7 +937,7 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
       </div>
 
       <script>
-        let html5QrcodeScanner = null;
+        let html5QrCode = null;
         let lastScannedToken = "";
         let lastScanTime = 0;
 
@@ -1024,9 +1050,23 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
           });
         }
 
+        // Camera Fallback initialization to prevent NotReadableError on mobile
         document.addEventListener("DOMContentLoaded", function() {
-          html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: { width: 250, height: 250 } });
-          html5QrcodeScanner.render(onScanSuccess);
+          html5QrCode = new Html5Qrcode("reader");
+          const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+
+          html5QrCode.start({ facingMode: "environment" }, config, onScanSuccess)
+            .catch(err => {
+              console.warn("FacingMode failed, enumerating cameras...", err);
+              Html5Qrcode.getCameras().then(devices => {
+                if (devices && devices.length > 0) {
+                  const cameraId = devices[devices.length - 1].id;
+                  html5QrCode.start(cameraId, config, onScanSuccess).catch(e => {
+                    alert("Camera Error: Close other camera apps and refresh.");
+                  });
+                }
+              });
+            });
         });
       </script>
     `;
@@ -1034,7 +1074,7 @@ app.get("/scanner", requireAuth(["admin", "scanner"]), (req, res) => {
   });
 });
 
-// Process Attendance API Endpoint (Includes Student Details & Photo)
+// Process Attendance API Endpoint
 app.post("/api/process-scan", (req, res) => {
   const { qr_token, event_id, mode } = req.body;
 
@@ -1117,7 +1157,96 @@ app.post("/api/process-scan", (req, res) => {
   );
 });
 
-// --- A4 PRINTING ENGINE, STUDENT PORTAL & SETTINGS ---
+// --- DATABASE BACKUP & RESTORE ENGINE ---
+
+app.get("/admin/database", requireAuth(["admin"]), (req, res) => {
+  fs.readdir(path.join(__dirname, "backups"), (err, files) => {
+    const backupList = (files || []).filter(f => f.endsWith('.sqlite')).map(f => `
+      <tr>
+        <td>${f}</td>
+        <td>
+          <a href="/admin/database/download/${f}" class="btn btn-sm btn-primary">Download</a>
+        </td>
+      </tr>
+    `).join('');
+
+    const html = `
+      <div class="row">
+        <div class="col-md-6">
+          <div class="card mb-4">
+            <div class="card-header bg-dark text-white">Create Database Backup</div>
+            <div class="card-body">
+              <p class="text-muted">Download a complete SQLite snapshot of your system to prevent data loss.</p>
+              <a href="/admin/database/create-backup" class="btn btn-success w-100">
+                <i class="bi bi-download me-2"></i>Generate & Download Backup (.sqlite)
+              </a>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header bg-danger text-white">Restore Database</div>
+            <div class="card-body">
+              <form action="/admin/database/restore" method="POST" enctype="multipart/form-data">
+                <div class="mb-3">
+                  <label class="form-label">Upload SQLite Backup File</label>
+                  <input type="file" name="backup_file" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-danger w-100" onclick="return confirm('Warning: Restoring will overwrite all current data. Continue?')">
+                  Restore Database
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header bg-secondary text-white">Local System Backups</div>
+            <div class="card-body p-0">
+              <table class="table table-striped mb-0">
+                <thead><tr><th>File Name</th><th>Action</th></tr></thead>
+                <tbody>${backupList || '<tr><td colspan="2" class="text-center">No backup files found</td></tr>'}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    res.send(renderPage("Database Management", html, req.session.user));
+  });
+});
+
+app.get("/admin/database/create-backup", requireAuth(["admin"]), (req, res) => {
+  const backupFileName = `backup-${Date.now()}.sqlite`;
+  const backupPath = path.join(__dirname, "backups", backupFileName);
+
+  db.run("PRAGMA wal_checkpoint(FULL);", () => {
+    fs.copyFile(dbPath, backupPath, (err) => {
+      if (err) return res.status(500).send("Backup Generation Failed.");
+      logAudit(req.session.user.username, "CREATE_BACKUP", `Created Backup: ${backupFileName}`, req.ip);
+      res.download(backupPath);
+    });
+  });
+});
+
+app.get("/admin/database/download/:filename", requireAuth(["admin"]), (req, res) => {
+  const filePath = path.join(__dirname, "backups", req.params.filename);
+  res.download(filePath);
+});
+
+app.post("/admin/database/restore", requireAuth(["admin"]), upload.single("backup_file"), (req, res) => {
+  if (!req.file) return res.status(400).send("Please upload a file.");
+
+  const uploadedPath = req.file.path;
+  db.close((err) => {
+    fs.copyFile(uploadedPath, dbPath, (err) => {
+      if (err) return res.status(500).send("Failed to restore database.");
+      logAudit(req.session.user.username, "RESTORE_DATABASE", `Restored DB from ${req.file.filename}`, req.ip);
+      res.send(renderPage("Restore Success", `<div class="alert alert-success mt-5 text-center">Database restored successfully! <a href="/login">Re-login to System</a></div>`));
+    });
+  });
+});
+
+// --- PRINTING ENGINE, STUDENT PORTAL, SETTINGS & REPORTS ---
 
 app.get("/api/qr/:token", async (req, res) => {
   try {
@@ -1337,8 +1466,6 @@ app.post(
   }
 );
 
-// --- REPORTING, AUDIT LOGS, BACKUPS & SERVER INITIALIZATION ---
-
 app.get("/admin/reports", requireAuth(["admin"]), (req, res) => {
   db.all(`SELECT * FROM events ORDER BY id DESC`, [], (err, events) => {
     const eventOptions = events.map((e) => `<option value="${e.id}">${e.name}</option>`).join("");
@@ -1439,25 +1566,31 @@ app.get("/admin/audit", requireAuth(["admin"]), (req, res) => {
   });
 });
 
-app.get("/admin/backup", requireAuth(["admin"]), (req, res) => {
-  const backupFileName = `backup-data-${Date.now()}.sqlite`;
-  const backupPath = path.join(__dirname, "backups", backupFileName);
-
-  fs.copyFile(dbPath, backupPath, (err) => {
-    if (err) return res.status(500).send("Database Backup Failed.");
-    logAudit(req.session.user.username, "BACKUP_DATABASE", `Created SQLite backup: ${backupFileName}`, req.ip);
-    res.download(backupPath);
-  });
-});
-
 app.use((req, res) => {
   res.status(404).send(renderPage("Page Not Found", `<div class="text-center mt-5"><h1>404</h1><p>Requested endpoint does not exist.</p><a href="/">Return Home</a></div>`));
 });
+
+// Safe Database Shutdown Handlers to guarantee data persistence
+function shutdownGracefully() {
+  console.log("\nClosing SQLite database connection cleanly...");
+  db.close((err) => {
+    if (err) {
+      console.error("Error closing database:", err.message);
+    } else {
+      console.log("Database connection closed securely.");
+    }
+    process.exit(0);
+  });
+}
+
+process.on("SIGINT", shutdownGracefully);
+process.on("SIGTERM", shutdownGracefully);
+process.on("SIGUSR2", shutdownGracefully);
 
 app.listen(PORT, () => {
   console.log(`=================================================`);
   console.log(`Server successfully started on port ${PORT}`);
   console.log(`Timezone forced to: Asia/Manila`);
-  console.log(`Persistent Database: data.sqlite`);
+  console.log(`Persistent Database: data.sqlite (WAL Mode Enabled)`);
   console.log(`=================================================`);
 });
