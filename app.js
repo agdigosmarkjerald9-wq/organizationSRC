@@ -258,7 +258,7 @@ function renderPage(title, content, user = null) {
         .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
         .card { border: none; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
         .id-card-frame {
-          width: 323px; height: 230px; border: 2px solid #2c3e50; border-radius: 8px;
+          width: 1012px; height: 638px; border: 2px solid #2c3e50; border-radius: 8px;
           background: #ffffff; padding: 8px; position: relative; box-sizing: border-box; display: inline-block;
         }
         @media print {
