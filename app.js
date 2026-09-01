@@ -1,2252 +1,1554 @@
-/**
- * SCHOOL STUDENT CLUB QR CODE ATTENDANCE MANAGEMENT SYSTEM
- * Complete, Monolithic, Production-Ready Express Application
- */
-
+// PART 1: app.js - Setup, Dependencies, Database Initialization, and Core Configuration
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcryptjs');
-const QRCode = require('qrcode');
+const SQLiteStore = require('connect-sqlite3')(session);
+const bcrypt = require('bcrypt');
+const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
-const { Pool } = require('pg');
+const QRCode = require('qrcode');
 
-const PORT = process.env.PORT || 3000;
-const DATABASE_URL = process.env.DATABASE_URL;
-const SESSION_SECRET = process.env.SESSION_SECRET || 'school-club-qr-secret-key-2026';
-const TIMEZONE = process.env.TIMEZONE || 'Asia/Manila';
-
-// Ensure required local directories exist
-const uploadsDir = path.join(__dirname, 'uploads');
-const photosDir = path.join(uploadsDir, 'photos');
-const logosDir = path.join(uploadsDir, 'logos');
-const backupsDir = path.join(__dirname, 'backups');
-const dataDir = path.join(__dirname, 'data');
-
-[uploadsDir, photosDir, logosDir, backupsDir, dataDir].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
-
-// Configure Multer for File Uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    if (file.fieldname === 'student_photo') cb(null, photosDir);
-    else cb(null, logosDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
-  }
-});
-
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (allowedTypes.includes(file.mimetype)) cb(null, true);
-  else cb(new Error('Invalid file type. Only JPG, JPEG, PNG, and WEBP images are allowed.'), false);
-};
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
-});
-
-// Database Abstraction Layer supporting SQLite and PostgreSQL
-let dbDriver = 'sqlite';
-let sqliteDb = null;
-let pgPool = null;
-
-if (DATABASE_URL) {
-  dbDriver = 'pg';
-  pgPool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-  });
-  console.log('🔗 Configured PostgreSQL Production Database Pool.');
-} else {
-  dbDriver = 'sqlite';
-  const dbPath = path.join(dataDir, 'attendance.db');
-  sqliteDb = new sqlite3.Database(dbPath, (err) => {
-    if (err) console.error('❌ Error opening SQLite database:', err.message);
-    else console.log('🔗 Connected to local SQLite database at', dbPath);
-  });
-}
-
-// Unified Database Query Wrapper
-function queryDB(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    if (dbDriver === 'pg') {
-      let paramCounter = 1;
-      const pgSql = sql.replace(/\?/g, () => `$${paramCounter++}`);
-      pgPool.query(pgSql, params, (err, res) => {
-        if (err) return reject(err);
-        resolve(res.rows);
-      });
-    } else {
-      const isSelect = sql.trim().toUpperCase().startsWith('SELECT') || sql.trim().toUpperCase().startsWith('PRAGMA');
-      if (isSelect) {
-        sqliteDb.all(sql, params, (err, rows) => {
-          if (err) return reject(err);
-          resolve(rows);
-        });
-      } else {
-        sqliteDb.run(sql, params, function (err) {
-          if (err) return reject(err);
-          resolve({ lastID: this.lastID, changes: this.changes });
-        });
-      }
-    }
-  });
-}
-
-function runDB(sql, params = []) {
-  return queryDB(sql, params);
-}
-
-// Database Initialization & Table Migration Engine
-async function initDatabase() {
-  try {
-    const isPg = dbDriver === 'pg';
-    const autoInc = isPg ? 'SERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
-    const textType = 'TEXT';
-    const intType = 'INTEGER';
-    const timestampType = isPg ? 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' : 'DATETIME DEFAULT CURRENT_TIMESTAMP';
-
-    await runDB(`CREATE TABLE IF NOT EXISTS settings (
-      id ${autoInc},
-      school_name ${textType} DEFAULT 'Central High School',
-      school_address ${textType} DEFAULT '123 Academic Way, Education City',
-      school_contact ${textType} DEFAULT '(555) 019-2831',
-      school_email ${textType} DEFAULT 'info@centralhigh.edu',
-      school_year ${textType} DEFAULT '2026-2027',
-      student_club_name ${textType} DEFAULT 'Computer Science Club',
-      club_adviser ${textType} DEFAULT 'Prof. Alexander Wright',
-      organization_name ${textType} DEFAULT 'Student Organizations Council',
-      school_logo ${textType} DEFAULT '',
-      club_logo ${textType} DEFAULT '',
-      registration_open ${intType} DEFAULT 1,
-      student_number_prefix ${textType} DEFAULT 'SC-2026-',
-      student_number_starting ${intType} DEFAULT 1,
-      student_number_length ${intType} DEFAULT 6,
-      min_participation_threshold ${intType} DEFAULT 70,
-      updated_at ${timestampType}
-    )`);
-
-    // Ensure default settings exist
-    const settings = await queryDB('SELECT * FROM settings LIMIT 1');
-    if (settings.length === 0) {
-      await runDB(`INSERT INTO settings (school_name, student_club_name) VALUES ('Central High School', 'Computer Science Club')`);
-    }
-
-    await runDB(`CREATE TABLE IF NOT EXISTS users (
-      id ${autoInc},
-      name ${textType} NOT NULL,
-      email ${textType} UNIQUE NOT NULL,
-      password ${textType} NOT NULL,
-      role ${textType} NOT NULL, -- 'ADMIN', 'SCANNER', 'STUDENT'
-      student_id ${intType} DEFAULT NULL,
-      created_at ${timestampType}
-    )`);
-
-    await runDB(`CREATE TABLE IF NOT EXISTS positions (
-      id ${autoInc},
-      name ${textType} UNIQUE NOT NULL,
-      description ${textType} DEFAULT '',
-      created_at ${timestampType}
-    )`);
-
-    // Default positions
-    const defaultPositions = ['President', 'Vice President', 'Secretary', 'Treasurer', 'Auditor', 'PIO', 'Peace Officer', 'Member'];
-    for (const pos of defaultPositions) {
-      await runDB(`INSERT INTO positions (name) VALUES (?) ON CONFLICT DO NOTHING`, [pos]);
-    }
-
-    await runDB(`CREATE TABLE IF NOT EXISTS students (
-      id ${autoInc},
-      student_number ${textType} UNIQUE NOT NULL,
-      first_name ${textType} NOT NULL,
-      middle_name ${textType} DEFAULT '',
-      last_name ${textType} NOT NULL,
-      email ${textType} UNIQUE NOT NULL,
-      contact_number ${textType} DEFAULT '',
-      position_id ${intType} REFERENCES positions(id),
-      photo ${textType} NOT NULL,
-      qr_token ${textType} UNIQUE NOT NULL,
-      qr_status ${intType} DEFAULT 1,
-      status ${textType} DEFAULT 'PENDING', -- 'PENDING', 'ACTIVE', 'INACTIVE', 'SUSPENDED', 'ALUMNI', 'RESIGNED'
-      membership_date ${textType} DEFAULT CURRENT_DATE,
-      expiration_date ${textType} DEFAULT '',
-      created_at ${timestampType}
-    )`);
-
-    await runDB(`CREATE TABLE IF NOT EXISTS position_history (
-      id ${autoInc},
-      student_id ${intType} NOT NULL,
-      position_name ${textType} NOT NULL,
-      school_year ${textType} NOT NULL,
-      assigned_at ${timestampType}
-    )`);
-
-    await runDB(`CREATE TABLE IF NOT EXISTS events (
-      id ${autoInc},
-      name ${textType} NOT NULL,
-      description ${textType} DEFAULT '',
-      event_type ${textType} DEFAULT 'General Club Attendance',
-      event_date ${textType} NOT NULL,
-      start_time ${textType} NOT NULL,
-      end_time ${textType} NOT NULL,
-      location ${textType} DEFAULT '',
-      organizer ${textType} DEFAULT '',
-      late_threshold_minutes ${intType} DEFAULT 15,
-      target_participants ${textType} DEFAULT 'ALL', -- 'ALL', 'OFFICERS', 'CUSTOM'
-      target_position_ids ${textType} DEFAULT '',
-      status ${textType} DEFAULT 'UPCOMING', -- 'UPCOMING', 'ACTIVE', 'COMPLETED', 'CANCELLED'
-      created_at ${timestampType}
-    )`);
-
-    await runDB(`CREATE TABLE IF NOT EXISTS attendance (
-      id ${autoInc},
-      event_id ${intType} NOT NULL,
-      student_id ${intType} NOT NULL,
-      time_in ${textType} DEFAULT NULL,
-      time_out ${textType} DEFAULT NULL,
-      status ${textType} NOT NULL, -- 'PRESENT', 'LATE', 'ABSENT', 'EXCUSED'
-      scan_by ${intType} DEFAULT NULL,
-      created_at ${timestampType},
-      UNIQUE(event_id, student_id)
-    )`);
-
-    await runDB(`CREATE TABLE IF NOT EXISTS excused_absences (
-      id ${autoInc},
-      event_id ${intType} NOT NULL,
-      student_id ${intType} NOT NULL,
-      reason ${textType} NOT NULL,
-      approved_by ${textType} NOT NULL,
-      notes ${textType} DEFAULT '',
-      created_at ${timestampType}
-    )`);
-
-    await runDB(`CREATE TABLE IF NOT EXISTS audit_logs (
-      id ${autoInc},
-      user_id ${intType} DEFAULT NULL,
-      user_name ${textType} DEFAULT 'System',
-      action ${textType} NOT NULL,
-      details ${textType} NOT NULL,
-      ip_address ${textType} DEFAULT '',
-      created_at ${timestampType}
-    )`);
-
-    // Ensure initial Admin Account
-    const adminCheck = await queryDB("SELECT * FROM users WHERE role = 'ADMIN' LIMIT 1");
-    if (adminCheck.length === 0) {
-      const hashedPassword = await bcrypt.hash('admin123', 10);
-      await runDB(
-        "INSERT INTO users (name, email, password, role) VALUES ('Club Adviser Admin', 'admin@school.edu', ?, 'ADMIN')",
-        [hashedPassword]
-      );
-      console.log('✅ Default Admin user created: admin@school.edu / admin123');
-    }
-
-    // Ensure initial Scanner Account
-    const scannerCheck = await queryDB("SELECT * FROM users WHERE role = 'SCANNER' LIMIT 1");
-    if (scannerCheck.length === 0) {
-      const hashedScannerPassword = await bcrypt.hash('scanner123', 10);
-      await runDB(
-        "INSERT INTO users (name, email, password, role) VALUES ('Official Scanner Operator', 'scanner@school.edu', ?, 'SCANNER')",
-        [hashedScannerPassword]
-      );
-      console.log('✅ Default Scanner user created: scanner@school.edu / scanner123');
-    }
-
-    console.log('⚡ Database schema verification & migrations completed successfully.');
-  } catch (err) {
-    console.error('❌ Critical Database Initialization Error:', err);
-  }
-}
-
-initDatabase();
-
-// Audit Logger Helper
-async function logAudit(req, action, details) {
-  try {
-    const userId = req.session && req.session.user ? req.session.user.id : null;
-    const userName = req.session && req.session.user ? req.session.user.name : 'System/Guest';
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-    await runDB(
-      'INSERT INTO audit_logs (user_id, user_name, action, details, ip_address) VALUES (?, ?, ?, ?, ?)',
-      [userId, userName, action, details, ip]
-    );
-  } catch (err) {
-    console.error('Audit log failed:', err.message);
-  }
-}
-
-// Student Number Generator Service
-async function generateStudentNumber() {
-  const settingsRows = await queryDB('SELECT * FROM settings LIMIT 1');
-  const settings = settingsRows[0] || {};
-  const prefix = settings.student_number_prefix || 'SC-2026-';
-  const startNum = settings.student_number_starting || 1;
-  const padLen = settings.student_number_length || 6;
-
-  const countRows = await queryDB('SELECT COUNT(*) as total FROM students');
-  const total = parseInt(countRows[0].total || 0, 10);
-  const nextVal = startNum + total;
-
-  let seq = nextVal.toString().padStart(padLen, '0');
-  let candidate = `${prefix}${seq}`;
-
-  // Collision Check
-  let exists = await queryDB('SELECT id FROM students WHERE student_number = ?', [candidate]);
-  let offset = 1;
-  while (exists.length > 0) {
-    seq = (nextVal + offset).toString().padStart(padLen, '0');
-    candidate = `${prefix}${seq}`;
-    exists = await queryDB('SELECT id FROM students WHERE student_number = ?', [candidate]);
-    offset++;
-  }
-  return candidate;
-}
-
-// Express App Configuration
 const app = express();
+const PORT = process.env.PORT || 3000;
 
+// Ensure directories exist
+const uploadDir = path.join(__dirname, 'public', 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Multer Storage Configuration
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = /jpeg|jpg|png|webp/;
+        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowedTypes.test(file.mimetype);
+        if (extname && mimetype) {
+            return cb(null, true);
+        }
+        cb(new Error('Only standard image files are allowed (JPG, JPEG, PNG, WEBP).'));
+    }
+});
+
+// Database Setup
+const dbFile = process.env.DATABASE_URL || path.join(__dirname, 'school_club_attendance.db');
+const db = new sqlite3.Database(dbFile, (err) => {
+    if (err) {
+        console.error('Database connection error:', err.message);
+    } else {
+        console.log('Connected to the SQLite database.');
+        initDatabase();
+    }
+});
+
+function initDatabase() {
+    db.serialize(() => {
+        db.run(`CREATE TABLE IF NOT EXISTS settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_name TEXT DEFAULT 'National High School',
+            school_logo TEXT DEFAULT '',
+            school_address TEXT DEFAULT '123 Education St.',
+            school_contact TEXT DEFAULT '555-0199',
+            school_email TEXT DEFAULT 'info@school.edu',
+            school_year TEXT DEFAULT '2025-2026',
+            club_name TEXT DEFAULT 'Youth Information Technology Club',
+            club_logo TEXT DEFAULT '',
+            club_adviser TEXT DEFAULT 'Dr. Maria Santos',
+            org_name TEXT DEFAULT 'Student Supreme Council Affiliate',
+            registration_open INTEGER DEFAULT 1,
+            num_prefix TEXT DEFAULT 'SC-',
+            start_number INTEGER DEFAULT 1,
+            num_length INTEGER DEFAULT 6,
+            min_participation REAL DEFAULT 75.0,
+            late_threshold_mins INTEGER DEFAULT 15,
+            timezone TEXT DEFAULT 'Asia/Manila'
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            email TEXT UNIQUE,
+            password TEXT,
+            role TEXT DEFAULT 'admin',
+            first_name TEXT,
+            last_name TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            description TEXT
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS students (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_number TEXT UNIQUE,
+            first_name TEXT,
+            middle_name TEXT,
+            last_name TEXT,
+            email TEXT UNIQUE,
+            contact_number TEXT,
+            position TEXT,
+            photo TEXT,
+            qr_token TEXT UNIQUE,
+            status TEXT DEFAULT 'Pending',
+            membership_status TEXT DEFAULT 'Active',
+            date_joined DATE DEFAULT CURRENT_DATE,
+            expiration_date DATE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS position_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER,
+            position TEXT,
+            school_year TEXT,
+            assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(student_id) REFERENCES students(id)
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            description TEXT,
+            event_type TEXT,
+            event_date DATE,
+            start_time TEXT,
+            end_time TEXT,
+            location TEXT,
+            organizer TEXT,
+            status TEXT DEFAULT 'Upcoming',
+            target_positions TEXT DEFAULT 'All'
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER,
+            student_id INTEGER,
+            time_in DATETIME,
+            time_out DATETIME,
+            status TEXT DEFAULT 'Present',
+            excused_reason TEXT,
+            recorded_by TEXT,
+            FOREIGN KEY(event_id) REFERENCES events(id),
+            FOREIGN KEY(student_id) REFERENCES students(id)
+        )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user TEXT,
+            action TEXT,
+            details TEXT,
+            ip_address TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        // Seed default admin if none exists
+        db.get(`SELECT COUNT(*) as count FROM users`, (err, row) => {
+            if (row && row.count === 0) {
+                bcrypt.hash('admin123', 10, (err, hash) => {
+                    db.run(`INSERT INTO users (username, email, password, role, first_name, last_name) VALUES (?, ?, ?, ?, ?, ?)`,
+                        ['admin', 'admin@school.edu', hash, 'admin', 'System', 'Admin']);
+                });
+                // Seed default positions
+                const defaultPositions = ['President', 'Vice President', 'Secretary', 'Treasurer', 'Auditor', 'Public Information Officer', 'Peace Officer', 'Representative', 'Member'];
+                defaultPositions.forEach(pos => {
+                    db.run(`INSERT OR IGNORE INTO positions (name, description) VALUES (?, ?)`, [pos, 'Standard club position']);
+                });
+                // Seed default settings
+                db.run(`INSERT INTO settings (school_name) VALUES ('National High School')`);
+            }
+        });
+    });
+}
+
+// Middleware setup
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(uploadDir));
 
 app.use(session({
-  secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // 24 Hours
+    store: new SQLiteStore({ db: 'sessions.sqlite', dir: './' }),
+    secret: 'school_club_qr_attendance_secret_key_2026',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 24 * 60 * 60 * 1000 }
 }));
 
-// Static Asset Express Routing
-app.use('/uploads', express.static(uploadsDir));
-
-// Authentication Middlewares
-function requireAuth(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.redirect('/login?error=Please%20log%20in%20to%20access%20the%20system');
-  }
-  next();
+// Helper function for logging audit trails
+function logAudit(user, action, details, ip) {
+    db.run(`INSERT INTO audit_logs (user, action, details, ip_address) VALUES (?, ?, ?, ?)`, 
+        [user || 'Guest', action, details, ip || '127.0.0.1']);
 }
 
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.session || !req.session.user) {
-      return res.redirect('/login?error=Session%20expired');
+// Auth Middleware
+function isAuthenticated(req, res, next) {
+    if (req.session && req.session.user) {
+        return next();
     }
-    if (!roles.includes(req.session.user.role)) {
-      return res.status(403).send('<h1>403 Forbidden: Insufficient Permissions</h1><a href="/login">Return to Login</a>');
-    }
-    next();
-  };
+    res.redirect('/login');
 }
 
-// Universal UI Layout & Page Templating Engine
-async function renderPage(title, contentHtml, req, activeNav = 'dashboard') {
-  const settingsRows = await queryDB('SELECT * FROM settings LIMIT 1');
-  const sys = settingsRows[0] || {};
-  const user = req.session ? req.session.user : null;
-
-  const schoolLogoSrc = sys.school_logo ? `/uploads/logos/${sys.school_logo}` : '';
-  const clubLogoSrc = sys.club_logo ? `/uploads/logos/${sys.club_logo}` : '';
-
-  let navItems = '';
-  if (user) {
-    if (user.role === 'ADMIN') {
-      navItems = `
-        <a href="/admin/dashboard" class="${activeNav === 'dashboard' ? 'active' : ''}">📊 Dashboard</a>
-        <a href="/admin/students" class="${activeNav === 'students' ? 'active' : ''}">🎓 Students</a>
-        <a href="/admin/registrations" class="${activeNav === 'registrations' ? 'active' : ''}">📝 Pending Reg</a>
-        <a href="/admin/positions" class="${activeNav === 'positions' ? 'active' : ''}">🎖️ Positions</a>
-        <a href="/admin/events" class="${activeNav === 'events' ? 'active' : ''}">📅 Events</a>
-        <a href="/admin/attendance" class="${activeNav === 'attendance' ? 'active' : ''}">⏱️ Attendance</a>
-        <a href="/admin/reports" class="${activeNav === 'reports' ? 'active' : ''}">📈 Reports</a>
-        <a href="/admin/id-cards" class="${activeNav === 'id-cards' ? 'active' : ''}">🪪 Print Student IDs</a>
-        <a href="/scanner" target="_blank">📱 Scanner Portal</a>
-        <a href="/admin/settings" class="${activeNav === 'settings' ? 'active' : ''}">⚙️ Settings</a>
-        <a href="/admin/audit" class="${activeNav === 'audit' ? 'active' : ''}">📜 Audit Logs</a>
-        <a href="/admin/backup" class="${activeNav === 'backup' ? 'active' : ''}">💾 Backup & Restore</a>
-      `;
-    } else if (user.role === 'SCANNER') {
-      navItems = `
-        <a href="/scanner" class="${activeNav === 'scanner' ? 'active' : ''}">📱 Scanner Portal</a>
-        <a href="/change-password">🔒 Change Password</a>
-      `;
-    } else if (user.role === 'STUDENT') {
-      navItems = `
-        <a href="/member" class="${activeNav === 'member' ? 'active' : ''}">👤 Student ID & Portal</a>
-        <a href="/change-password">🔒 Change Password</a>
-      `;
+function isAdmin(req, res, next) {
+    if (req.session && req.session.user && req.session.user.role === 'admin') {
+        return next();
     }
-  }
+    res.status(403).send('Access Denied: Administrator privileges required.');
+}
 
-  return `
-  <!DOCTYPE html>
-  <html lang="en">
-  <head>
+function isScanner(req, res, next) {
+    if (req.session && req.session.user && (req.session.user.role === 'scanner' || req.session.user.role === 'admin')) {
+        return next();
+    }
+    res.status(403).send('Access Denied: Scanner or Admin privileges required.');
+}
+
+function isStudentUser(req, res, next) {
+    if (req.session && req.session.user && req.session.user.role === 'student') {
+        return next();
+    }
+    res.status(403).send('Access Denied: Student portal access only.');
+}
+// PART 2: app.js - Authentication Routes & Public Student Self-Registration
+// Authentication Routes
+app.get('/login', (req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title} - ${sys.student_club_name || 'Club Attendance System'}</title>
+    <title>Login - School Club Attendance System</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-      :root {
-        --primary: #1e3a8a;
-        --primary-dark: #1e293b;
-        --secondary: #0284c7;
-        --accent: #f59e0b;
-        --bg: #f8fafc;
-        --surface: #ffffff;
-        --text: #0f172a;
-        --text-muted: #64748b;
-        --border: #e2e8f0;
-        --success: #16a34a;
-        --danger: #dc2626;
-        --warning: #d97706;
-      }
-      * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-      body { background-color: var(--bg); color: var(--text); display: flex; flex-direction: column; min-height: 100vh; }
-      header { background: var(--primary-dark); color: white; padding: 0.75rem 1.5rem; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-      .header-brand { display: flex; align-items: center; gap: 0.75rem; }
-      .header-brand img { height: 42px; width: 42px; object-fit: contain; border-radius: 6px; background: white; padding: 2px; }
-      .header-title h1 { font-size: 1.15rem; font-weight: 700; line-height: 1.2; }
-      .header-title p { font-size: 0.75rem; color: #94a3b8; }
-      .user-badge { display: flex; align-items: center; gap: 1rem; font-size: 0.875rem; }
-      .user-badge a { color: #f1f5f9; text-decoration: none; padding: 0.35rem 0.75rem; background: rgba(255,255,255,0.15); border-radius: 4px; font-weight: 500; transition: background 0.2s; }
-      .user-badge a:hover { background: rgba(255,255,255,0.3); }
-      .app-layout { display: flex; flex: 1; }
-      aside { width: 250px; background: var(--surface); border-right: 1px solid var(--border); padding: 1rem 0; flex-shrink: 0; }
-      aside nav { display: flex; flex-direction: column; }
-      aside nav a { padding: 0.75rem 1.25rem; color: var(--text); text-decoration: none; font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 0.6rem; border-left: 4px solid transparent; transition: all 0.2s; }
-      aside nav a:hover, aside nav a.active { background: #eff6ff; color: var(--secondary); border-left-color: var(--secondary); }
-      main { flex: 1; padding: 1.5rem; overflow-y: auto; max-width: 1400px; margin: 0 auto; width: 100%; }
-      .card { background: var(--surface); border-radius: 8px; border: 1px solid var(--border); padding: 1.25rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-      .card-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; color: var(--primary-dark); display: flex; justify-content: space-between; align-items: center; }
-      .grid-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-      .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; border-top: 4px solid var(--secondary); }
-      .stat-card.success { border-top-color: var(--success); }
-      .stat-card.warning { border-top-color: var(--warning); }
-      .stat-card.danger { border-top-color: var(--danger); }
-      .stat-val { font-size: 1.8rem; font-weight: 800; color: var(--primary-dark); margin-top: 0.25rem; }
-      .stat-lbl { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; }
-      table { width: 100%; border-collapse: collapse; font-size: 0.875rem; text-align: left; }
-      th, td { padding: 0.75rem 0.85rem; border-bottom: 1px solid var(--border); }
-      th { background: #f1f5f9; font-weight: 600; color: var(--text-muted); }
-      tr:hover { background: #f8fafc; }
-      .badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 9999px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; }
-      .badge-success { background: #dcfce7; color: #15803d; }
-      .badge-warning { background: #fef3c7; color: #b45309; }
-      .badge-danger { background: #fee2e2; color: #b91c1c; }
-      .badge-info { background: #e0f2fe; color: #0369a1; }
-      .btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 600; border-radius: 6px; border: none; cursor: pointer; text-decoration: none; transition: background 0.2s; }
-      .btn-primary { background: var(--secondary); color: white; }
-      .btn-primary:hover { background: #0284c7; }
-      .btn-success { background: var(--success); color: white; }
-      .btn-danger { background: var(--danger); color: white; }
-      .btn-secondary { background: #64748b; color: white; }
-      .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
-      .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.75rem; }
-      .form-group { margin-bottom: 1rem; }
-      .form-group label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem; color: var(--text); }
-      .form-control { width: 100%; padding: 0.55rem 0.75rem; font-size: 0.9rem; border: 1px solid var(--border); border-radius: 6px; outline: none; }
-      .form-control:focus { border-color: var(--secondary); box-shadow: 0 0 0 3px rgba(2,132,199,0.15); }
-      .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
-      .alert { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.875rem; }
-      .alert-success { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
-      .alert-danger { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
-      .alert-warning { background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
-      .student-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border); }
-      .toolbar { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
-      .toolbar-group { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
-      @media (max-width: 768px) {
-        .app-layout { flex-direction: column; }
-        aside { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
-        aside nav { flex-direction: row; overflow-x: auto; padding: 0.5rem; }
-        aside nav a { padding: 0.5rem 0.75rem; white-space: nowrap; border-left: none; border-bottom: 3px solid transparent; }
-        aside nav a.active { border-bottom-color: var(--secondary); }
-      }
+        :root { --primary: #4f46e5; --bg: #f8fafc; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .login-card { background: white; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        .login-card h2 { margin-top: 0; color: #1e293b; text-align: center; }
+        .form-group { margin-bottom: 1.25rem; }
+        .form-group label { display: block; margin-bottom: 0.5rem; color: #475569; font-weight: 600; font-size: 0.875rem; }
+        .form-group input { width: 100%; padding: 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; font-size: 1rem; box-sizing: border-box; }
+        .btn { width: 100%; padding: 0.75rem; background: var(--primary); color: white; border: none; border-radius: 0.5rem; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+        .btn:hover { background: #4338ca; }
+        .links { margin-top: 1rem; text-align: center; font-size: 0.875rem; }
+        .links a { color: var(--primary); text-decoration: none; }
+        .error { background: #fee2e2; color: #991b1b; padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.875rem; text-align: center; }
     </style>
-  </head>
-  <body>
-    <header>
-      <div class="header-brand">
-        ${schoolLogoSrc ? `<img src="${schoolLogoSrc}" alt="School Logo">` : ''}
-        ${clubLogoSrc ? `<img src="${clubLogoSrc}" alt="Club Logo">` : ''}
-        <div class="header-title">
-          <h1>${sys.student_club_name || 'Club Attendance System'}</h1>
-          <p>${sys.school_name || 'Central School'} • S.Y. ${sys.school_year || '2026-2027'}</p>
+</head>
+<body>
+    <div class="login-card">
+        <h2>System Login</h2>
+        ${req.query.error ? `<div class="error">${req.query.error}</div>` : ''}
+        <form action="/login" method="POST">
+            <div class="form-group">
+                <label>Email or Username</label>
+                <input type="text" name="username" required placeholder="Enter username or email">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" required placeholder="Enter password">
+            </div>
+            <button type="submit" class="btn">Sign In</button>
+        </form>
+        <div class="links">
+            <p>Student self-registration? <a href="/register">Register here</a></p>
+            <p><a href="/scanner">Go to QR Scanner</a></p>
         </div>
-      </div>
-      <div class="user-badge">
-        ${user ? `<span>👤 <strong>${user.name}</strong> (${user.role})</span><a href="/logout">Logout</a>` : '<a href="/login">Login</a>'}
-      </div>
-    </header>
-    <div class="app-layout">
-      ${user ? `<aside><nav>${navItems}</nav></aside>` : ''}
-      <main>
-        ${contentHtml}
-      </main>
     </div>
-  </body>
-  </html>
-  `;
+</body>
+</html>`);
+});
+
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    db.get(`SELECT * FROM users WHERE username = ? OR email = ?`, [username, username], (err, user) => {
+        if (user && bcrypt.compareSync(password, user.password)) {
+            req.session.user = { id: user.id, username: user.username, role: user.role, name: `${user.first_name} ${user.last_name}` };
+            logAudit(user.username, 'LOGIN', 'User logged in successfully', req.ip);
+            if (user.role === 'admin') return res.redirect('/admin');
+            if (user.role === 'scanner') return res.redirect('/scanner');
+        }
+        // Check if student login
+        db.get(`SELECT * FROM students WHERE email = ? AND status = 'Approved'`, [username], (err, student) => {
+            if (student && bcrypt.compareSync(password, student.student_number)) { // Default student password is student number initially or hashed
+                req.session.user = { id: student.id, username: student.email, role: 'student', name: `${student.first_name} ${student.last_name}`, student_number: student.student_number };
+                logAudit(student.email, 'STUDENT_LOGIN', 'Student logged into portal', req.ip);
+                return res.redirect('/member');
+            }
+            res.redirect('/login?error=Invalid username or password');
+        });
+    });
+});
+
+app.get('/logout', (req, res) => {
+    if (req.session.user) {
+        logAudit(req.session.user.username, 'LOGOUT', 'User logged out', req.ip);
+    }
+    req.session.destroy(() => {
+        res.redirect('/login');
+    });
+});
+
+// Public Student Self-Registration Link Route
+app.get('/register', (req, res) => {
+    db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+        if (settings && settings.registration_open === 0) {
+            return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Registration Closed</title><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"><style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}.card{background:white;padding:3rem;border-radius:1rem;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.1);max-width:450px;}h2{color:#ef4444;}</style></head>
+<body><div class="card"><i class="fa-solid fa-lock fa-3x" style="color:#ef4444;margin-bottom:1rem;"></i><h2>Registration Closed</h2><p>Registration is currently closed. Please contact the Club Adviser for assistance.</p><a href="/login" style="color:#4f46e5;text-decoration:none;font-weight:600;">Go to Login</a></div></body></html>`);
+        }
+        db.all(`SELECT name FROM positions`, (err, positions) => {
+            res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Club Registration</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); margin: 0; padding: 2rem; display: flex; justify-content: center; }
+        .register-container { background: white; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); width: 100%; max-width: 600px; }
+        h2 { color: #1e293b; text-align: center; margin-top: 0; }
+        .form-group { margin-bottom: 1.25rem; }
+        label { display: block; margin-bottom: 0.5rem; color: #475569; font-weight: 600; font-size: 0.875rem; }
+        input, select { width: 100%; padding: 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; font-size: 1rem; box-sizing: border-box; }
+        .btn { width: 100%; padding: 0.75rem; background: var(--primary); color: white; border: none; border-radius: 0.5rem; font-size: 1rem; font-weight: 600; cursor: pointer; }
+        .btn:hover { background: #4338ca; }
+        .preview-img { width: 120px; height: 120px; border-radius: 50%; object-fit: cover; border: 3px solid #cbd5e1; display: none; margin-top: 0.5rem; }
+    </style>
+</head>
+<body>
+    <div class="register-container">
+        <h2>Student Club Registration</h2>
+        <form action="/register" method="POST" enctype="multipart/form-data">
+            <div class="form-group">
+                <label>First Name *</label>
+                <input type="text" name="first_name" required>
+            </div>
+            <div class="form-group">
+                <label>Middle Name</label>
+                <input type="text" name="middle_name">
+            </div>
+            <div class="form-group">
+                <label>Last Name *</label>
+                <input type="text" name="last_name" required>
+            </div>
+            <div class="form-group">
+                <label>Email Address *</label>
+                <input type="email" name="email" required placeholder="student@example.com">
+            </div>
+            <div class="form-group">
+                <label>Contact Number</label>
+                <input type="text" name="contact_number">
+            </div>
+            <div class="form-group">
+                <label>Position *</label>
+                <select name="position" required>
+                    <option value="">Select Position</option>
+                    ${positions.map(p => `<option value="${p.name}">${p.name}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Student Photo * (Clear, Front-facing)</label>
+                <input type="file" name="photo" id="photoInput" accept="image/*" required onchange="previewImage(event)">
+                <img id="photoPreview" class="preview-img">
+            </div>
+            <button type="submit" class="btn">Submit Registration</button>
+        </form>
+    </div>
+    <script>
+        function previewImage(event) {
+            const reader = new FileReader();
+            reader.onload = function(){
+                const output = document.getElementById('photoPreview');
+                output.src = reader.result;
+                output.style.display = 'block';
+            };
+            reader.readAsDataURL(event.target.files[0]);
+        }
+    </script>
+</body>
+</html>`);
+        });
+    });
+});
+
+app.post('/register', upload.single('photo'), (req, res) => {
+    const { first_name, middle_name, last_name, email, contact_number, position } = req.body;
+    const photo = req.file ? req.file.filename : '';
+
+    if (!first_name || !last_name || !email || !position || !photo) {
+        return res.status(400).send('Missing required registration fields.');
+    }
+
+    db.get(`SELECT id FROM students WHERE email = ?`, [email], (err, row) => {
+        if (row) {
+            return res.send(`<!DOCTYPE html><html><head><title>Duplicate Email</title></head><body style="font-family:sans-serif;text-align:center;padding:50px;"><h2>Registration Error</h2><p>The email address ${email} is already registered.</p><a href="/register">Back to Registration</a></body></html>`);
+        }
+
+        db.run(`INSERT INTO students (first_name, middle_name, last_name, email, contact_number, position, photo, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+            [first_name, middle_name || '', last_name, email, contact_number || '', position, photo], function(err) {
+                if (err) {
+                    return res.status(500).send('Database error during registration.');
+                }
+                logAudit(email, 'REGISTER', 'Student submitted registration', req.ip);
+                res.send(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Registration Successful</title><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"><style>body{font-family:sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}.card{background:white;padding:3rem;border-radius:1rem;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.1);max-width:450px;}h2{color:#10b981;}</style></head>
+<body><div class="card"><i class="fa-solid fa-circle-check fa-3x" style="color:#10b981;margin-bottom:1rem;"></i><h2>Registration Successful!</h2><p>Your registration has been submitted successfully.</p><p><strong>Status: Pending Approval</strong></p><p>Please wait for your Club Adviser to approve your registration.</p><a href="/login" style="color:#4f46e5;text-decoration:none;font-weight:600;display:inline-block;margin-top:1rem;">Go to Login</a></div></body></html>`);
+            });
+    });
+});
+// PART 3: app.js - Independent Mobile QR Scanner Portal with Voice & Sound
+app.get('/scanner', isScanner, (req, res) => {
+    db.all(`SELECT * FROM events WHERE status != 'Cancelled'`, (err, events) => {
+        db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+            res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QR Scanner Portal - ${settings ? settings.club_name : 'Club'}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <style>
+        :root { --primary: #4f46e5; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --bg: #f1f5f9; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); margin: 0; padding: 1rem; }
+        .scanner-container { max-width: 800px; margin: 0 auto; background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+        .header h2 { margin: 0; color: #1e293b; font-size: 1.5rem; }
+        .form-group { margin-bottom: 1rem; }
+        label { display: block; font-weight: 600; margin-bottom: 0.5rem; color: #475569; }
+        select { width: 100%; padding: 0.75rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; font-size: 1rem; }
+        #reader { width: 100%; max-width: 500px; margin: 0 auto; border-radius: 0.5rem; overflow: hidden; border: 2px solid #cbd5e1; }
+        .result-box { margin-top: 1.5rem; padding: 1.5rem; border-radius: 0.75rem; text-align: center; display: none; }
+        .result-box.success { background: #d1fae5; color: #065f46; border: 2px solid var(--success); }
+        .result-box.error { background: #fee2e2; color: #991b1b; border: 2px solid var(--danger); }
+        .result-box.warning { background: #fef3c7; color: #92400e; border: 2px solid var(--warning); }
+        .student-photo { width: 100px; height: 100px; border-radius: 50%; object-fit: cover; margin-bottom: 1rem; border: 3px solid white; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .recent-scans { margin-top: 2rem; }
+        .recent-scans h3 { border-bottom: 1px solid #e2e8f0; padding-bottom: 0.5rem; color: #334155; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+    </style>
+</head>
+<body>
+    <div class="scanner-container">
+        <div class="header">
+            <h2><i class="fa-solid fa-qrcode"></i> QR Attendance Scanner</h2>
+            <div>
+                <span style="font-weight: 600; color: #64748b; margin-right: 1rem;">${req.session.user.name}</span>
+                <a href="/admin" style="text-decoration:none; background:var(--primary); color:white; padding:0.5rem 1rem; border-radius:0.375rem; font-size:0.875rem;">Dashboard</a>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label>Select Active Event *</label>
+            <select id="eventSelect" required>
+                <option value="">-- Choose Event for Attendance --</option>
+                ${events.map(e => `<option value="${e.id}">${e.name} (${e.event_date})</option>`).join('')}
+            </select>
+        </div>
+
+        <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
+            <div style="flex: 1;">
+                <label>Scan Type</label>
+                <select id="scanType">
+                    <option value="Time In">Time In</option>
+                    <option value="Time Out">Time Out</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="reader"></div>
+
+        <div id="resultBox" class="result-box">
+            <img id="resPhoto" class="student-photo" style="display:none;">
+            <h3 id="resTitle" style="margin:0 0 0.5rem 0; font-size:1.5rem;"></h3>
+            <p id="resDetails" style="margin:0; font-size:1.1rem; font-weight:600;"></p>
+        </div>
+
+        <div class="recent-scans">
+            <h3>Recent Scans</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Student Name</th>
+                        <th>Student No.</th>
+                        <th>Event</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="recentScansBody">
+                    <tr><td colspan="6" style="text-align:center; color:#64748b;">No scans recorded yet in this session.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <audio id="successSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"></audio>
+    <audio id="errorSound" src="https://actions.google.com/sounds/v1/alarms/bugle_tune.ogg"></audio>
+    <audio id="warningSound" src="https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg"></audio>
+
+    <script>
+        const recentScans = [];
+
+        function playSound(type) {
+            if (type === 'success') document.getElementById('successSound').play().catch(e => {});
+            if (type === 'error') document.getElementById('errorSound').play().catch(e => {});
+            if (type === 'warning') document.getElementById('warningSound').play().catch(e => {});
+        }
+
+        function speakText(text) {
+            if ('speechSynthesis' in window) {
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = 1.0;
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        function showResult(status, title, details, photoUrl) {
+            const box = document.getElementById('resultBox');
+            box.className = 'result-box ' + status;
+            box.style.display = 'block';
+            
+            document.getElementById('resTitle').innerText = title;
+            document.getElementById('resDetails').innerText = details;
+            
+            const img = document.getElementById('resPhoto');
+            if (photoUrl) {
+                img.src = '/uploads/' + photoUrl;
+                img.style.display = 'inline-block';
+            } else {
+                img.style.display = 'none';
+            }
+        }
+
+        function addRecentScanTable(scan) {
+            recentScans.unshift(scan);
+            if (recentScans.length > 10) recentScans.pop();
+            
+            const tbody = document.getElementById('recentScansBody');
+            tbody.innerHTML = recentScans.map(s => \`
+                <tr>
+                    <td>\${s.time}</td>
+                    <td>\${s.name}</td>
+                    <td>\${s.student_number}</td>
+                    <td>\${s.event_name}</td>
+                    <td>\${s.type}</td>
+                    <td><span style="padding:0.25rem 0.5rem; border-radius:0.25rem; font-size:0.75rem; background:\${s.status === 'Present' ? '#d1fae5; color:#065f46' : '#fef3c7; color:#92400e'}">\${s.status}</span></td>
+                </tr>
+            \`).join('');
+        }
+
+        function onScanSuccess(decodedText, decodedResult) {
+            const eventId = document.getElementById('eventSelect').value;
+            const scanType = document.getElementById('scanType').value;
+
+            if (!eventId) {
+                playSound('warning');
+                showResult('warning', 'SELECT AN EVENT', 'Please select an event before scanning QR codes.');
+                return;
+            }
+
+            // Pause scanner briefly to prevent double reads
+            html5QrcodeScanner.pause(true);
+
+            fetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ qr_token: decodedText, event_id: eventId, scan_type: scanType })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    playSound('success');
+                    showResult('success', data.title, data.message, data.photo);
+                    speakText(data.speech);
+                    addRecentScanTable(data.scanRecord);
+                } else {
+                    playSound(data.soundType || 'error');
+                    showResult(data.boxType || 'error', data.title, data.message, data.photo);
+                    speakText(data.speech);
+                }
+                setTimeout(() => { html5QrcodeScanner.resume(); }, 2500);
+            })
+            .catch(err => {
+                playSound('error');
+                showResult('error', 'SYSTEM ERROR', 'Failed to process attendance scan.');
+                setTimeout(() => { html5QrcodeScanner.resume(); }, 2500);
+            });
+        }
+
+        const html5QrcodeScanner = new Html5QrcodeScanner(
+            "reader", { fps: 10, qrbox: { width: 250, height: 250 } }, false);
+        html5QrcodeScanner.render(onScanSuccess, (err) => {});
+    </script>
+</body>
+</html>`);
+        });
+    });
+});
+
+// Scan Processing API endpoint
+app.post('/api/scan', isScanner, (req, res) => {
+    const { qr_token, event_id, scan_type } = req.body;
+    if (!qr_token || !event_id) {
+        return res.json({ success: false, title: 'INVALID REQUEST', message: 'Missing QR or Event information.', speech: 'Invalid scan request.', soundType: 'error', boxType: 'error' });
+    }
+
+    db.get(`SELECT * FROM students WHERE qr_token = ? AND status = 'Approved'`, [qr_token], (err, student) => {
+        if (!student) {
+            return res.json({ success: false, title: 'INVALID QR CODE', message: 'The scanned QR code is unknown, disabled, or pending approval.', speech: 'Invalid QR code.', soundType: 'error', boxType: 'error' });
+        }
+
+        db.get(`SELECT * FROM events WHERE id = ?`, [event_id], (err, event) => {
+            if (!event) {
+                return res.json({ success: false, title: 'EVENT NOT FOUND', message: 'Selected event does not exist.', speech: 'Event not found.', soundType: 'error', boxType: 'error' });
+            }
+
+            db.get(`SELECT * FROM attendance WHERE event_id = ? AND student_id = ?`, [event_id, student.id], (err, existingAttendance) => {
+                const now = new Date();
+                const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                if (scan_type === 'Time Out') {
+                    if (!existingAttendance) {
+                        return res.json({ success: false, title: 'NO TIME IN RECORD', message: `${student.first_name} ${student.last_name} has not recorded a Time In for this event.`, speech: `${student.first_name} ${student.last_name}, no time in recorded.`, soundType: 'warning', boxType: 'warning' });
+                    }
+                    db.run(`UPDATE attendance SET time_out = CURRENT_TIMESTAMP WHERE id = ?`, [existingAttendance.id], function(err) {
+                        logAudit(req.session.user.username, 'ATTENDANCE_TIMEOUT', `Recorded Time Out for ${student.student_number} at event ${event.name}`, req.ip);
+                        return res.json({
+                            success: true,
+                            title: 'TIME OUT RECORDED',
+                            message: `${student.first_name} ${student.last_name} (${student.student_number}) - Time Out logged successfully.`,
+                            photo: student.photo,
+                            speech: `${student.first_name} ${student.last_name}, time out recorded.`,
+                            scanRecord: {
+                                time: timeString,
+                                name: `${student.first_name} ${student.last_name}`,
+                                student_number: student.student_number,
+                                event_name: event.name,
+                                type: 'Time Out',
+                                status: existingAttendance.status
+                            }
+                        });
+                    });
+                } else {
+                    // Time In
+                    if (existingAttendance) {
+                        return res.json({
+                            success: false,
+                            boxType: 'warning',
+                            soundType: 'warning',
+                            title: 'ALREADY RECORDED',
+                            message: `${student.first_name} ${student.last_name} is already recorded for this event.`,
+                            photo: student.photo,
+                            speech: `${student.first_name} ${student.last_name}, you are already recorded for this event.`
+                        });
+                    }
+
+                    // Calculate status (Present / Late)
+                    let status = 'Present';
+                    // Example check start time vs now
+                    const eventStart = new Date(`${event.event_date}T${event.start_time || '08:00'}`);
+                    const diffMins = (now - eventStart) / (1000 * 60);
+                    db.get(`SELECT late_threshold_mins FROM settings WHERE id = 1`, (err, settings) => {
+                        const threshold = settings ? settings.late_threshold_mins : 15;
+                        if (diffMins > threshold) {
+                            status = 'Late';
+                        }
+
+                        db.run(`INSERT INTO attendance (event_id, student_id, time_in, status, recorded_by) VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)`,
+                            [event_id, student.id, status, req.session.user.username], function(err) {
+                                if (err) {
+                                    return res.json({ success: false, title: 'DATABASE ERROR', message: 'Could not save attendance record.', speech: 'Database error.', soundType: 'error', boxType: 'error' });
+                                }
+                                logAudit(req.session.user.username, 'ATTENDANCE_TIMEIN', `Recorded ${status} Time In for ${student.student_number} at event ${event.name}`, req.ip);
+                                return res.json({
+                                    success: true,
+                                    title: `ATTENDANCE RECORDED (${status.toUpperCase()})`,
+                                    message: `${student.first_name} ${student.last_name} (${student.student_number}) - Position: ${student.position}`,
+                                    photo: student.photo,
+                                    speech: `${student.first_name} ${student.last_name}, attendance recorded as ${status}.`,
+                                    scanRecord: {
+                                        time: timeString,
+                                        name: `${student.first_name} ${student.last_name}`,
+                                        student_number: student.student_number,
+                                        event_name: event.name,
+                                        type: 'Time In',
+                                        status: status
+                                    }
+                                });
+                            });
+                    });
+                }
+            });
+        });
+    });
+});
+// PART 4: app.js - Student Portal (/member) & Profile Dashboard
+app.get('/member', isStudentUser, (req, res) => {
+    db.get(`SELECT * FROM students WHERE email = ?`, [req.session.user.username], (err, student) => {
+        if (!student) return res.redirect('/login');
+
+        db.all(`SELECT a.*, e.name as event_name, e.event_date FROM attendance a JOIN events e ON a.event_id = e.id WHERE a.student_id = ? ORDER BY e.event_date DESC`, [student.id], (err, attendanceHistory) => {
+            db.all(`SELECT * FROM events WHERE status != 'Cancelled' ORDER BY event_date ASC`, (err, upcomingEvents) => {
+                db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+                    // Generate QR data URL for digital ID
+                    QRCode.toDataURL(student.qr_token || 'NO_QR', { width: 300 }, (err, qrCodeUrl) => {
+                        res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Portal - ${settings ? settings.club_name : 'Club'}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); margin: 0; padding: 2rem; }
+        .portal-container { max-width: 900px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 2rem; }
+        .id-card { background: white; border-radius: 1rem; padding: 2rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); display: flex; gap: 2rem; align-items: center; margin-bottom: 2rem; border-top: 6px solid var(--primary); }
+        .id-photo { width: 150px; height: 150px; border-radius: 50%; object-fit: cover; border: 4px solid #e2e8f0; }
+        .id-qr { width: 140px; height: 140px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        .btn { background: var(--primary); color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 600; font-size: 0.875rem; display: inline-block; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="portal-container">
+        <div class="header">
+            <div>
+                <h2 style="margin:0; color:#1e293b;">Student Portal</h2>
+                <p style="margin:0.25rem 0 0 0; color:#64748b;">${settings ? settings.club_name : ''}</p>
+            </div>
+            <div>
+                <a href="/logout" class="btn" style="background:#ef4444;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+            </div>
+        </div>
+
+        <div class="id-card">
+            <img src="/uploads/${student.photo}" class="id-photo">
+            <div style="flex: 1;">
+                <h3 style="margin:0; font-size:1.75rem; color:#1e293b;">${student.first_name} ${student.middle_name || ''} ${student.last_name}</h3>
+                <p style="margin:0.25rem 0; color:var(--primary); font-weight:600; font-size:1.1rem;">${student.position}</p>
+                <p style="margin:0.25rem 0; color:#64748b;">Student No: <strong>${student.student_number}</strong></p>
+                <p style="margin:0.25rem 0; color:#64748b;">Email: ${student.email}</p>
+                <p style="margin:0.25rem 0; color:#64748b;">School Year: ${settings ? settings.school_year : '2025-2026'}</p>
+            </div>
+            <div>
+                <img src="${qrCodeUrl}" class="id-qr" title="Digital QR Code">
+                <p style="text-align:center; font-size:0.75rem; color:#64748b; margin:0.25rem 0 0 0;">Digital QR</p>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h3 style="margin-top:0; color:#334155;"><i class="fa-solid fa-clipboard-user"></i> Attendance History</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Event</th>
+                            <th>Date</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${attendanceHistory.length === 0 ? '<tr><td colspan="3" style="text-align:center; color:#64748b;">No attendance recorded yet.</td></tr>' : 
+                          attendanceHistory.map(a => `<tr><td>${a.event_name}</td><td>${a.event_date}</td><td><span style="padding:0.25rem 0.5rem; border-radius:0.25rem; font-size:0.75rem; background:${a.status==='Present'?'#d1fae5;color:#065f46':'#fef3c7;color:#92400e'}">${a.status}</span></td></tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0; color:#334155;"><i class="fa-solid fa-calendar-days"></i> Upcoming Club Events</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Event Name</th>
+                            <th>Date</th>
+                            <th>Location</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${upcomingEvents.length === 0 ? '<tr><td colspan="3" style="text-align:center; color:#64748b;">No upcoming events scheduled.</td></tr>' :
+                          upcomingEvents.map(e => `<tr><td>${e.name}</td><td>${e.event_date}</td><td>${e.location || 'N/A'}</td></tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>`);
+                    });
+                });
+            });
+        });
+    });
+});
+// PART 5: app.js - Admin Dashboard & Analytics Calculations
+app.get('/admin', isAdmin, (req, res) => {
+    db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+        db.get(`SELECT COUNT(*) as total FROM students WHERE status = 'Approved'`, (err, r1) => {
+            db.get(`SELECT COUNT(*) as total FROM students WHERE status = 'Pending'`, (err, r2) => {
+                db.get(`SELECT COUNT(*) as total FROM students WHERE status = 'Approved' AND membership_status = 'Active'`, (err, r3) => {
+                    db.get(`SELECT COUNT(*) as total FROM events WHERE status = 'Active' OR status = 'Upcoming'`, (err, r4) => {
+                        db.all(`SELECT a.*, s.first_name, s.last_name, s.student_number, e.name as event_name FROM attendance a JOIN students s ON a.student_id = s.id JOIN events e ON a.event_id = e.id ORDER BY a.time_in DESC LIMIT 10`, (err, recentScans) => {
+                            db.all(`SELECT * FROM events ORDER BY event_date DESC LIMIT 5`, (err, eventsList) => {
+                                res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard - ${settings ? settings.club_name : 'Club'}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; overflow-y: auto; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; color: #f8fafc; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; transition: 0.2s; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .header { display: flex; justify-content: space-between; align-items: center; background: white; padding: 1rem 2rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 2rem; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
+        .stat-card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); display: flex; align-items: center; justify-content: space-between; border-left: 5px solid var(--primary); }
+        .stat-card h3 { margin: 0; font-size: 2rem; color: #1e293b; }
+        .stat-card p { margin: 0; color: #64748b; font-weight: 600; font-size: 0.875rem; }
+        .stat-icon { font-size: 2.5rem; color: #cbd5e1; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 2rem; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        .badge { padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600; }
+        .badge-success { background: #d1fae5; color: #065f46; }
+        .badge-warning { background: #fef3c7; color: #92400e; }
+        .db-status { display: inline-flex; align-items: center; gap: 0.5rem; background: #d1fae5; color: #065f46; padding: 0.25rem 0.75rem; border-radius: 1rem; font-size: 0.875rem; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin" class="active"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations (${r2 ? r2.total : 0})</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/scanner" target="_blank"><i class="fa-solid fa-qrcode"></i> Scanner Portal</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+    </div>
+
+    <div class="main-content">
+        <div class="header">
+            <div>
+                <h2 style="margin:0; color:#1e293b;">Dashboard Overview</h2>
+                <p style="margin:0.25rem 0 0 0; color:#64748b;">${settings ? settings.school_name : ''} — ${settings ? settings.club_name : ''}</p>
+            </div>
+            <div class="db-status">
+                <span style="height:10px; width:10px; background:#10b981; border-radius:50%; display:inline-block;"></span> Database Connected
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div>
+                    <h3>${r1 ? r1.total : 0}</h3>
+                    <p>Approved Students</p>
+                </div>
+                <i class="fa-solid fa-users stat-icon"></i>
+            </div>
+            <div class="stat-card" style="border-left-color: #f59e0b;">
+                <div>
+                    <h3>${r2 ? r2.total : 0}</h3>
+                    <p>Pending Registrations</p>
+                </div>
+                <i class="fa-solid fa-user-clock stat-icon"></i>
+            </div>
+            <div class="stat-card" style="border-left-color: #10b981;">
+                <div>
+                    <h3>${r3 ? r3.total : 0}</h3>
+                    <p>Active Members</p>
+                </div>
+                <i class="fa-solid fa-user-check stat-icon"></i>
+            </div>
+            <div class="stat-card" style="border-left-color: #3b82f6;">
+                <div>
+                    <h3>${r4 ? r4.total : 0}</h3>
+                    <p>Active / Upcoming Events</p>
+                </div>
+                <i class="fa-solid fa-calendar stat-icon"></i>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0; color:#1e293b;"><i class="fa-solid fa-bolt"></i> Real-Time Recent Attendance Scans</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Student Name</th>
+                        <th>Student Number</th>
+                        <th>Event</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${recentScans.length === 0 ? '<tr><td colspan="5" style="text-align:center; color:#64748b;">No recent attendance scans recorded.</td></tr>' :
+                      recentScans.map(s => `<tr><td>${s.time_in}</td><td>${s.first_name} ${s.last_name}</td><td>${s.student_number}</td><td>${s.event_name}</td><td><span class="badge ${s.status==='Present'?'badge-success':'badge-warning'}">${s.status}</span></td></tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>`);
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    });
+});
+// PART 6: app.js - Admin Management Pages (Students, Registrations, Positions, Events, Settings, ID Printing, Backup)
+app.get('/admin/students', isAdmin, (req, res) => {
+    db.all(`SELECT * FROM students WHERE status = 'Approved' ORDER BY last_name ASC`, (err, students) => {
+        db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+            res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Manage Students - Admin</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        .student-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students" class="active"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+    </div>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">Approved Students Directory</h2>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Photo</th>
+                        <th>Student Number</th>
+                        <th>Name</th>
+                        <th>Position</th>
+                        <th>Email</th>
+                        <th>Membership</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${students.length === 0 ? '<tr><td colspan="6" style="text-align:center; color:#64748b;">No approved students found.</td></tr>' :
+                      students.map(s => `<tr><td><img src="/uploads/${s.photo}" class="student-avatar"></td><td><strong>${s.student_number}</strong></td><td>${s.first_name} ${s.last_name}</td><td>${s.position}</td><td>${s.email}</td><td><span style="padding:0.25rem 0.5rem; border-radius:0.25rem; font-size:0.75rem; background:#d1fae5; color:#065f46">${s.membership_status}</span></td></tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>`);
+        });
+    });
+});
+
+app.get('/admin/registrations', isAdmin, (req, res) => {
+    db.all(`SELECT * FROM students WHERE status = 'Pending' ORDER BY created_at DESC`, (err, pending) => {
+        res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Pending Registrations</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        .student-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; }
+        .btn { padding: 0.375rem 0.75rem; border: none; border-radius: 0.25rem; font-weight: 600; font-size: 0.75rem; cursor: pointer; text-decoration: none; display: inline-block; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-danger { background: #ef4444; color: white; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations" class="active"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+    </div>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">Pending Student Registrations</h2>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Photo</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Position</th>
+                        <th>Date Submitted</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${pending.length === 0 ? '<tr><td colspan="6" style="text-align:center; color:#64748b;">No pending registrations.</td></tr>' :
+                      pending.map(s => `<tr><td><img src="/uploads/${s.photo}" class="student-avatar"></td><td>${s.first_name} ${s.last_name}</td><td>${s.email}</td><td>${s.position}</td><td>${s.created_at}</td><td><a href="/admin/registrations/approve/${s.id}" class="btn btn-success"><i class="fa-solid fa-check"></i> Approve</a> <a href="/admin/registrations/reject/${s.id}" class="btn btn-danger"><i class="fa-solid fa-xmark"></i> Reject</a></td></tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>`);
+    });
+});
+
+// Approve Registration & Generate Student Number + QR Token
+app.get('/admin/registrations/approve/:id', isAdmin, (req, res) => {
+    const studentId = req.params.id;
+    db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+        db.get(`SELECT COUNT(*) as count FROM students WHERE status = 'Approved'`, (err, r) => {
+            const prefix = settings ? settings.num_prefix : 'SC-';
+            const startNum = settings ? settings.start_number : 1;
+            const length = settings ? settings.num_length : 6;
+            const nextNum = startNum + (r ? r.count : 0);
+            const studentNumber = prefix + '2026-' + String(nextNum).padStart(length, '0');
+            const qrToken = 'QR-' + Math.random().toString(36).substring(2, 10).toUpperCase() + '-' + Date.now();
+
+            db.run(`UPDATE students SET student_number = ?, qr_token = ?, status = 'Approved' WHERE id = ?`, [studentNumber, qrToken, studentId], function(err) {
+                logAudit(req.session.user.username, 'APPROVE_STUDENT', `Approved student ID ${studentId} with number ${studentNumber}`, req.ip);
+                res.redirect('/admin/registrations');
+            });
+        });
+    });
+});
+
+app.get('/admin/registrations/reject/:id', isAdmin, (req, res) => {
+    db.run(`DELETE FROM students WHERE id = ? AND status = 'Pending'`, [req.params.id], function(err) {
+        logAudit(req.session.user.username, 'REJECT_STUDENT', `Rejected/deleted registration ID ${req.params.id}`, req.ip);
+        res.redirect('/admin/registrations');
+    });
+});
+
+// Positions Management
+app.get('/admin/positions', isAdmin, (req, res) => {
+    db.all(`SELECT * FROM positions`, (err, positions) => {
+        res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Manage Positions</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 1.5rem; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        input, button { padding: 0.5rem 1rem; border: 1px solid #cbd5e1; border-radius: 0.375rem; font-size: 1rem; }
+        button { background: var(--primary); color: white; border: none; font-weight: 600; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions" class="active"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+    </div>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">Customizable Club Positions</h2>
+        <div class="card">
+            <form action="/admin/positions" method="POST" style="display: flex; gap: 1rem;">
+                <input type="text" name="name" placeholder="New Position Name (e.g. Project Director)" required style="flex:1;">
+                <button type="submit"><i class="fa-solid fa-plus"></i> Add Position</button>
+            </form>
+        </div>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr><th>Position Name</th></tr>
+                </thead>
+                <tbody>
+                    ${positions.map(p => `<tr><td><strong>${p.name}</strong></td></tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>`);
+    });
+});
+
+app.post('/admin/positions', isAdmin, (req, res) => {
+    const { name } = req.body;
+    if (name) {
+        db.run(`INSERT OR IGNORE INTO positions (name) VALUES (?)`, [name], (err) => {
+            logAudit(req.session.user.username, 'ADD_POSITION', `Created position ${name}`, req.ip);
+            res.redirect('/admin/positions');
+        });
+    } else {
+        res.redirect('/admin/positions');
+    }
+});
+
+// Events Management
+app.get('/admin/events', isAdmin, (req, res) => {
+    db.all(`SELECT * FROM events ORDER BY event_date DESC`, (err, events) => {
+        res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Manage Events</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 1.5rem; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        .form-group { margin-bottom: 1rem; }
+        label { display: block; font-weight: 600; margin-bottom: 0.25rem; color: #475569; font-size: 0.875rem; }
+        input, select { width: 100%; padding: 0.5rem; border: 1px solid #cbd5e1; border-radius: 0.375rem; box-sizing: border-box; }
+        button { background: var(--primary); color: white; border: none; padding: 0.75rem 1.5rem; font-weight: 600; border-radius: 0.375rem; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events" class="active"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+    </div>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">Event Management</h2>
+        <div class="card">
+            <h3 style="margin-top:0;">Create New Event</h3>
+            <form action="/admin/events" method="POST">
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    <div class="form-group"><label>Event Name *</label><input type="text" name="name" required></div>
+                    <div class="form-group"><label>Event Type *</label>
+                        <select name="event_type" required>
+                            <option value="General Club Assembly">General Club Assembly</option>
+                            <option value="Club Meeting">Club Meeting</option>
+                            <option value="Officer Meeting">Officer Meeting</option>
+                            <option value="Workshop">Workshop</option>
+                            <option value="Seminar">Seminar</option>
+                            <option value="Custom Event">Custom Event</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+                    <div class="form-group"><label>Event Date *</label><input type="date" name="event_date" required></div>
+                    <div class="form-group"><label>Start Time *</label><input type="time" name="start_time" required></div>
+                    <div class="form-group"><label>End Time *</label><input type="time" name="end_time" required></div>
+                </div>
+                <div class="form-group"><label>Location</label><input type="text" name="location"></div>
+                <button type="submit"><i class="fa-solid fa-plus"></i> Create Event</button>
+            </form>
+        </div>
+        <div class="card">
+            <h3 style="margin-top:0;">Events List</h3>
+            <table>
+                <thead>
+                    <tr><th>Event Name</th><th>Type</th><th>Date</th><th>Time</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                    ${events.length === 0 ? '<tr><td colspan="5" style="text-align:center; color:#64748b;">No events created yet.</td></tr>' :
+                      events.map(e => `<tr><td><strong>${e.name}</strong></td><td>${e.event_type}</td><td>${e.event_date}</td><td>${e.start_time} - ${e.end_time}</td><td><span style="padding:0.25rem 0.5rem; border-radius:0.25rem; font-size:0.75rem; background:#d1fae5; color:#065f46">${e.status}</span></td></tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>`);
+    });
+});
+
+app.post('/admin/events', isAdmin, (req, res) => {
+    const { name, event_type, event_date, start_time, end_time, location } = req.body;
+    if (name && event_date) {
+        db.run(`INSERT INTO events (name, event_type, event_date, start_time, end_time, location, status) VALUES (?, ?, ?, ?, ?, ?, 'Upcoming')`,
+            [name, event_type, event_date, start_time, end_time, location || 'School Campus'], (err) => {
+                logAudit(req.session.user.username, 'CREATE_EVENT', `Created event ${name}`, req.ip);
+                res.redirect('/admin/events');
+            });
+    } else {
+        res.redirect('/admin/events');
+    }
+});
+
+// A4 ID Printing (8 IDs per A4 Page requirement)
+app.get('/admin/id-printing', isAdmin, (req, res) => {
+    db.all(`SELECT * FROM students WHERE status = 'Approved' ORDER BY last_name ASC`, (err, students) => {
+        db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+            // Generate QR code data urls for all students
+            let processed = 0;
+            const studentsWithQr = [];
+            if (students.length === 0) {
+                renderPrintPage(res, settings, []);
+                return;
+            }
+            students.forEach(s => {
+                QRCode.toDataURL(s.qr_token, { width: 250 }, (err, url) => {
+                    studentsWithQr.push({ ...s, qrDataUrl: url });
+                    processed++;
+                    if (processed === students.length) {
+                        renderPrintPage(res, settings, studentsWithQr);
+                    }
+                });
+            });
+        });
+    });
+});
+
+function renderPrintPage(res, settings, students) {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Print Student IDs (8 per A4)</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #e2e8f0; margin: 0; padding: 2rem; }
+        .no-print { text-align: center; margin-bottom: 2rem; }
+        .btn { background: #4f46e5; color: white; border: none; padding: 0.75rem 1.5rem; font-size: 1rem; font-weight: 600; border-radius: 0.5rem; cursor: pointer; }
+        .a4-page { width: 210mm; height: 297mm; background: white; margin: 0 auto 2rem auto; padding: 10mm; box-sizing: border-box; display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(4, 1fr); gap: 5mm; page-break-after: always; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .id-card { border: 2px dashed #cbd5e1; border-radius: 0.5rem; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; background: white; box-sizing: border-box; position: relative; overflow: hidden; }
+        .id-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #4f46e5; padding-bottom: 5px; }
+        .id-body { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+        .id-photo { width: 70px; height: 70px; border-radius: 50%; object-fit: cover; border: 2px solid #4f46e5; }
+        .id-qr { width: 85px; height: 85px; }
+        .id-footer { text-align: center; font-size: 8px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 3px; }
+        @media print {
+            body { background: white; padding: 0; }
+            .no-print { display: none; }
+            .a4-page { margin: 0; box-shadow: none; border: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <h2>Student Club ID Cards (8 IDs per A4 Bond Paper)</h2>
+        <button class="btn" onclick="window.print()"><i class="fa-solid fa-print"></i> Print All ID Cards</button>
+        <a href="/admin" style="margin-left: 1rem; color: #4f46e5; text-decoration: none; font-weight: 600;">Back to Dashboard</a>
+    </div>
+    ${chunkArray(students, 8).map(pageStudents => `
+        <div class="a4-page">
+            ${pageStudents.map(s => `
+                <div class="id-card">
+                    <div class="id-header">
+                        <span style="font-size: 9px; font-weight: bold; color: #1e293b;">${settings ? settings.club_name : 'Student Club'}</span>
+                        <span style="font-size: 8px; background: #4f46e5; color: white; padding: 1px 4px; border-radius: 3px;">${settings ? settings.school_year : '2025-2026'}</span>
+                    </div>
+                    <div class="id-body">
+                        <img src="/uploads/${s.photo}" class="id-photo">
+                        <div style="flex: 1;">
+                            <div style="font-size: 11px; font-weight: bold; color: #1e293b;">${s.first_name} ${s.last_name}</div>
+                            <div style="font-size: 9px; color: #4f46e5; font-weight: bold;">${s.position}</div>
+                            <div style="font-size: 8px; color: #64748b; margin-top: 2px;">No: ${s.student_number}</div>
+                        </div>
+                        <img src="${s.qrDataUrl}" class="id-qr">
+                    </div>
+                    <div class="id-footer">
+                        ${settings ? settings.school_name : 'School'} • Official Membership ID
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `).join('')}
+</body>
+</html>`);
 }
 
-// Global System API Status / Health Check Endpoint
-app.get('/api/health', async (req, res) => {
-  try {
-    const test = await queryDB('SELECT COUNT(*) as count FROM settings');
-    res.json({ status: 'Connected', driver: dbDriver, timestamp: new Date().toISOString() });
-  } catch (err) {
-    res.status(500).json({ status: 'Connection Error', error: err.message });
-  }
-});
+function chunkArray(arr, size) {
+    const results = [];
+    for (let i = 0; i < arr.length; i += size) {
+        results.push(arr.slice(i, i + size));
+    }
+    return results;
+}
 
-/* ==========================================================================
-   PUBLIC AUTHENTICATION & REGISTRATION ROUTES
-   ========================================================================== */
-
-app.get('/', (req, res) => {
-  if (req.session && req.session.user) {
-    if (req.session.user.role === 'ADMIN') return res.redirect('/admin/dashboard');
-    if (req.session.user.role === 'SCANNER') return res.redirect('/scanner');
-    if (req.session.user.role === 'STUDENT') return res.redirect('/member');
-  }
-  res.redirect('/login');
-});
-
-app.get('/login', async (req, res) => {
-  const error = req.query.error ? decodeURIComponent(req.query.error) : '';
-  const success = req.query.success ? decodeURIComponent(req.query.success) : '';
-
-  const content = `
-    <div style="max-width: 400px; margin: 3rem auto;" class="card">
-      <div style="text-align: center; margin-bottom: 1.5rem;">
-        <h2 style="color: var(--primary-dark);">System Login</h2>
-        <p style="color: var(--text-muted); font-size: 0.85rem;">Enter your account credentials to continue</p>
-      </div>
-      ${error ? `<div class="alert alert-danger">${error}</div>` : ''}
-      ${success ? `<div class="alert alert-success">${success}</div>` : ''}
-      <form action="/login" method="POST">
-        <div class="form-group">
-          <label>Email Address</label>
-          <input type="email" name="email" class="form-control" placeholder="user@school.edu" required autofocus>
-        </div>
-        <div class="form-group">
-          <label>Password</label>
-          <input type="password" name="password" class="form-control" placeholder="••••••••" required>
-        </div>
-        <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center; padding: 0.75rem;">Sign In</button>
-      </form>
-      <div style="margin-top: 1.5rem; text-align: center; font-size: 0.85rem;">
-        <a href="/register" style="color: var(--secondary); text-decoration: none; font-weight: 600;">Need to register as a student? Click here</a>
-      </div>
+// Reports Page
+app.get('/admin/reports', isAdmin, (req, res) => {
+    db.all(`SELECT e.name as event_name, s.first_name, s.last_name, s.student_number, a.time_in, a.status FROM attendance a JOIN events e ON a.event_id = e.id JOIN students s ON a.student_id = s.id ORDER BY a.time_in DESC`, (err, attendance) => {
+        db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+            res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Attendance Reports</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 0.875rem; }
+        th { background: #f8fafc; color: #475569; }
+        .btn { background: var(--primary); color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: 600; cursor: pointer; margin-bottom: 1rem; display: inline-block; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports" class="active"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
     </div>
-  `;
-  res.send(await renderPage('Login', content, req));
-});
-
-app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const users = await queryDB('SELECT * FROM users WHERE LOWER(email) = LOWER(?)', [email.trim()]);
-    if (users.length === 0) {
-      return res.redirect('/login?error=Invalid%20email%20address%20or%20password');
-    }
-    const user = users[0];
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      return res.redirect('/login?error=Invalid%20email%20address%20or%20password');
-    }
-
-    req.session.user = { id: user.id, name: user.name, email: user.email, role: user.role, student_id: user.student_id };
-    await logAudit(req, 'LOGIN', `User ${user.email} logged in successfully.`);
-
-    if (user.role === 'ADMIN') return res.redirect('/admin/dashboard');
-    if (user.role === 'SCANNER') return res.redirect('/scanner');
-    if (user.role === 'STUDENT') return res.redirect('/member');
-    res.redirect('/');
-  } catch (err) {
-    console.error('Login Error:', err);
-    res.redirect('/login?error=Server%20error%20during%20login');
-  }
-});
-
-app.get('/logout', async (req, res) => {
-  if (req.session.user) {
-    await logAudit(req, 'LOGOUT', `User ${req.session.user.email} logged out.`);
-  }
-  req.session.destroy(() => {
-    res.redirect('/login?success=You%20have%20been%20logged%20out');
-  });
-});
-
-app.get('/change-password', requireAuth, async (req, res) => {
-  const content = `
-    <div style="max-width: 480px; margin: 2rem auto;" class="card">
-      <div class="card-title">🔐 Change Password</div>
-      <form action="/change-password" method="POST">
-        <div class="form-group">
-          <label>Current Password</label>
-          <input type="password" name="current_password" class="form-control" required>
-        </div>
-        <div class="form-group">
-          <label>New Password (min 8 characters)</label>
-          <input type="password" name="new_password" class="form-control" minlength="8" required>
-        </div>
-        <div class="form-group">
-          <label>Confirm New Password</label>
-          <input type="password" name="confirm_password" class="form-control" minlength="8" required>
-        </div>
-        <button type="submit" class="btn btn-primary">Update Password</button>
-      </form>
-    </div>
-  `;
-  res.send(await renderPage('Change Password', content, req));
-});
-
-app.post('/change-password', requireAuth, async (req, res) => {
-  const { current_password, new_password, confirm_password } = req.body;
-  if (new_password !== confirm_password) {
-    return res.send(await renderPage('Change Password', `<div class="alert alert-danger">New passwords do not match.</div>`, req));
-  }
-  try {
-    const users = await queryDB('SELECT * FROM users WHERE id = ?', [req.session.user.id]);
-    const user = users[0];
-    const match = await bcrypt.compare(current_password, user.password);
-    if (!match) {
-      return res.send(await renderPage('Change Password', `<div class="alert alert-danger">Incorrect current password.</div>`, req));
-    }
-    const hashed = await bcrypt.hash(new_password, 10);
-    await runDB('UPDATE users SET password = ? WHERE id = ?', [hashed, user.id]);
-    await logAudit(req, 'PASSWORD_CHANGE', `User ${user.email} updated their password.`);
-    res.send(await renderPage('Change Password', `<div class="alert alert-success">Password updated successfully!</div>`, req));
-  } catch (err) {
-    res.send(await renderPage('Change Password', `<div class="alert alert-danger">Error: ${err.message}</div>`, req));
-  }
-});
-
-// Student Self Registration Link
-app.get('/register', async (req, res) => {
-  const settingsRows = await queryDB('SELECT * FROM settings LIMIT 1');
-  const sys = settingsRows[0] || {};
-
-  if (!sys.registration_open) {
-    const closedHtml = `
-      <div style="max-width: 500px; margin: 3rem auto; text-align: center;" class="card">
-        <h2 style="color: var(--danger); margin-bottom: 0.5rem;">🔒 Registration Closed</h2>
-        <p style="color: var(--text-muted); font-size: 0.95rem;">Student registration is currently disabled by the administrator or Club Adviser.</p>
-        <p style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-muted);">Please contact <strong>${sys.club_adviser || 'Club Adviser'}</strong> for assistance.</p>
-        <div style="margin-top: 1.5rem;"><a href="/login" class="btn btn-primary">Back to Login</a></div>
-      </div>
-    `;
-    return res.send(await renderPage('Registration Closed', closedHtml, req));
-  }
-
-  const positions = await queryDB('SELECT * FROM positions ORDER BY name ASC');
-  const posOptions = positions.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-
-  const content = `
-    <div style="max-width: 650px; margin: 1.5rem auto;" class="card">
-      <div style="text-align: center; margin-bottom: 1.5rem;">
-        <h2 style="color: var(--primary-dark);">${sys.student_club_name}</h2>
-        <p style="color: var(--text-muted); font-size: 0.9rem;">Official Student Club Registration Form (${sys.school_year})</p>
-      </div>
-
-      <form action="/register" method="POST" enctype="multipart/form-data" id="regForm">
-        <div class="form-row">
-          <div class="form-group">
-            <label>First Name *</label>
-            <input type="text" name="first_name" class="form-control" placeholder="Juan" required>
-          </div>
-          <div class="form-group">
-            <label>Middle Name (Optional)</label>
-            <input type="text" name="middle_name" class="form-control" placeholder="Dela">
-          </div>
-          <div class="form-group">
-            <label>Last Name *</label>
-            <input type="text" name="last_name" class="form-control" placeholder="Cruz" required>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label>Email Address *</label>
-            <input type="email" name="email" class="form-control" placeholder="juan.cruz@example.com" required>
-          </div>
-          <div class="form-group">
-            <label>Contact Number (Optional)</label>
-            <input type="text" name="contact_number" class="form-control" placeholder="09123456789">
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label>Club Position *</label>
-          <select name="position_id" class="form-control" required>
-            <option value="">-- Select Position --</option>
-            ${posOptions}
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label>Student Photo (JPG, PNG, WEBP max 5MB) *</label>
-          <input type="file" name="student_photo" class="form-control" accept="image/jpeg,image/png,image/webp" required onchange="previewPhoto(event)">
-          <div style="margin-top: 0.75rem; text-align: center;">
-            <img id="photoPreview" style="max-width: 150px; max-height: 150px; border-radius: 8px; display: none; border: 2px solid var(--border); margin: 0 auto;">
-          </div>
-        </div>
-
-        <button type="submit" class="btn btn-success" style="width: 100%; justify-content: center; padding: 0.75rem; font-size: 1rem; margin-top: 1rem;">
-          Submit Registration Application
-        </button>
-      </form>
-    </div>
-
-    <script>
-      function previewPhoto(event) {
-        const input = event.target;
-        const preview = document.getElementById('photoPreview');
-        if (input.files && input.files[0]) {
-          const reader = new FileReader();
-          reader.onload = function(e) {
-            preview.src = e.target.result;
-            preview.style.display = 'block';
-          }
-          reader.readAsDataURL(input.files[0]);
-        }
-      }
-    </script>
-  `;
-  res.send(await renderPage('Student Registration', content, req));
-});
-
-app.post('/register', upload.single('student_photo'), async (req, res) => {
-  try {
-    const { first_name, middle_name, last_name, email, contact_number, position_id } = req.body;
-
-    if (!req.file) {
-      return res.send(await renderPage('Registration Error', `<div class="alert alert-danger">Please upload a valid student photo.</div>`, req));
-    }
-
-    const emailCheck = await queryDB('SELECT id FROM students WHERE LOWER(email) = LOWER(?)', [email.trim()]);
-    if (emailCheck.length > 0) {
-      return res.send(await renderPage('Registration Error', `<div class="alert alert-danger">An account with email <strong>${email}</strong> already exists.</div>`, req));
-    }
-
-    const tempStudentNumber = 'PENDING-' + Date.now();
-    const qrToken = 'QR-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
-    const photoFilename = req.file.filename;
-
-    await runDB(
-      `INSERT INTO students (student_number, first_name, middle_name, last_name, email, contact_number, position_id, photo, qr_token, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
-      [tempStudentNumber, first_name.trim(), (middle_name || '').trim(), last_name.trim(), email.trim().toLowerCase(), (contact_number || '').trim(), position_id, photoFilename, qrToken]
-    );
-
-    await logAudit(req, 'REGISTRATION_SUBMITTED', `New registration submitted by ${first_name} ${last_name} (${email}).`);
-
-    const successContent = `
-      <div style="max-width: 550px; margin: 3rem auto; text-align: center;" class="card">
-        <div style="font-size: 3rem; color: var(--success); margin-bottom: 0.5rem;">✓</div>
-        <h2 style="color: var(--primary-dark); margin-bottom: 0.5rem;">REGISTRATION SUBMITTED</h2>
-        <div class="alert alert-success" style="text-align: left; margin: 1rem 0;">
-          Your registration details have been received successfully and are currently <strong>Pending Approval</strong>.
-        </div>
-        <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">
-          Your Club Adviser will review and approve your application. Once approved, your official Student Number, Digital ID, and QR Code will be activated.
-        </p>
-        <a href="/login" class="btn btn-primary">Return to System Login</a>
-      </div>
-    `;
-    res.send(await renderPage('Registration Submitted', successContent, req));
-  } catch (err) {
-    console.error('Registration Post Error:', err);
-    res.send(await renderPage('Registration Error', `<div class="alert alert-danger">Error processing registration: ${err.message}</div>`, req));
-  }
-});
-/* ==========================================================================
-   MOBILE QR SCANNER ENGINE & VOICE ANNOUNCEMENTS PORTAL
-   ========================================================================== */
-
-app.get('/scanner', requireRole('ADMIN', 'SCANNER'), async (req, res) => {
-  const activeEvents = await queryDB("SELECT * FROM events WHERE status = 'ACTIVE' ORDER BY event_date ASC");
-  const upcomingEvents = await queryDB("SELECT * FROM events WHERE status = 'UPCOMING' ORDER BY event_date ASC");
-
-  const eventOptions = [
-    ...activeEvents.map(e => `<option value="${e.id}" selected>🔴 [ACTIVE] ${e.name} (${e.event_date})</option>`),
-    ...upcomingEvents.map(e => `<option value="${e.id}">⏳ [UPCOMING] ${e.name} (${e.event_date})</option>`)
-  ].join('');
-
-  const content = `
-    <div style="max-width: 800px; margin: 0 auto;">
-      <div class="card">
-        <div class="card-title">📱 Mobile QR Attendance Scanner Portal</div>
-
-        <div class="form-row" style="margin-bottom: 1rem;">
-          <div class="form-group">
-            <label>Select Event *</label>
-            <select id="eventSelect" class="form-control">
-              <option value="">-- Choose Active or Upcoming Event --</option>
-              ${eventOptions}
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Scan Mode *</label>
-            <select id="scanMode" class="form-control">
-              <option value="TIME_IN">📥 TIME IN</option>
-              <option value="TIME_OUT">📤 TIME OUT</option>
-            </select>
-          </div>
-        </div>
-
-        <div style="background: #000; border-radius: 8px; overflow: hidden; position: relative; min-height: 280px; text-align: center;">
-          <video id="scannerVideo" style="width: 100%; max-height: 380px; object-fit: cover;" autoplay playsinline></video>
-          <div id="videoOverlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 3px dashed #0284c7; width: 220px; height: 220px; border-radius: 12px; pointer-events: none;"></div>
-        </div>
-
-        <div class="toolbar" style="margin-top: 1rem;">
-          <div class="toolbar-group">
-            <button id="btnStartCam" class="btn btn-primary" onclick="startCamera()">📷 Start Camera</button>
-            <button id="btnStopCam" class="btn btn-secondary" onclick="stopCamera()">🛑 Stop Camera</button>
-            <select id="cameraSource" class="form-control" style="width: auto;" onchange="switchCamera()"></select>
-          </div>
-          <div class="toolbar-group">
-            <label style="font-size: 0.85rem; font-weight: 600;"><input type="checkbox" id="enableVoice" checked> 🔊 Voice Name Speech</label>
-          </div>
-        </div>
-      </div>
-
-      <!-- Live Scan Result Card -->
-      <div id="scanResultCard" class="card" style="display: none; transition: all 0.3s;">
-        <div id="scanResultHeader" class="card-title"></div>
-        <div style="display: flex; gap: 1.25rem; align-items: center; flex-wrap: wrap;">
-          <img id="scanStudentPhoto" src="" style="width: 110px; height: 110px; border-radius: 8px; object-fit: cover; border: 2px solid var(--border);">
-          <div style="flex: 1;">
-            <h3 id="scanStudentName" style="font-size: 1.3rem; color: var(--primary-dark);"></h3>
-            <p id="scanStudentNum" style="font-weight: 700; color: var(--secondary);"></p>
-            <p id="scanStudentPos" style="color: var(--text-muted); font-size: 0.9rem;"></p>
-            <p id="scanTime" style="font-size: 0.85rem; margin-top: 0.25rem;"></p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Recent Scans Stream -->
-      <div class="card">
-        <div class="card-title">📋 Recent Live Scans Session</div>
-        <div style="overflow-x: auto;">
-          <table id="recentScansTable">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Student Number</th>
-                <th>Name</th>
-                <th>Position</th>
-                <th>Type</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="recentScansBody">
-              <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No scans recorded in this session yet.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- HTML5 QR Code Library Inclusion -->
-    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-
-    <script>
-      let html5QrCode = null;
-      let isProcessingScan = false;
-      let lastScannedToken = '';
-      let lastScanTime = 0;
-
-      // Audio Synthesizer Context
-      function playAudioTone(type) {
-        try {
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-
-          if (type === 'SUCCESS') {
-            osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-            osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1); // A5
-            gain.gain.setValueAtTime(0.3, ctx.currentTime);
-            osc.start();
-            osc.stop(ctx.currentTime + 0.25);
-          } else if (type === 'WARNING') {
-            osc.frequency.setValueAtTime(440, ctx.currentTime);
-            osc.frequency.setValueAtTime(440, ctx.currentTime + 0.15);
-            gain.gain.setValueAtTime(0.3, ctx.currentTime);
-            osc.start();
-            osc.stop(ctx.currentTime + 0.3);
-          } else { // ERROR
-            osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(150, ctx.currentTime);
-            gain.gain.setValueAtTime(0.4, ctx.currentTime);
-            osc.start();
-            osc.stop(ctx.currentTime + 0.35);
-          }
-        } catch(e) { console.error(e); }
-      }
-
-      function speakText(text) {
-        if (!document.getElementById('enableVoice').checked) return;
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel(); // Clear queue
-          const msg = new SpeechSynthesisUtterance(text);
-          msg.rate = 1.0;
-          msg.pitch = 1.0;
-          msg.lang = 'en-US';
-          window.speechSynthesis.speak(msg);
-        }
-      }
-
-      async function initCameraDevices() {
-        try {
-          const devices = await Html5Qrcode.getCameras();
-          const select = document.getElementById('cameraSource');
-          select.innerHTML = '';
-          if (devices && devices.length > 0) {
-            devices.forEach((dev, idx) => {
-              select.innerHTML += \`<option value="\${dev.id}">\${dev.label || 'Camera ' + (idx+1)}</option>\`;
-            });
-          }
-        } catch(err) { console.error('Camera enumeration error:', err); }
-      }
-
-      async function startCamera() {
-        const eventId = document.getElementById('eventSelect').value;
-        if (!eventId) {
-          alert('Please select an active or upcoming event first!');
-          return;
-        }
-
-        if (!html5QrCode) html5QrCode = new Html5Qrcode("scannerVideo");
-        const camId = document.getElementById('cameraSource').value;
-        const config = { fps: 10, qrbox: { width: 220, height: 220 } };
-
-        try {
-          await html5QrCode.start(
-            camId ? { rawId: camId } : { facingMode: "environment" },
-            config,
-            onQrCodeScanned
-          );
-        } catch (err) {
-          alert('Failed to start camera: ' + err);
-        }
-      }
-
-      async function stopCamera() {
-        if (html5QrCode && html5QrCode.isScanning) {
-          await html5QrCode.stop();
-        }
-      }
-
-      async function switchCamera() {
-        if (html5QrCode && html5QrCode.isScanning) {
-          await stopCamera();
-          startCamera();
-        }
-      }
-
-      async function onQrCodeScanned(decodedText) {
-        const now = Date.now();
-        if (decodedText === lastScannedToken && (now - lastScanTime) < 4000) return; // 4 second throttle for duplicate scans
-        if (isProcessingScan) return;
-
-        isProcessingScan = true;
-        lastScannedToken = decodedText;
-        lastScanTime = now;
-
-        const eventId = document.getElementById('eventSelect').value;
-        const scanMode = document.getElementById('scanMode').value;
-
-        try {
-          const res = await fetch('/api/scan-qr', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ qr_token: decodedText, event_id: eventId, scan_mode: scanMode })
-          });
-          const data = await res.json();
-
-          const card = document.getElementById('scanResultCard');
-          const header = document.getElementById('scanResultHeader');
-          card.style.display = 'block';
-
-          if (data.success) {
-            playAudioTone('SUCCESS');
-            speakText(data.student.first_name + ' ' + data.student.last_name + ', ' + (scanMode === 'TIME_IN' ? 'attendance recorded' : 'time out recorded'));
-
-            header.innerHTML = \`<span style="color: var(--success)">✓ \${data.message}</span>\`;
-            document.getElementById('scanStudentPhoto').src = '/uploads/photos/' + data.student.photo;
-            document.getElementById('scanStudentName').innerText = data.student.first_name + ' ' + (data.student.middle_name ? data.student.middle_name + ' ' : '') + data.student.last_name;
-            document.getElementById('scanStudentNum').innerText = 'Student No: ' + data.student.student_number;
-            document.getElementById('scanStudentPos').innerText = 'Position: ' + data.student.position_name;
-            document.getElementById('scanTime').innerText = 'Timestamp: ' + data.timestamp + ' (' + data.attendance_status + ')';
-
-            addRecentScanRow(data.timestamp, data.student.student_number, data.student.first_name + ' ' + data.student.last_name, data.student.position_name, scanMode, data.attendance_status);
-          } else if (data.duplicate) {
-            playAudioTone('WARNING');
-            speakText(data.student_name ? data.student_name + ', you are already recorded' : 'Already recorded');
-
-            header.innerHTML = \`<span style="color: var(--warning)">⚠️ \${data.message}</span>\`;
-            document.getElementById('scanStudentPhoto').src = data.student_photo ? '/uploads/photos/' + data.student_photo : '';
-            document.getElementById('scanStudentName').innerText = data.student_name || 'Student';
-            document.getElementById('scanStudentNum').innerText = 'Notice: Duplicate Scan Prevented';
-            document.getElementById('scanStudentPos').innerText = '';
-            document.getElementById('scanTime').innerText = '';
-          } else {
-            playAudioTone('ERROR');
-            speakText('Invalid QR Code');
-
-            header.innerHTML = \`<span style="color: var(--danger)">❌ INVALID QR CODE</span>\`;
-            document.getElementById('scanStudentPhoto').src = '';
-            document.getElementById('scanStudentName').innerText = 'Scan Rejected';
-            document.getElementById('scanStudentNum').innerText = data.message;
-            document.getElementById('scanStudentPos').innerText = '';
-            document.getElementById('scanTime').innerText = '';
-          }
-        } catch(err) {
-          console.error(err);
-        } finally {
-          setTimeout(() => { isProcessingScan = false; }, 1500);
-        }
-      }
-
-      function addRecentScanRow(time, num, name, pos, type, status) {
-        const body = document.getElementById('recentScansBody');
-        if (body.children[0] && body.children[0].children.length === 1) body.innerHTML = '';
-        const row = document.createElement('tr');
-        row.innerHTML = \`
-          <td>\${time}</td>
-          <td><strong>\${num}</strong></td>
-          <td>\${name}</td>
-          <td>\${pos}</td>
-          <td><span class="badge \${type === 'TIME_IN' ? 'badge-info' : 'badge-warning'}">\${type}</span></td>
-          <td><span class="badge badge-success">\${status}</span></td>
-        \`;
-        body.insertBefore(row, body.firstChild);
-      }
-
-      window.addEventListener('DOMContentLoaded', initCameraDevices);
-    </script>
-  `;
-  res.send(await renderPage('Scanner Portal', content, req, 'scanner'));
-});
-
-// Live QR Code Processing API Endpoint
-app.post('/api/scan-qr', requireRole('ADMIN', 'SCANNER'), async (req, res) => {
-  const { qr_token, event_id, scan_mode } = req.body;
-
-  if (!event_id) return res.json({ success: false, message: 'No event selected' });
-
-  try {
-    // 1. Validate QR Token & Student
-    const students = await queryDB(
-      `SELECT s.*, p.name as position_name FROM students s
-       LEFT JOIN positions p ON s.position_id = p.id
-       WHERE s.qr_token = ? AND s.status = 'ACTIVE'`,
-      [qr_token.trim()]
-    );
-
-    if (students.length === 0) {
-      return res.json({ success: false, message: 'Student QR code is invalid, disabled, or pending approval.' });
-    }
-
-    const student = students[0];
-    if (!student.qr_status) {
-      return res.json({ success: false, message: 'This Student QR Code has been disabled by Admin.' });
-    }
-
-    // 2. Validate Event
-    const events = await queryDB('SELECT * FROM events WHERE id = ?', [event_id]);
-    if (events.length === 0) return res.json({ success: false, message: 'Target event not found.' });
-    const event = events[0];
-
-    const now = new Date();
-    const timeString = now.toLocaleTimeString('en-US', { hour12: true });
-    const dateString = now.toISOString().split('T')[0];
-
-    // 3. Duplicate & Scan Logic Execution
-    const existingAtt = await queryDB('SELECT * FROM attendance WHERE event_id = ? AND student_id = ?', [event_id, student.id]);
-
-    if (scan_mode === 'TIME_IN') {
-      if (existingAtt.length > 0 && existingAtt[0].time_in) {
-        return res.json({
-          duplicate: true,
-          message: 'ALREADY RECORDED: Student has already timed in for this event.',
-          student_name: `${student.first_name} ${student.last_name}`,
-          student_photo: student.photo
-        });
-      }
-
-      // Calculate Late / Present Status
-      let status = 'PRESENT';
-      if (event.start_time) {
-        const [eventHour, eventMin] = event.start_time.split(':').map(Number);
-        const eventStart = new Date();
-        eventStart.setHours(eventHour, eventMin, 0, 0);
-        const lateThresholdMs = (event.late_threshold_minutes || 15) * 60 * 1000;
-
-        if (now.getTime() > (eventStart.getTime() + lateThresholdMs)) {
-          status = 'LATE';
-        }
-      }
-
-      if (existingAtt.length > 0) {
-        await runDB(
-          `UPDATE attendance SET time_in = ?, status = ?, scan_by = ? WHERE id = ?`,
-          [timeString, status, req.session.user.id, existingAtt[0].id]
-        );
-      } else {
-        await runDB(
-          `INSERT INTO attendance (event_id, student_id, time_in, status, scan_by) VALUES (?, ?, ?, ?, ?)`,
-          [event_id, student.id, timeString, status, req.session.user.id]
-        );
-      }
-
-      await logAudit(req, 'SCAN_TIME_IN', `Time In recorded for ${student.student_number} (${status})`);
-
-      return res.json({
-        success: true,
-        message: 'ATTENDANCE RECORDED',
-        student,
-        attendance_status: status,
-        timestamp: timeString
-      });
-    } else { // TIME_OUT Mode
-      if (existingAtt.length === 0 || !existingAtt[0].time_in) {
-        return res.json({
-          success: false,
-          message: 'Cannot Time Out: Student has no Time In record for this event.'
-        });
-      }
-      if (existingAtt[0].time_out) {
-        return res.json({
-          duplicate: true,
-          message: 'ALREADY RECORDED: Student has already timed out for this event.',
-          student_name: `${student.first_name} ${student.last_name}`,
-          student_photo: student.photo
-        });
-      }
-
-      await runDB('UPDATE attendance SET time_out = ? WHERE id = ?', [timeString, existingAtt[0].id]);
-      await logAudit(req, 'SCAN_TIME_OUT', `Time Out recorded for ${student.student_number}`);
-
-      return res.json({
-        success: true,
-        message: 'TIME OUT RECORDED',
-        student,
-        attendance_status: existingAtt[0].status,
-        timestamp: timeString
-      });
-    }
-  } catch (err) {
-    console.error('Scan Error:', err);
-    res.status(500).json({ success: false, message: 'Server database error during scan.' });
-  }
-});
-
-/* ==========================================================================
-   STUDENT PORTAL & DIGITAL ID VIEW
-   ========================================================================== */
-
-app.get('/member', requireRole('STUDENT'), async (req, res) => {
-  const students = await queryDB(
-    `SELECT s.*, p.name as position_name FROM students s
-     LEFT JOIN positions p ON s.position_id = p.id
-     WHERE s.id = ?`,
-    [req.session.user.student_id]
-  );
-
-  if (students.length === 0) {
-    return res.send(await renderPage('Student Portal', `<div class="alert alert-danger">Student profile not found. Please contact Administrator.</div>`, req));
-  }
-
-  const student = students[0];
-  const settingsRows = await queryDB('SELECT * FROM settings LIMIT 1');
-  const sys = settingsRows[0] || {};
-
-  // Generate Large Dynamic QR Code Data URL
-  const qrDataUrl = await QRCode.toDataURL(student.qr_token, { width: 300, margin: 1, errorCorrectionLevel: 'H' });
-
-  // Student Attendance Records
-  const attendanceHistory = await queryDB(
-    `SELECT a.*, e.name as event_name, e.event_date FROM attendance a
-     JOIN events e ON a.event_id = e.id
-     WHERE a.student_id = ?
-     ORDER BY e.event_date DESC`,
-    [student.id]
-  );
-
-  const attRows = attendanceHistory.map(a => `
-    <tr>
-      <td>${a.event_date}</td>
-      <td><strong>${a.event_name}</strong></td>
-      <td>${a.time_in || '--'}</td>
-      <td>${a.time_out || '--'}</td>
-      <td>
-        <span class="badge ${a.status === 'PRESENT' ? 'badge-success' : a.status === 'LATE' ? 'badge-warning' : a.status === 'EXCUSED' ? 'badge-info' : 'badge-danger'}">
-          ${a.status}
-        </span>
-      </td>
-    </tr>
-  `).join('');
-
-  // Position History
-  const posHistory = await queryDB('SELECT * FROM position_history WHERE student_id = ? ORDER BY assigned_at DESC', [student.id]);
-  const historyList = posHistory.map(h => `<li><strong>${h.school_year}</strong>: ${h.position_name}</li>`).join('');
-
-  const content = `
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.5rem;">
-
-      <!-- Digital Student Club ID Card -->
-      <div class="card" style="background: linear-gradient(135deg, #ffffff 0%, #f1f5f9 100%); border: 2px solid var(--primary);">
-        <div style="text-align: center; border-bottom: 2px solid var(--primary); padding-bottom: 0.75rem; margin-bottom: 1rem;">
-          <h3 style="font-size: 1.1rem; color: var(--primary-dark); font-weight: 800; uppercase;">${sys.school_name}</h3>
-          <p style="font-size: 0.85rem; color: var(--secondary); font-weight: 700;">${sys.student_club_name}</p>
-          <span class="badge badge-info" style="margin-top: 0.25rem;">OFFICIAL STUDENT MEMBER ID</span>
-        </div>
-
-        <div style="text-align: center; margin-bottom: 1rem;">
-          <img src="/uploads/photos/${student.photo}" style="width: 130px; height: 130px; border-radius: 8px; object-fit: cover; border: 3px solid var(--primary);">
-          <h2 style="font-size: 1.35rem; color: var(--primary-dark); margin-top: 0.5rem;">${student.first_name} ${student.middle_name ? student.middle_name + ' ' : ''}${student.last_name}</h2>
-          <p style="font-weight: 800; color: var(--secondary); font-size: 1.05rem;">${student.student_number}</p>
-          <p style="font-size: 0.95rem; font-weight: 700; color: var(--text);">${student.position_name}</p>
-          <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem;">S.Y. ${sys.school_year}</p>
-        </div>
-
-        <!-- Large QR Code Area -->
-        <div style="text-align: center; background: white; padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
-          <img src="${qrDataUrl}" style="width: 180px; height: 180px; display: block; margin: 0 auto;" alt="Student QR Code">
-          <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.5rem; font-weight: 600;">PRESENT THIS LARGE QR CODE AT THE ATTENDANCE SCANNER</p>
-        </div>
-      </div>
-
-      <!-- Profile Details & History -->
-      <div>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">Comprehensive Attendance Report</h2>
         <div class="card">
-          <div class="card-title">👤 Member Profile Information</div>
-          <table style="font-size: 0.9rem;">
-            <tr><th>Email Address</th><td>${student.email}</td></tr>
-            <tr><th>Contact Number</th><td>${student.contact_number || 'N/A'}</td></tr>
-            <tr><th>Membership Status</th><td><span class="badge badge-success">${student.status}</span></td></tr>
-            <tr><th>Date Joined</th><td>${student.membership_date}</td></tr>
-          </table>
-
-          ${posHistory.length > 0 ? `
-            <div style="margin-top: 1.25rem;">
-              <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">🎖️ Position History</h4>
-              <ul style="padding-left: 1.25rem; font-size: 0.85rem; color: var(--text);">${historyList}</ul>
-            </div>
-          ` : ''}
-        </div>
-
-        <div class="card">
-          <div class="card-title">📅 My Attendance & Event History</div>
-          <div style="overflow-x: auto;">
+            <button class="btn" onclick="window.print()"><i class="fa-solid fa-print"></i> Print Report</button>
             <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Event Name</th>
-                  <th>Time In</th>
-                  <th>Time Out</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${attRows.length > 0 ? attRows : '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No attendance records found yet.</td></tr>'}
-              </tbody>
+                <thead>
+                    <tr><th>Event Name</th><th>Student Name</th><th>Student Number</th><th>Time In</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                    ${attendance.length === 0 ? '<tr><td colspan="5" style="text-align:center; color:#64748b;">No attendance records found.</td></tr>' :
+                      attendance.map(a => `<tr><td>${a.event_name}</td><td>${a.first_name} ${a.last_name}</td><td>${a.student_number}</td><td>${a.time_in}</td><td><span style="padding:0.25rem 0.5rem; border-radius:0.25rem; font-size:0.75rem; background:#d1fae5; color:#065f46">${a.status}</span></td></tr>`).join('')}
+                </tbody>
             </table>
-          </div>
         </div>
-      </div>
-
     </div>
-  `;
-  res.send(await renderPage('Student Portal', content, req, 'member'));
+</body>
+</html>`);
+        });
+    });
 });
 
-/* ==========================================================================
-   ADMINISTRATOR DASHBOARD & SYSTEM CORE
-   ========================================================================== */
-
-app.get('/admin/dashboard', requireRole('ADMIN'), async (req, res) => {
-  // Real Database Query Statistics (No Mock Data)
-  const totalStudents = (await queryDB("SELECT COUNT(*) as c FROM students WHERE status != 'PENDING'"))[0].c;
-  const activeStudents = (await queryDB("SELECT COUNT(*) as c FROM students WHERE status = 'ACTIVE'"))[0].c;
-  const inactiveStudents = (await queryDB("SELECT COUNT(*) as c FROM students WHERE status IN ('INACTIVE', 'SUSPENDED', 'ALUMNI')"))[0].c;
-  const pendingRegs = (await queryDB("SELECT COUNT(*) as c FROM students WHERE status = 'PENDING'"))[0].c;
-
-  const todayStr = new Date().toISOString().split('T')[0];
-
-  // Today's Real Attendance Counts across events today
-  const attToday = await queryDB(
-    `SELECT a.status, COUNT(a.id) as count FROM attendance a
-     JOIN events e ON a.event_id = e.id
-     WHERE e.event_date = ?
-     GROUP BY a.status`,
-    [todayStr]
-  );
-
-  let presentToday = 0, lateToday = 0, absentToday = 0, excusedToday = 0;
-  attToday.forEach(r => {
-    if (r.status === 'PRESENT') presentToday = parseInt(r.count, 10);
-    if (r.status === 'LATE') lateToday = parseInt(r.count, 10);
-    if (r.status === 'ABSENT') absentToday = parseInt(r.count, 10);
-    if (r.status === 'EXCUSED') excusedToday = parseInt(r.count, 10);
-  });
-
-  const totalAttendeesToday = presentToday + lateToday + absentToday + excusedToday;
-  const attendanceRate = totalAttendeesToday > 0 ? Math.round(((presentToday + lateToday) / totalAttendeesToday) * 100) : 0;
-
-  const activeEventsCount = (await queryDB("SELECT COUNT(*) as c FROM events WHERE status = 'ACTIVE'"))[0].c;
-  const upcomingEventsCount = (await queryDB("SELECT COUNT(*) as c FROM events WHERE status = 'UPCOMING'"))[0].c;
-
-  // Recent Live Scans
-  const recentScans = await queryDB(
-    `SELECT a.*, s.first_name, s.last_name, s.student_number, p.name as position_name, e.name as event_name
-     FROM attendance a
-     JOIN students s ON a.student_id = s.id
-     LEFT JOIN positions p ON s.position_id = p.id
-     JOIN events e ON a.event_id = e.id
-     ORDER BY a.id DESC LIMIT 8`
-  );
-
-  const scanRows = recentScans.map(s => `
-    <tr>
-      <td>${s.time_in || s.time_out || '--'}</td>
-      <td><strong>${s.student_number}</strong></td>
-      <td>${s.first_name} ${s.last_name}</td>
-      <td>${s.position_name}</td>
-      <td>${s.event_name}</td>
-      <td><span class="badge ${s.status === 'PRESENT' ? 'badge-success' : s.status === 'LATE' ? 'badge-warning' : 'badge-danger'}">${s.status}</span></td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div>
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
-        <h2 style="color: var(--primary-dark);">Administrator Dashboard</h2>
-        <span class="badge badge-success" style="font-size: 0.85rem; padding: 0.4rem 0.8rem;">● Database Connected</span>
-      </div>
-
-      <!-- Real Database Statistics Grid -->
-      <div class="grid-stats">
-        <div class="stat-card">
-          <div class="stat-lbl">Total Students</div>
-          <div class="stat-val">${totalStudents}</div>
-        </div>
-        <div class="stat-card success">
-          <div class="stat-lbl">Active Members</div>
-          <div class="stat-val">${activeStudents}</div>
-        </div>
-        <div class="stat-card warning">
-          <div class="stat-lbl">Pending Applications</div>
-          <div class="stat-val">${pendingRegs}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-lbl">Present Today</div>
-          <div class="stat-val" style="color: var(--success);">${presentToday}</div>
-        </div>
-        <div class="stat-card warning">
-          <div class="stat-lbl">Late Today</div>
-          <div class="stat-val" style="color: var(--warning);">${lateToday}</div>
-        </div>
-        <div class="stat-card danger">
-          <div class="stat-lbl">Absent Today</div>
-          <div class="stat-val" style="color: var(--danger);">${absentToday}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-lbl">Attendance Rate</div>
-          <div class="stat-val" style="color: var(--secondary);">${attendanceRate}%</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-lbl">Active Events</div>
-          <div class="stat-val">${activeEventsCount}</div>
-        </div>
-      </div>
-
-      <!-- Recent Attendance Activity Table -->
-      <div class="card">
-        <div class="card-title">
-          <span>⏱️ Live Recent Attendance Activity</span>
-          <a href="/scanner" class="btn btn-primary btn-sm" target="_blank">Launch QR Scanner</a>
-        </div>
-        <div style="overflow-x: auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Student Number</th>
-                <th>Student Name</th>
-                <th>Position</th>
-                <th>Event</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${scanRows.length > 0 ? scanRows : '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No attendance scans recorded today yet.</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>
+// Backup & Restore Page
+app.get('/admin/backup', isAdmin, (req, res) => {
+    db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+        res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>Backup & Restore</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 1.5rem; }
+        .btn { background: var(--primary); color: white; border: none; padding: 0.75rem 1.5rem; font-weight: 600; border-radius: 0.375rem; cursor: pointer; text-decoration: none; display: inline-block; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup" class="active"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
     </div>
-  `;
-  res.send(await renderPage('Dashboard', content, req, 'dashboard'));
-});
-/* ==========================================================================
-   STUDENT MANAGEMENT & REGISTRATION APPROVAL
-   ========================================================================== */
-
-app.get('/admin/students', requireRole('ADMIN'), async (req, res) => {
-  const search = req.query.search ? req.query.search.trim() : '';
-  const posFilter = req.query.position || '';
-  const statusFilter = req.query.status || 'ACTIVE';
-
-  let sql = `
-    SELECT s.*, p.name as position_name FROM students s
-    LEFT JOIN positions p ON s.position_id = p.id
-    WHERE s.status != 'PENDING'
-  `;
-  const params = [];
-
-  if (statusFilter) {
-    sql += ` AND s.status = ?`;
-    params.push(statusFilter);
-  }
-  if (posFilter) {
-    sql += ` AND s.position_id = ?`;
-    params.push(posFilter);
-  }
-  if (search) {
-    sql += ` AND (s.student_number LIKE ? OR LOWER(s.first_name) LIKE ? OR LOWER(s.last_name) LIKE ? OR LOWER(s.email) LIKE ?)`;
-    const term = `%${search.toLowerCase()}%`;
-    params.push(term, term, term, term);
-  }
-
-  sql += ` ORDER BY s.student_number ASC`;
-  const students = await queryDB(sql, params);
-
-  const positions = await queryDB('SELECT * FROM positions ORDER BY name ASC');
-  const posOptions = positions.map(p => `<option value="${p.id}" ${posFilter == p.id ? 'selected' : ''}>${p.name}</option>`).join('');
-
-  const rows = students.map(s => `
-    <tr>
-      <td><img src="/uploads/photos/${s.photo}" class="student-avatar"></td>
-      <td><strong>${s.student_number}</strong></td>
-      <td>${s.first_name} ${s.middle_name ? s.middle_name + ' ' : ''}${s.last_name}</td>
-      <td>${s.position_name || 'N/A'}</td>
-      <td>${s.email}</td>
-      <td><span class="badge ${s.status === 'ACTIVE' ? 'badge-success' : 'badge-danger'}">${s.status}</span></td>
-      <td>
-        <a href="/admin/students/edit/${s.id}" class="btn btn-outline btn-sm">✏️ Edit</a>
-        <a href="/admin/students/qr/${s.id}" class="btn btn-primary btn-sm">🔍 QR Code</a>
-      </td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div class="card">
-      <div class="card-title">
-        <span>🎓 Student Directory</span>
-        <a href="/register" class="btn btn-success btn-sm" target="_blank">➕ Add / Register Student</a>
-      </div>
-
-      <form method="GET" action="/admin/students" class="toolbar">
-        <div class="toolbar-group">
-          <input type="text" name="search" class="form-control" placeholder="Search name, number, email..." value="${search}" style="width: 220px;">
-          <select name="position" class="form-control" style="width: 160px;">
-            <option value="">All Positions</option>
-            ${posOptions}
-          </select>
-          <select name="status" class="form-control" style="width: 140px;">
-            <option value="ACTIVE" ${statusFilter === 'ACTIVE' ? 'selected' : ''}>Active</option>
-            <option value="INACTIVE" ${statusFilter === 'INACTIVE' ? 'selected' : ''}>Inactive</option>
-            <option value="SUSPENDED" ${statusFilter === 'SUSPENDED' ? 'selected' : ''}>Suspended</option>
-            <option value="ALUMNI" ${statusFilter === 'ALUMNI' ? 'selected' : ''}>Alumni</option>
-          </select>
-          <button type="submit" class="btn btn-primary">Filter</button>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">Database Backup & Restore</h2>
+        <div class="card">
+            <h3 style="margin-top:0;">Download Database Backup</h3>
+            <p style="color: #64748b; font-size: 0.875rem;">Download a secure SQLite database file containing all student records, attendance, and events.</p>
+            <a href="/admin/backup/download" class="btn"><i class="fa-solid fa-download"></i> Download Backup File</a>
         </div>
-      </form>
-
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Photo</th>
-              <th>Student Number</th>
-              <th>Full Name</th>
-              <th>Position</th>
-              <th>Email</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.length > 0 ? rows : '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No students found matching filter criteria.</td></tr>'}
-          </tbody>
-        </table>
-      </div>
     </div>
-  `;
-  res.send(await renderPage('Students', content, req, 'students'));
+</body>
+</html>`);
+    });
 });
 
-// Pending Registration Approvals Page
-app.get('/admin/registrations', requireRole('ADMIN'), async (req, res) => {
-  const pending = await queryDB(
-    `SELECT s.*, p.name as position_name FROM students s
-     LEFT JOIN positions p ON s.position_id = p.id
-     WHERE s.status = 'PENDING'
-     ORDER BY s.id DESC`
-  );
+app.get('/admin/backup/download', isAdmin, (req, res) => {
+    res.download(path.join(__dirname, 'school_club_attendance.db'));
+});
 
-  const rows = pending.map(s => `
-    <tr>
-      <td><img src="/uploads/photos/${s.photo}" class="student-avatar"></td>
-      <td><strong>${s.first_name} ${s.middle_name ? s.middle_name + ' ' : ''}${s.last_name}</strong></td>
-      <td>${s.email}</td>
-      <td>${s.position_name}</td>
-      <td>${s.contact_number || 'N/A'}</td>
-      <td>
-        <a href="/admin/registrations/approve/${s.id}" class="btn btn-success btn-sm" onclick="return confirm('Approve this student application?')">✓ Approve</a>
-        <a href="/admin/registrations/reject/${s.id}" class="btn btn-danger btn-sm" onclick="return confirm('Reject and delete this registration?')">✕ Reject</a>
-      </td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div class="card">
-      <div class="card-title">📝 Pending Student Registrations (${pending.length})</div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Photo</th>
-              <th>Applicant Name</th>
-              <th>Email</th>
-              <th>Desired Position</th>
-              <th>Contact</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.length > 0 ? rows : '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No pending registration applications to review.</td></tr>'}
-          </tbody>
-        </table>
-      </div>
+// Settings Page
+app.get('/admin/settings', isAdmin, (req, res) => {
+    db.get(`SELECT * FROM settings WHERE id = 1`, (err, settings) => {
+        res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>System Settings</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary: #4f46e5; --bg: #f8fafc; --sidebar-width: 260px; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; }
+        .sidebar { width: var(--sidebar-width); background: #1e293b; color: white; height: 100vh; position: fixed; padding: 1.5rem 1rem; box-sizing: border-box; }
+        .sidebar h2 { font-size: 1.25rem; margin-top: 0; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }
+        .sidebar a { display: block; color: #94a3b8; text-decoration: none; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.25rem; font-weight: 600; }
+        .sidebar a:hover, .sidebar a.active { background: var(--primary); color: white; }
+        .sidebar a i { margin-right: 0.75rem; width: 20px; text-align: center; }
+        .main-content { margin-left: var(--sidebar-width); flex: 1; padding: 2rem; box-sizing: border-box; }
+        .card { background: white; padding: 1.5rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        .form-group { margin-bottom: 1rem; }
+        label { display: block; font-weight: 600; margin-bottom: 0.25rem; color: #475569; font-size: 0.875rem; }
+        input { width: 100%; padding: 0.5rem; border: 1px solid #cbd5e1; border-radius: 0.375rem; box-sizing: border-box; }
+        button { background: var(--primary); color: white; border: none; padding: 0.75rem 1.5rem; font-weight: 600; border-radius: 0.375rem; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Club Admin</h2>
+        <a href="/admin"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+        <a href="/admin/students"><i class="fa-solid fa-users"></i> Students</a>
+        <a href="/admin/registrations"><i class="fa-solid fa-user-check"></i> Registrations</a>
+        <a href="/admin/positions"><i class="fa-solid fa-id-badge"></i> Positions</a>
+        <a href="/admin/events"><i class="fa-solid fa-calendar-check"></i> Events</a>
+        <a href="/admin/attendance"><i class="fa-solid fa-clipboard-list"></i> Attendance</a>
+        <a href="/admin/reports"><i class="fa-solid fa-file-lines"></i> Reports</a>
+        <a href="/admin/id-printing"><i class="fa-solid fa-id-card"></i> ID Printing</a>
+        <a href="/admin/backup"><i class="fa-solid fa-database"></i> Backup & Restore</a>
+        <a href="/admin/settings" class="active"><i class="fa-solid fa-gear"></i> Settings</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
     </div>
-  `;
-  res.send(await renderPage('Pending Registrations', content, req, 'registrations'));
-});
-
-app.get('/admin/registrations/approve/:id', requireRole('ADMIN'), async (req, res) => {
-  try {
-    const studentId = req.params.id;
-    const students = await queryDB('SELECT * FROM students WHERE id = ? AND status = \'PENDING\'', [studentId]);
-    if (students.length === 0) return res.redirect('/admin/registrations');
-
-    const student = students[0];
-    const officialStudentNumber = await generateStudentNumber();
-
-    // Generate Student Portal User Credentials
-    const defaultPassword = 'student123';
-    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-
-    await runDB(
-      `UPDATE students SET student_number = ?, status = 'ACTIVE' WHERE id = ?`,
-      [officialStudentNumber, studentId]
-    );
-
-    // Create User Login Account
-    const userInsert = await runDB(
-      `INSERT INTO users (name, email, password, role, student_id) VALUES (?, ?, ?, 'STUDENT', ?)`,
-      [`${student.first_name} ${student.last_name}`, student.email, hashedPassword, studentId]
-    );
-
-    // Track Position History
-    const settings = (await queryDB('SELECT school_year FROM settings LIMIT 1'))[0] || {};
-    const pos = (await queryDB('SELECT name FROM positions WHERE id = ?', [student.position_id]))[0] || {};
-    await runDB(
-      'INSERT INTO position_history (student_id, position_name, school_year) VALUES (?, ?, ?)',
-      [studentId, pos.name || 'Member', settings.school_year || '2026-2027']
-    );
-
-    await logAudit(req, 'STUDENT_APPROVED', `Approved registration for ${student.email}. Generated Student Number: ${officialStudentNumber}`);
-
-    res.redirect('/admin/registrations');
-  } catch (err) {
-    console.error('Approval error:', err);
-    res.redirect('/admin/registrations');
-  }
-});
-
-app.get('/admin/registrations/reject/:id', requireRole('ADMIN'), async (req, res) => {
-  try {
-    const studentId = req.params.id;
-    await runDB("DELETE FROM students WHERE id = ? AND status = 'PENDING'", [studentId]);
-    await logAudit(req, 'STUDENT_REJECTED', `Rejected pending registration ID: ${studentId}`);
-    res.redirect('/admin/registrations');
-  } catch (err) {
-    res.redirect('/admin/registrations');
-  }
-});
-
-// View Student QR & Enable/Disable
-app.get('/admin/students/qr/:id', requireRole('ADMIN'), async (req, res) => {
-  const students = await queryDB(
-    `SELECT s.*, p.name as position_name FROM students s
-     LEFT JOIN positions p ON s.position_id = p.id
-     WHERE s.id = ?`,
-    [req.params.id]
-  );
-  if (students.length === 0) return res.redirect('/admin/students');
-  const student = students[0];
-
-  const qrDataUrl = await QRCode.toDataURL(student.qr_token, { width: 320, margin: 1, errorCorrectionLevel: 'H' });
-
-  const content = `
-    <div style="max-width: 500px; margin: 0 auto;" class="card">
-      <div class="card-title">🔍 Student QR Code Management</div>
-      <div style="text-align: center;">
-        <img src="/uploads/photos/${student.photo}" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover;" class="student-avatar">
-        <h3 style="margin-top: 0.5rem; color: var(--primary-dark);">${student.first_name} ${student.last_name}</h3>
-        <p style="font-weight: 700; color: var(--secondary);">${student.student_number}</p>
-        <p style="color: var(--text-muted);">${student.position_name}</p>
-
-        <div style="background: white; padding: 1.25rem; border-radius: 8px; border: 1px solid var(--border); margin: 1.25rem 0;">
-          <img src="${qrDataUrl}" style="width: 220px; height: 220px;">
-          <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">Token: <code>${student.qr_token}</code></p>
+    <div class="main-content">
+        <h2 style="margin-top:0; color:#1e293b;">School & Club Settings</h2>
+        <div class="card">
+            <form action="/admin/settings" method="POST">
+                <div class="form-group"><label>School Name</label><input type="text" name="school_name" value="${settings ? settings.school_name : ''}"></div>
+                <div class="form-group"><label>Student Club Name</label><input type="text" name="club_name" value="${settings ? settings.club_name : ''}"></div>
+                <div class="form-group"><label>Club Adviser</label><input type="text" name="club_adviser" value="${settings ? settings.club_adviser : ''}"></div>
+                <div class="form-group"><label>School Year</label><input type="text" name="school_year" value="${settings ? settings.school_year : ''}"></div>
+                <button type="submit"><i class="fa-solid fa-save"></i> Save Settings</button>
+            </form>
         </div>
-
-        <div style="display: flex; gap: 0.5rem; justify-content: center;">
-          <a href="/admin/students/regenerate-qr/${student.id}" class="btn btn-warning" onclick="return confirm('Regenerate QR? The old QR code will become permanently invalid.')">🔄 Regenerate QR</a>
-          ${student.qr_status ?
-            `<a href="/admin/students/toggle-qr/${student.id}/0" class="btn btn-danger">🚫 Disable QR</a>` :
-            `<a href="/admin/students/toggle-qr/${student.id}/1" class="btn btn-success">✅ Enable QR</a>`
-          }
-        </div>
-      </div>
     </div>
-  `;
-  res.send(await renderPage('Student QR Code', content, req, 'students'));
+</body>
+</html>`);
+    });
 });
 
-app.get('/admin/students/regenerate-qr/:id', requireRole('ADMIN'), async (req, res) => {
-  const newQrToken = 'QR-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
-  await runDB('UPDATE students SET qr_token = ? WHERE id = ?', [newQrToken, req.params.id]);
-  await logAudit(req, 'QR_REGENERATED', `Regenerated QR Token for student ID: ${req.params.id}`);
-  res.redirect(`/admin/students/qr/${req.params.id}`);
+app.post('/admin/settings', isAdmin, (req, res) => {
+    const { school_name, club_name, club_adviser, school_year } = req.body;
+    db.run(`UPDATE settings SET school_name = ?, club_name = ?, club_adviser = ?, school_year = ? WHERE id = 1`,
+        [school_name, club_name, club_adviser, school_year], (err) => {
+            logAudit(req.session.user.username, 'UPDATE_SETTINGS', 'Updated system settings', req.ip);
+            res.redirect('/admin/settings');
+        });
 });
 
-app.get('/admin/students/toggle-qr/:id/:status', requireRole('ADMIN'), async (req, res) => {
-  await runDB('UPDATE students SET qr_status = ? WHERE id = ?', [parseInt(req.params.status, 10), req.params.id]);
-  await logAudit(req, 'QR_TOGGLED', `Updated QR Status to ${req.params.status} for student ID: ${req.params.id}`);
-  res.redirect(`/admin/students/qr/${req.params.id}`);
+// Root redirect
+app.get('/', (req, res) => {
+    res.redirect('/login');
 });
 
-/* ==========================================================================
-   POSITION MANAGEMENT MODULE
-   ========================================================================== */
-
-app.get('/admin/positions', requireRole('ADMIN'), async (req, res) => {
-  const positions = await queryDB('SELECT * FROM positions ORDER BY name ASC');
-
-  const rows = positions.map(p => `
-    <tr>
-      <td><strong>${p.name}</strong></td>
-      <td>${p.description || '--'}</td>
-      <td>
-        <a href="/admin/positions/delete/${p.id}" class="btn btn-danger btn-sm" onclick="return confirm('Delete this position?')">Delete</a>
-      </td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
-      <div class="card">
-        <div class="card-title">➕ Add Custom Position</div>
-        <form action="/admin/positions" method="POST">
-          <div class="form-group">
-            <label>Position Name *</label>
-            <input type="text" name="name" class="form-control" placeholder="e.g., Event Coordinator" required>
-          </div>
-          <div class="form-group">
-            <label>Description</label>
-            <textarea name="description" class="form-control" rows="3"></textarea>
-          </div>
-          <button type="submit" class="btn btn-primary">Save Position</button>
-        </form>
-      </div>
-
-      <div class="card">
-        <div class="card-title">🎖️ Active Positions Directory</div>
-        <table>
-          <thead>
-            <tr><th>Position Name</th><th>Description</th><th>Action</th></tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  res.send(await renderPage('Positions', content, req, 'positions'));
-});
-
-app.post('/admin/positions', requireRole('ADMIN'), async (req, res) => {
-  try {
-    const { name, description } = req.body;
-    await runDB('INSERT INTO positions (name, description) VALUES (?, ?)', [name.trim(), (description || '').trim()]);
-    await logAudit(req, 'POSITION_CREATED', `Created position: ${name}`);
-    res.redirect('/admin/positions');
-  } catch (err) {
-    res.redirect('/admin/positions');
-  }
-});
-
-app.get('/admin/positions/delete/:id', requireRole('ADMIN'), async (req, res) => {
-  await runDB('DELETE FROM positions WHERE id = ?', [req.params.id]);
-  await logAudit(req, 'POSITION_DELETED', `Deleted position ID: ${req.params.id}`);
-  res.redirect('/admin/positions');
-});
-
-/* ==========================================================================
-   EVENT MANAGEMENT MODULE
-   ========================================================================== */
-
-app.get('/admin/events', requireRole('ADMIN'), async (req, res) => {
-  const events = await queryDB('SELECT * FROM events ORDER BY event_date DESC, start_time ASC');
-
-  const rows = events.map(e => `
-    <tr>
-      <td><strong>${e.name}</strong></td>
-      <td>${e.event_type}</td>
-      <td>${e.event_date} (${e.start_time} - ${e.end_time})</td>
-      <td>${e.location || 'N/A'}</td>
-      <td>
-        <span class="badge ${e.status === 'ACTIVE' ? 'badge-success' : e.status === 'UPCOMING' ? 'badge-info' : 'badge-danger'}">
-          ${e.status}
-        </span>
-      </td>
-      <td>
-        <a href="/admin/events/status/${e.id}/ACTIVE" class="btn btn-success btn-sm">Set Active</a>
-        <a href="/admin/events/status/${e.id}/COMPLETED" class="btn btn-secondary btn-sm" onclick="return confirm('Complete event and auto-mark absent students?')">Complete</a>
-      </td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div class="card">
-      <div class="card-title">
-        <span>📅 Event Management</span>
-        <a href="/admin/events/create" class="btn btn-primary btn-sm">➕ Create New Event</a>
-      </div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Event Name</th>
-              <th>Type</th>
-              <th>Date & Time</th>
-              <th>Location</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.length > 0 ? rows : '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No events scheduled yet.</td></tr>'}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  res.send(await renderPage('Events', content, req, 'events'));
-});
-
-app.get('/admin/events/create', requireRole('ADMIN'), async (req, res) => {
-  const content = `
-    <div style="max-width: 650px; margin: 0 auto;" class="card">
-      <div class="card-title">📅 Create New Club Event</div>
-      <form action="/admin/events/create" method="POST">
-        <div class="form-group">
-          <label>Event Name *</label>
-          <input type="text" name="name" class="form-control" placeholder="e.g., General Assembly 2026" required>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Event Type</label>
-            <input type="text" name="event_type" class="form-control" value="General Club Attendance" required>
-          </div>
-          <div class="form-group">
-            <label>Event Date *</label>
-            <input type="date" name="event_date" class="form-control" required>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Start Time *</label>
-            <input type="time" name="start_time" class="form-control" required>
-          </div>
-          <div class="form-group">
-            <label>End Time *</label>
-            <input type="time" name="end_time" class="form-control" required>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Late Threshold (Minutes)</label>
-            <input type="number" name="late_threshold_minutes" class="form-control" value="15" required>
-          </div>
-          <div class="form-group">
-            <label>Location</label>
-            <input type="text" name="location" class="form-control" placeholder="School Auditorium">
-          </div>
-        </div>
-        <button type="submit" class="btn btn-success" style="width: 100%; justify-content: center;">Save & Publish Event</button>
-      </form>
-    </div>
-  `;
-  res.send(await renderPage('Create Event', content, req, 'events'));
-});
-
-app.post('/admin/events/create', requireRole('ADMIN'), async (req, res) => {
-  const { name, event_type, event_date, start_time, end_time, late_threshold_minutes, location } = req.body;
-  await runDB(
-    `INSERT INTO events (name, event_type, event_date, start_time, end_time, late_threshold_minutes, location, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'UPCOMING')`,
-    [name, event_type, event_date, start_time, end_time, late_threshold_minutes, location]
-  );
-  await logAudit(req, 'EVENT_CREATED', `Created event: ${name} on ${event_date}`);
-  res.redirect('/admin/events');
-});
-
-// Complete Event & Run Automatic Absent Detection
-app.get('/admin/events/status/:id/:status', requireRole('ADMIN'), async (req, res) => {
-  const { id, status } = req.params;
-  await runDB('UPDATE events SET status = ? WHERE id = ?', [status, id]);
-
-  if (status === 'COMPLETED') {
-    // Auto-Mark Absent Students who are ACTIVE and have no attendance or excused record
-    const activeStudents = await queryDB("SELECT id FROM students WHERE status = 'ACTIVE'");
-    for (const st of activeStudents) {
-      const att = await queryDB('SELECT id FROM attendance WHERE event_id = ? AND student_id = ?', [id, st.id]);
-      if (att.length === 0) {
-        await runDB("INSERT INTO attendance (event_id, student_id, status) VALUES (?, ?, 'ABSENT')", [id, st.id]);
-      }
-    }
-    await logAudit(req, 'EVENT_COMPLETED', `Completed event ID: ${id} and auto-marked missing students as ABSENT.`);
-  }
-
-  res.redirect('/admin/events');
-});
-
-/* ==========================================================================
-   A4 BOND PAPER STUDENT ID PRINTING MODULE (8 IDs PER PAGE)
-   ========================================================================== */
-
-app.get('/admin/id-cards', requireRole('ADMIN'), async (req, res) => {
-  const students = await queryDB(
-    `SELECT s.*, p.name as position_name FROM students s
-     LEFT JOIN positions p ON s.position_id = p.id
-     WHERE s.status = 'ACTIVE'
-     ORDER BY s.student_number ASC`
-  );
-
-  const settingsRows = await queryDB('SELECT * FROM settings LIMIT 1');
-  const sys = settingsRows[0] || {};
-
-  // Build ID Cards with Large QR Codes
-  const cardItems = [];
-  for (const s of students) {
-    const qrDataUrl = await QRCode.toDataURL(s.qr_token, { width: 250, margin: 1, errorCorrectionLevel: 'H' });
-    cardItems.push({ ...s, qrDataUrl });
-  }
-
-  const cardHtml = cardItems.map(s => `
-    <div class="id-card">
-      <div class="id-card-header">
-        ${sys.school_logo ? `<img src="/uploads/logos/${sys.school_logo}" class="id-logo">` : ''}
-        <div class="id-header-text">
-          <div class="id-school-name">${sys.school_name}</div>
-          <div class="id-club-name">${sys.student_club_name}</div>
-        </div>
-        ${sys.club_logo ? `<img src="/uploads/logos/${sys.club_logo}" class="id-logo">` : ''}
-      </div>
-
-      <div class="id-card-body">
-        <img src="/uploads/photos/${s.photo}" class="id-photo">
-        <div class="id-info">
-          <div class="id-name">${s.first_name} ${s.last_name}</div>
-          <div class="id-num">${s.student_number}</div>
-          <div class="id-pos">${s.position_name}</div>
-          <div class="id-sy">S.Y. ${sys.school_year}</div>
-        </div>
-      </div>
-
-      <div class="id-qr-container">
-        <img src="${s.qrDataUrl}" class="id-large-qr">
-      </div>
-    </div>
-  `).join('');
-
-  const printLayout = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Print Student ID Cards - 8 Per A4</title>
-      <style>
-        @page { size: A4 portrait; margin: 8mm; }
-        body { font-family: Arial, sans-serif; background: #f1f5f9; margin: 0; padding: 10px; }
-        .no-print { margin-bottom: 15px; background: white; padding: 12px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
-        
-        .a4-grid {
-          display: grid;
-          grid-template-columns: repeat(2, 85.6mm);
-          grid-auto-rows: 53.98mm;
-          gap: 6mm;
-          justify-content: center;
-        }
-
-        .id-card {
-          width: 85.6mm;
-          height: 53.98mm;
-          border: 1.5px solid #1e3a8a;
-          border-radius: 6px;
-          background: #ffffff;
-          box-sizing: border-box;
-          padding: 2.5mm;
-          position: relative;
-          display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-          page-break-inside: avoid;
-        }
-
-        .id-card-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          border-bottom: 1px solid #1e3a8a;
-          padding-bottom: 1mm;
-        }
-
-        .id-logo { width: 7mm; height: 7mm; object-fit: contain; }
-        .id-header-text { text-align: center; flex: 1; }
-        .id-school-name { font-size: 6.5pt; font-weight: bold; color: #1e3a8a; text-transform: uppercase; }
-        .id-club-name { font-size: 5.5pt; font-weight: bold; color: #0284c7; }
-
-        .id-card-body {
-          display: flex;
-          align-items: center;
-          gap: 2.5mm;
-          margin-top: 1mm;
-        }
-
-        .id-photo { width: 17mm; height: 17mm; object-fit: cover; border-radius: 3px; border: 1px solid #1e3a8a; }
-        .id-info { flex: 1; }
-        .id-name { font-size: 8.5pt; font-weight: bold; color: #0f172a; line-height: 1.1; }
-        .id-num { font-size: 7.5pt; font-weight: bold; color: #0284c7; margin-top: 0.5mm; }
-        .id-pos { font-size: 7pt; font-weight: bold; color: #334155; }
-        .id-sy { font-size: 5.5pt; color: #64748b; }
-
-        .id-qr-container {
-          position: absolute;
-          bottom: 2mm;
-          right: 2.5mm;
-          text-align: center;
-        }
-
-        .id-large-qr {
-          width: 20mm;
-          height: 20mm;
-          display: block;
-        }
-
-        @media print {
-          .no-print { display: none; }
-          body { background: white; padding: 0; }
-        }
-      </style>
-    </head>
-    <body>
-      <div class="no-print">
-        <div><strong>📄 A4 Student ID Printing Studio</strong> (8 Cards Per Page)</div>
-        <button onclick="window.print()" style="padding: 8px 16px; background: #0284c7; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer;">🖨️ Print Student IDs Now</button>
-      </div>
-
-      <div class="a4-grid">
-        ${cardHtml}
-      </div>
-    </body>
-    </html>
-  `;
-  res.send(printLayout);
-});
-
-/* ==========================================================================
-   REPORTS & ANALYTICS MODULE
-   ========================================================================== */
-
-app.get('/admin/reports', requireRole('ADMIN'), async (req, res) => {
-  const events = await queryDB('SELECT * FROM events ORDER BY event_date DESC');
-  const selectedEventId = req.query.event_id || (events[0] ? events[0].id : null);
-
-  let attRecords = [];
-  let eventDetail = null;
-
-  if (selectedEventId) {
-    eventDetail = (await queryDB('SELECT * FROM events WHERE id = ?', [selectedEventId]))[0];
-    attRecords = await queryDB(
-      `SELECT a.*, s.student_number, s.first_name, s.last_name, p.name as position_name FROM attendance a
-       JOIN students s ON a.student_id = s.id
-       LEFT JOIN positions p ON s.position_id = p.id
-       WHERE a.event_id = ?
-       ORDER BY s.student_number ASC`,
-      [selectedEventId]
-    );
-  }
-
-  const eventOpts = events.map(e => `<option value="${e.id}" ${e.id == selectedEventId ? 'selected' : ''}>${e.name} (${e.event_date})</option>`).join('');
-
-  const rows = attRecords.map(a => `
-    <tr>
-      <td><strong>${a.student_number}</strong></td>
-      <td>${a.first_name} ${a.last_name}</td>
-      <td>${a.position_name}</td>
-      <td>${a.time_in || '--'}</td>
-      <td>${a.time_out || '--'}</td>
-      <td><span class="badge ${a.status === 'PRESENT' ? 'badge-success' : a.status === 'LATE' ? 'badge-warning' : 'badge-danger'}">${a.status}</span></td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div class="card">
-      <div class="card-title">
-        <span>📈 Event Attendance Reports & Analytics</span>
-        ${selectedEventId ? `<button onclick="window.print()" class="btn btn-outline btn-sm">🖨️ Print Report</button>` : ''}
-      </div>
-
-      <form method="GET" action="/admin/reports" class="toolbar">
-        <div class="toolbar-group">
-          <label style="font-weight: 600; font-size: 0.85rem;">Select Event:</label>
-          <select name="event_id" class="form-control" style="width: 280px;" onchange="this.form.submit()">
-            ${eventOpts}
-          </select>
-        </div>
-      </form>
-
-      ${eventDetail ? `
-        <div style="background: #f8fafc; padding: 1rem; border-radius: 6px; border: 1px solid var(--border); margin-bottom: 1rem;">
-          <h3>${eventDetail.name} Report</h3>
-          <p style="font-size: 0.85rem; color: var(--text-muted);">Date: ${eventDetail.event_date} | Location: ${eventDetail.location || 'N/A'}</p>
-        </div>
-      ` : ''}
-
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>Student Number</th>
-              <th>Student Name</th>
-              <th>Position</th>
-              <th>Time In</th>
-              <th>Time Out</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.length > 0 ? rows : '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No attendance records found for this event.</td></tr>'}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  res.send(await renderPage('Reports', content, req, 'reports'));
-});
-
-/* ==========================================================================
-   SYSTEM SETTINGS, LOGO UPLOAD, AUDIT & BACKUP
-   ========================================================================== */
-
-app.get('/admin/settings', requireRole('ADMIN'), async (req, res) => {
-  const settings = (await queryDB('SELECT * FROM settings LIMIT 1'))[0] || {};
-
-  const content = `
-    <div style="max-width: 800px; margin: 0 auto;" class="card">
-      <div class="card-title">⚙️ School & Student Club Configuration</div>
-      <form action="/admin/settings" method="POST" enctype="multipart/form-data">
-        
-        <div class="form-row">
-          <div class="form-group">
-            <label>School Name *</label>
-            <input type="text" name="school_name" class="form-control" value="${settings.school_name || ''}" required>
-          </div>
-          <div class="form-group">
-            <label>Student Club Name *</label>
-            <input type="text" name="student_club_name" class="form-control" value="${settings.student_club_name || ''}" required>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label>Club Adviser *</label>
-            <input type="text" name="club_adviser" class="form-control" value="${settings.club_adviser || ''}" required>
-          </div>
-          <div class="form-group">
-            <label>School Year *</label>
-            <input type="text" name="school_year" class="form-control" value="${settings.school_year || '2026-2027'}" required>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label>Student Registration Control</label>
-            <select name="registration_open" class="form-control">
-              <option value="1" ${settings.registration_open ? 'selected' : ''}>🟢 Open / Enabled</option>
-              <option value="0" ${!settings.registration_open ? 'selected' : ''}>🔴 Closed / Disabled</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Student Number Prefix</label>
-            <input type="text" name="student_number_prefix" class="form-control" value="${settings.student_number_prefix || 'SC-2026-'}">
-          </div>
-        </div>
-
-        <div class="form-row" style="margin-top: 1rem;">
-          <div class="form-group">
-            <label>Upload / Replace School Logo</label>
-            <input type="file" name="school_logo" class="form-control" accept="image/*">
-            ${settings.school_logo ? `<img src="/uploads/logos/${settings.school_logo}" style="height: 50px; margin-top: 0.5rem;">` : ''}
-          </div>
-          <div class="form-group">
-            <label>Upload / Replace Club Logo</label>
-            <input type="file" name="club_logo" class="form-control" accept="image/*">
-            ${settings.club_logo ? `<img src="/uploads/logos/${settings.club_logo}" style="height: 50px; margin-top: 0.5rem;">` : ''}
-          </div>
-        </div>
-
-        <button type="submit" class="btn btn-primary" style="margin-top: 1rem;">Save Settings</button>
-      </form>
-    </div>
-  `;
-  res.send(await renderPage('Settings', content, req, 'settings'));
-});
-
-app.post('/admin/settings', requireRole('ADMIN'), upload.fields([
-  { name: 'school_logo', maxCount: 1 },
-  { name: 'club_logo', maxCount: 1 }
-]), async (req, res) => {
-  const { school_name, student_club_name, club_adviser, school_year, registration_open, student_number_prefix } = req.body;
-
-  let schoolLogo = undefined;
-  let clubLogo = undefined;
-
-  if (req.files && req.files['school_logo']) schoolLogo = req.files['school_logo'][0].filename;
-  if (req.files && req.files['club_logo']) clubLogo = req.files['club_logo'][0].filename;
-
-  let sql = `UPDATE settings SET school_name=?, student_club_name=?, club_adviser=?, school_year=?, registration_open=?, student_number_prefix=?`;
-  const params = [school_name, student_club_name, club_adviser, school_year, parseInt(registration_open, 10), student_number_prefix];
-
-  if (schoolLogo) {
-    sql += `, school_logo=?`;
-    params.push(schoolLogo);
-  }
-  if (clubLogo) {
-    sql += `, club_logo=?`;
-    params.push(clubLogo);
-  }
-
-  await runDB(sql, params);
-  await logAudit(req, 'SETTINGS_UPDATED', 'Updated school and club settings.');
-  res.redirect('/admin/settings');
-});
-
-// Audit Logs Route
-app.get('/admin/audit', requireRole('ADMIN'), async (req, res) => {
-  const logs = await queryDB('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100');
-
-  const rows = logs.map(l => `
-    <tr>
-      <td>${l.created_at || '--'}</td>
-      <td><strong>${l.user_name}</strong></td>
-      <td><span class="badge badge-info">${l.action}</span></td>
-      <td>${l.details}</td>
-      <td><code>${l.ip_address}</code></td>
-    </tr>
-  `).join('');
-
-  const content = `
-    <div class="card">
-      <div class="card-title">📜 System Security & Audit Logs</div>
-      <div style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr><th>Timestamp</th><th>User</th><th>Action</th><th>Details</th><th>IP Address</th></tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  res.send(await renderPage('Audit Logs', content, req, 'audit'));
-});
-
-// Database Backup Route
-app.get('/admin/backup', requireRole('ADMIN'), async (req, res) => {
-  const content = `
-    <div style="max-width: 600px; margin: 0 auto;" class="card">
-      <div class="card-title">💾 Database Backup & Permanent Storage</div>
-      <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">
-        Your system data is stored persistently in the database. You can trigger manual JSON database snapshots at any time for offline archival.
-      </p>
-      <a href="/admin/backup/download" class="btn btn-success">📥 Download Database JSON Snapshot</a>
-    </div>
-  `;
-  res.send(await renderPage('Backup', content, req, 'backup'));
-});
-
-app.get('/admin/backup/download', requireRole('ADMIN'), async (req, res) => {
-  const students = await queryDB('SELECT * FROM students');
-  const events = await queryDB('SELECT * FROM events');
-  const attendance = await queryDB('SELECT * FROM attendance');
-  const settings = await queryDB('SELECT * FROM settings');
-
-  const snapshot = {
-    exported_at: new Date().toISOString(),
-    settings,
-    students,
-    events,
-    attendance
-  };
-
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', `attachment; filename=club_attendance_backup_${Date.now()}.json`);
-  res.send(JSON.stringify(snapshot, null, 2));
-});
-
-/* ==========================================================================
-   EXPRESS APPLICATION BOOTSTRAP
-   ========================================================================== */
-
+// Start Server
 app.listen(PORT, () => {
-  console.log(`
-========================================================================
-🚀 SCHOOL STUDENT CLUB QR CODE ATTENDANCE SYSTEM IS ONLINE!
-========================================================================
-📍 Local Access URL : http://localhost:${PORT}
-📱 Mobile QR Scanner: http://localhost:${PORT}/scanner
-🎓 Student Registration: http://localhost:${PORT}/register
-👤 Default Admin    : admin@school.edu / admin123
-========================================================================
-  `);
+    console.log(`School Student Club QR Code Attendance System running on port ${PORT}`);
 });
