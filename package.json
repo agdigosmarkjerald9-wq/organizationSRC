@@ -1,17 +1,27 @@
 {
-  "name": "school-club-qr-attendance",
-  "version": "1.0.0",
-  "description": "Complete School Student Club QR Code Attendance Management System",
+  "name": "school-club-attendance-system",
+  "version": "2.0.0",
+  "description": "Production School Club ID & Real-Time Attendance Management System",
   "main": "app.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "dev": "nodemon app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "express-session": "^1.18.0",
-    "better-sqlite3": "^9.4.3",
-    "qrcode": "^1.5.3"
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pdfkit": "^0.15.0",
+    "qrcode": "^1.5.3",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
